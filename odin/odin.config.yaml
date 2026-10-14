@@ -1,0 +1,37 @@
+# odin repo config — marks this repo as odin-enabled. Every key here is
+# optional and repo-scoped: unset ones inherit from the hub above this repo
+# (if any) and the package's own defaults.yaml. Roster/model/delivery
+# settings live in the hub or the package's defaults, not here — run
+# `odin paths` to find the installed skill's references/config.md for the
+# full reference.
+
+# The repo's own commands, run through a POSIX shell in the run's worktree
+# (odin.core.shell.run, non-login, defaults.shell picks the interpreter).
+# Unset = that block is reported SKIPPED, never a fake green. Lines marked
+# "# detected: ..." came from this repo's own manifests — verify them.
+
+quality:
+  test: make test        # ADR-007 / LBT-5: Makefile is the command surface
+  lint: make lint        # golangci-lint, version pinned in Makefile + CI
+  typecheck: go vet ./...
+  build: make build
+
+# How a fresh run worktree becomes runnable — a clean checkout has none of
+# your node_modules/.venv/.env.
+workspace:
+  copy: []
+  setup: []
+
+# Paths no agent may modify unless it names them itself. Defaults to the
+# whole odin/ directory (this config, prompt overrides, shadow flows).
+# protected_files:
+#   - odin/
+
+# Monorepo only — path-scoped commands for one app inside this repo
+# (odin-topology.md §7). Root quality above still applies to the whole repo.
+# apps:
+#   api:
+#     path: services/api
+#     setup: ["bun install"]
+#     quality:
+#       test: bun test
