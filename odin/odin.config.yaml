@@ -22,6 +22,19 @@ workspace:
   copy: []
   setup: []
 
+# Odin's own records live under docs/ in this repo (engineer decision,
+# 2026-10-14): plans in docs/specs/, write-ups in docs/changes/. The matching
+# prompt overrides are in odin/prompts/{planner,documenter}/.
+agents:
+  - name: planner
+    writes:
+      - docs/specs/
+  - name: documenter
+    writes:
+      - docs/
+      - "**/*.md"
+      - "*.md"
+
 # Paths no agent may modify unless it names them itself. Defaults to the
 # whole odin/ directory (this config, prompt overrides, shadow flows).
 # protected_files:
