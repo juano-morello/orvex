@@ -1,0 +1,137 @@
+{
+ "rulesVersion": "crash/v1",
+ "cases": [
+  {
+   "name": "bet1-m10000",
+   "betCredits": 1,
+   "multiplierScaled": 10000,
+   "payoutCredits": 1
+  },
+  {
+   "name": "bet1-m19999",
+   "betCredits": 1,
+   "multiplierScaled": 19999,
+   "payoutCredits": 1
+  },
+  {
+   "name": "bet1-m20000",
+   "betCredits": 1,
+   "multiplierScaled": 20000,
+   "payoutCredits": 2
+  },
+  {
+   "name": "bet3-m10006",
+   "betCredits": 3,
+   "multiplierScaled": 10006,
+   "payoutCredits": 3
+  },
+  {
+   "name": "bet7-m14286",
+   "betCredits": 7,
+   "multiplierScaled": 14286,
+   "payoutCredits": 10
+  },
+  {
+   "name": "bet9999-m10001",
+   "betCredits": 9999,
+   "multiplierScaled": 10001,
+   "payoutCredits": 9999
+  },
+  {
+   "name": "bet10000-m12345",
+   "betCredits": 10000,
+   "multiplierScaled": 12345,
+   "payoutCredits": 12345
+  },
+  {
+   "name": "bet123456789-m17576",
+   "betCredits": 123456789,
+   "multiplierScaled": 17576,
+   "payoutCredits": 216987652
+  },
+  {
+   "name": "bet1000000000-m10000",
+   "betCredits": 1000000000,
+   "multiplierScaled": 10000,
+   "payoutCredits": 1000000000
+  },
+  {
+   "name": "bet1000000000-m99965968",
+   "betCredits": 1000000000,
+   "multiplierScaled": 99965968,
+   "payoutCredits": 9996596800000
+  },
+  {
+   "name": "bet1000000000-m99999999",
+   "betCredits": 1000000000,
+   "multiplierScaled": 99999999,
+   "payoutCredits": 9999999900000
+  },
+  {
+   "name": "bet0-m10000",
+   "betCredits": 0,
+   "multiplierScaled": 10000,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet-1-m10000",
+   "betCredits": -1,
+   "multiplierScaled": 10000,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet1000000001-m10000",
+   "betCredits": 1000000001,
+   "multiplierScaled": 10000,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet-9223372036854775808-m10000",
+   "betCredits": -9223372036854775808,
+   "multiplierScaled": 10000,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet1-m9999",
+   "betCredits": 1,
+   "multiplierScaled": 9999,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet1-m0",
+   "betCredits": 1,
+   "multiplierScaled": 0,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet1-m-1",
+   "betCredits": 1,
+   "multiplierScaled": -1,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet1-m100000000",
+   "betCredits": 1,
+   "multiplierScaled": 100000000,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet1-m9223372036854775807",
+   "betCredits": 1,
+   "multiplierScaled": 9223372036854775807,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet9223372036854775807-m99999999",
+   "betCredits": 9223372036854775807,
+   "multiplierScaled": 99999999,
+   "error": "out_of_range"
+  },
+  {
+   "name": "bet4611686018427387904-m99999999",
+   "betCredits": 4611686018427387904,
+   "multiplierScaled": 99999999,
+   "error": "out_of_range"
+  }
+ ]
+}

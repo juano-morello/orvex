@@ -1,0 +1,37 @@
+{
+ "rulesVersion": "crash/v1",
+ "scale": 10000,
+ "tickMicros": 10000,
+ "growthPerTick": "0.0006",
+ "edgeNumerator": 9900,
+ "minCrashPointScaled": 10000,
+ "maxCrashPointScaled": 100000000,
+ "maxTick": 15351,
+ "maxDurationMicros": 153510000,
+ "minBetCredits": 1,
+ "maxBetCredits": 1000000000,
+ "maxPayoutCredits": 9996596800000,
+ "maxStartMicros": 9223372036701265807,
+ "outcomeTag": "orvex/crash/v1/crash-point:",
+ "apdModule": "github.com/cockroachdb/apd/v3",
+ "apdVersion": "v3.2.3",
+ "apdContext": {
+  "precision": 34,
+  "maxExponent": 6144,
+  "minExponent": -6143,
+  "rounding": "half_even",
+  "traps": "DefaultTraps"
+ },
+ "oracle": {
+  "precision": 80,
+  "crossCheckPrecision": 120,
+  "minMarginToInteger": "3.726605e-5",
+  "minMarginTick": 2710
+ },
+ "rtp": {
+  "min": "0.98990100989901009897",
+  "minTick": 0,
+  "max": "0.98999999009662949582",
+  "maxTick": 15350
+ }
+}
