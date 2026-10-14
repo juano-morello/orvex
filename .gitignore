@@ -3,3 +3,6 @@ odin/data/
 
 # orchestrator request files (prompt inputs, not source)
 requests/
+
+# build output
+/bin/
