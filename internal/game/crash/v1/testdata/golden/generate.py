@@ -4,7 +4,7 @@
 Purpose
     This script produces the golden vectors that pin the arithmetic and the
     fairness derivation of ``crash/v1`` (spec
-    ``specs/e96d124d_crash-v1-math-spec.md``, section 8; ADR-004, ADR-006).
+    ``docs/specs/e96d124d_crash-v1-math-spec.md``, section 8; ADR-004, ADR-006).
     The Go package ``internal/game/crash/v1`` is tested against the JSON files
     it writes.
 
