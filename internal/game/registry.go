@@ -54,9 +54,10 @@ var (
 // Adapter is the type-erased runtime boundary for one rules version of one
 // game (ADR-003). Values cross it as the game's own Go types boxed in any;
 // a value of any other dynamic type, including nil, is rejected with
-// ErrTypeMismatch before the game runs. Errors returned by the game pass
-// through unwrapped, and any events or state returned alongside them are
-// dropped. Build Adapters with Adapt; this is not a plugin interface.
+// ErrTypeMismatch before the game or codec runs. Errors returned by the game
+// or its codec pass through unwrapped, and any events or state returned
+// alongside them are dropped. Build Adapters with Adapt; this is not a
+// plugin interface.
 type Adapter interface {
 	// Descriptor returns the versions this adapter implements.
 	Descriptor() Descriptor
@@ -69,17 +70,43 @@ type Adapter interface {
 
 	// Evolve is Game.Evolve with state and event boxed in any.
 	Evolve(state, event any) (any, error)
+
+	// EncodeConfig is Codec.EncodeConfig with cfg boxed in any.
+	EncodeConfig(cfg any) (public, secret []byte, err error)
+
+	// DecodeConfig is Codec.DecodeConfig with the config boxed in any.
+	DecodeConfig(roundID [16]byte, public, secret []byte) (any, error)
+
+	// EncodeCommand is Codec.EncodeCommand with c boxed in any.
+	EncodeCommand(c any) ([]byte, error)
+
+	// DecodeCommand is Codec.DecodeCommand with the command boxed in any.
+	DecodeCommand(b []byte) (any, error)
+
+	// EncodeEvent is Codec.EncodeEvent with e boxed in any.
+	EncodeEvent(e any) ([]byte, error)
+
+	// DecodeEvent is Codec.DecodeEvent with the event boxed in any.
+	DecodeEvent(b []byte) (any, error)
+
+	// EncodeState is Codec.EncodeState with s boxed in any.
+	EncodeState(s any) ([]byte, error)
+
+	// RejectionCode is Codec.RejectionCode.
+	RejectionCode(err error) (code string, ok bool)
 }
 
-// Adapt wraps a typed Game as the Adapter for rules version d. g must be
-// non-nil. Type arguments are inferred: game.Adapt(d, rules{}).
-func Adapt[S, C, E, Cfg any](d Descriptor, g Game[S, C, E, Cfg]) Adapter {
-	return adapter[S, C, E, Cfg]{d: d, g: g}
+// Adapt wraps a typed Game and its canonical Codec as the Adapter for rules
+// version d. g and c must be non-nil. Type arguments are inferred:
+// game.Adapt(d, rules{}, codec{}).
+func Adapt[S, C, E, Cfg any](d Descriptor, g Game[S, C, E, Cfg], c Codec[S, C, E, Cfg]) Adapter {
+	return adapter[S, C, E, Cfg]{d: d, g: g, c: c}
 }
 
 type adapter[S, C, E, Cfg any] struct {
 	d Descriptor
 	g Game[S, C, E, Cfg]
+	c Codec[S, C, E, Cfg]
 }
 
 func (a adapter[S, C, E, Cfg]) Descriptor() Descriptor {
@@ -132,6 +159,82 @@ func (a adapter[S, C, E, Cfg]) Evolve(state, event any) (any, error) {
 		return nil, err
 	}
 	return next, nil
+}
+
+func (a adapter[S, C, E, Cfg]) EncodeConfig(config any) (public, secret []byte, err error) {
+	cfg, ok := config.(Cfg)
+	if !ok {
+		return nil, nil, a.mismatch("config", config)
+	}
+	public, secret, err = a.c.EncodeConfig(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return public, secret, nil
+}
+
+func (a adapter[S, C, E, Cfg]) DecodeConfig(roundID [16]byte, public, secret []byte) (any, error) {
+	cfg, err := a.c.DecodeConfig(roundID, public, secret)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func (a adapter[S, C, E, Cfg]) EncodeCommand(command any) ([]byte, error) {
+	c, ok := command.(C)
+	if !ok {
+		return nil, a.mismatch("command", command)
+	}
+	b, err := a.c.EncodeCommand(c)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func (a adapter[S, C, E, Cfg]) DecodeCommand(b []byte) (any, error) {
+	c, err := a.c.DecodeCommand(b)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (a adapter[S, C, E, Cfg]) EncodeEvent(event any) ([]byte, error) {
+	e, ok := event.(E)
+	if !ok {
+		return nil, a.mismatch("event", event)
+	}
+	b, err := a.c.EncodeEvent(e)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func (a adapter[S, C, E, Cfg]) DecodeEvent(b []byte) (any, error) {
+	e, err := a.c.DecodeEvent(b)
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func (a adapter[S, C, E, Cfg]) EncodeState(state any) ([]byte, error) {
+	s, ok := state.(S)
+	if !ok {
+		return nil, a.mismatch("state", state)
+	}
+	b, err := a.c.EncodeState(s)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func (a adapter[S, C, E, Cfg]) RejectionCode(err error) (string, bool) {
+	return a.c.RejectionCode(err)
 }
 
 func (a adapter[S, C, E, Cfg]) mismatch(role string, got any) error {

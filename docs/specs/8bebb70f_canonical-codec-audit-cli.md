@@ -1,7 +1,9 @@
 # Canonical event codec, hash chain and `crashctl audit` (LBT-9)
 
-Status: **PROPOSED, awaiting engineer approval.** Approve, edit or reject each decision in the section 3
-table. Implementation (section 10) starts only after approval, under the same run.
+Status: **APPROVED** on 2026-10-14. The engineer approved decisions A-1 to A-20 as written, with no
+edits, and accepted every point in section 2, including the ADR-007 layout deviation and the LBT-6
+contract change. Section 0 described the planning run and no longer applies; implementation follows
+section 10, as planned in `docs/specs/8bebb70f_audit-codec-implementation.md`.
 
 - Linear: [LBT-9](https://linear.app/lbtworks/issue/LBT-9/build-canonical-event-codec-and-audit-replay-cli),
   milestone M1 · Deterministic Core, blocks LBT-10.
@@ -113,26 +115,26 @@ Tick a box to approve or edit the value. The implementation run uses approved va
 
 | ID | Decision | Proposed value | Approve |
 |---|---|---|---|
-| A-1 | Canonical encoding format | Orvex Canonical JSON (OCJ): a subset of RFC 8785 with objects, arrays and strings only; integers as D-12 strings | [ ] |
-| A-2 | Decoding discipline | Strict: only the exact canonical bytes decode; hand-written encoder and parser, no `encoding/json`, no reflection | [ ] |
-| A-3 | Scalars | ints: D-12 text in a JSON string, range-checked; bytes: fixed-length lowercase hex; UUIDs: D-11 text; enums: fixed strings; zero values always present | [ ] |
-| A-4 | crash/v1 payload schemas | Key tables in §5.3; codec in `internal/game/crash/v1/codec.go` | [ ] |
-| A-5 | Where versions live | genesis: `game`, `rulesVersion`, `schemaVersion`, `stateVersion`, `chain`; file header: `format`; state hash document: `game`, `stateVersion`; event version = `schemaVersion`; payloads carry none | [ ] |
-| A-6 | Codec in the registry | typed `game.Codec[S,C,E,Cfg]`; `Adapter` gains erased codec methods; `game.Adapt(d, g, c)` requires the codec | [ ] |
-| A-7 | Chain unit | one record per executed admitted command (accepted or rejected), events nested; genesis record at sequence 0 | [ ] |
-| A-8 | Record contents | §5.4 tables: round ID, sequence (= admission sequence), prev hash, command ID (UUID), effective time, engine build, command, result, events with event sequence | [ ] |
-| A-9 | Link hash | `SHA-256("orvex/audit/v1/record:" ‖ recordBytes)`; `prevHash` inside the record; genesis `prevHash` = 32 zero bytes; head = hash of the last record | [ ] |
-| A-10 | State hash | `SHA-256("orvex/audit/v1/state:" ‖ OCJ({"game","state","stateVersion"}))` over the full state, secrets included; at checkpoints, not per link | [ ] |
-| A-11 | Exported history file | JSON Lines: header line, then one line per record holding exactly the hashed bytes; LF; one round per file; 64 MiB line cap | [ ] |
-| A-12 | Commitment and reveal | genesis holds the commitment, header `configSecret` the seed; codec checks `SHA-256(seed) == commitment`; `InitialState` and `Evolve` recheck the outcome | [ ] |
-| A-13 | Verification stages | format → chain → rules → decode (+fairness) → per record: decision replay, then state replay, then checkpoint; first failure wins | [ ] |
-| A-14 | Historical rules selection | exact registry lookup by (game, rulesVersion); descriptor schema/state versions must match genesis; unknown format/chain/game/version → "unsupported", exit 3 | [ ] |
-| A-15 | Decision replay comparison | rejections by codec reason code; acceptances by canonical event bytes; a fail-closed `Decide` error on a recorded command fails verification | [ ] |
-| A-16 | CLI | `crashctl audit {verify\|replay\|chain} [-expect-head HEX] FILE\|-`; exit 0 ok, 1 failed, 2 usage, 3 unsupported, 4 I/O | [ ] |
-| A-17 | Packages | `internal/canonjson`, `internal/audit/chain`, `internal/audit/replay`, `internal/audit/verification` | [ ] |
-| A-18 | Golden histories | Python stdlib oracle `internal/audit/verification/testdata/golden/generate.py`; four histories; `make golden-check` runs both oracles | [ ] |
-| A-19 | Tamper and reorder cases | 26 oracle-made rehashed fixtures (R1–R26) plus 17 Go byte-mutation cases (B1–B17) | [ ] |
-| A-20 | Immutability | OCJ rules, chain v1, crash/v1 codec and the golden histories freeze with the first crash/v1 release | [ ] |
+| A-1 | Canonical encoding format | Orvex Canonical JSON (OCJ): a subset of RFC 8785 with objects, arrays and strings only; integers as D-12 strings | [x] |
+| A-2 | Decoding discipline | Strict: only the exact canonical bytes decode; hand-written encoder and parser, no `encoding/json`, no reflection | [x] |
+| A-3 | Scalars | ints: D-12 text in a JSON string, range-checked; bytes: fixed-length lowercase hex; UUIDs: D-11 text; enums: fixed strings; zero values always present | [x] |
+| A-4 | crash/v1 payload schemas | Key tables in §5.3; codec in `internal/game/crash/v1/codec.go` | [x] |
+| A-5 | Where versions live | genesis: `game`, `rulesVersion`, `schemaVersion`, `stateVersion`, `chain`; file header: `format`; state hash document: `game`, `stateVersion`; event version = `schemaVersion`; payloads carry none | [x] |
+| A-6 | Codec in the registry | typed `game.Codec[S,C,E,Cfg]`; `Adapter` gains erased codec methods; `game.Adapt(d, g, c)` requires the codec | [x] |
+| A-7 | Chain unit | one record per executed admitted command (accepted or rejected), events nested; genesis record at sequence 0 | [x] |
+| A-8 | Record contents | §5.4 tables: round ID, sequence (= admission sequence), prev hash, command ID (UUID), effective time, engine build, command, result, events with event sequence | [x] |
+| A-9 | Link hash | `SHA-256("orvex/audit/v1/record:" ‖ recordBytes)`; `prevHash` inside the record; genesis `prevHash` = 32 zero bytes; head = hash of the last record | [x] |
+| A-10 | State hash | `SHA-256("orvex/audit/v1/state:" ‖ OCJ({"game","state","stateVersion"}))` over the full state, secrets included; at checkpoints, not per link | [x] |
+| A-11 | Exported history file | JSON Lines: header line, then one line per record holding exactly the hashed bytes; LF; one round per file; 64 MiB line cap | [x] |
+| A-12 | Commitment and reveal | genesis holds the commitment, header `configSecret` the seed; codec checks `SHA-256(seed) == commitment`; `InitialState` and `Evolve` recheck the outcome | [x] |
+| A-13 | Verification stages | format → chain → rules → decode (+fairness) → per record: decision replay, then state replay, then checkpoint; first failure wins | [x] |
+| A-14 | Historical rules selection | exact registry lookup by (game, rulesVersion); descriptor schema/state versions must match genesis; unknown format/chain/game/version → "unsupported", exit 3 | [x] |
+| A-15 | Decision replay comparison | rejections by codec reason code; acceptances by canonical event bytes; a fail-closed `Decide` error on a recorded command fails verification | [x] |
+| A-16 | CLI | `crashctl audit {verify\|replay\|chain} [-expect-head HEX] FILE\|-`; exit 0 ok, 1 failed, 2 usage, 3 unsupported, 4 I/O | [x] |
+| A-17 | Packages | `internal/canonjson`, `internal/audit/chain`, `internal/audit/replay`, `internal/audit/verification` | [x] |
+| A-18 | Golden histories | Python stdlib oracle `internal/audit/verification/testdata/golden/generate.py`; four histories; `make golden-check` runs both oracles | [x] |
+| A-19 | Tamper and reorder cases | 26 oracle-made rehashed fixtures (R1–R26) plus 17 Go byte-mutation cases (B1–B17) | [x] |
+| A-20 | Immutability | OCJ rules, chain v1, crash/v1 codec and the golden histories freeze with the first crash/v1 release | [x] |
 
 ## 4. Decisions
 
