@@ -29,6 +29,8 @@ agents:
   - name: planner
     writes:
       - docs/specs/
+    # Approval specs here (LBT-9 took 28m, LBT-10 hit the 30m default) need room.
+    max_time: 60m
   - name: documenter
     writes:
       - docs/
