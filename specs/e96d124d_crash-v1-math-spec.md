@@ -1,9 +1,9 @@
 # Crash v1 mathematical specification and golden vector plan (LBT-7)
 
-Status: **PROPOSED, awaiting engineer approval.** Every item marked **Decision D-n** is a proposal.
-Nothing is frozen, and no code, golden vectors or `go.mod` changes are made, until the engineer
-approves it. ADR-004 requires these values to be frozen before the first production rules-version
-release.
+Status: **APPROVED** on 2026-10-14. The engineer approved decisions D-1 to D-14 as written, with
+no edits. Section 0 described the planning run and no longer applies; implementation follows
+section 9, as planned in `specs/e96d124d_crash-v1-implementation.md`. ADR-004 requires these
+values to be frozen before the first production rules-version release.
 
 - Linear: [LBT-7](https://linear.app/lbtworks/issue/LBT-7/freeze-crash-mathematical-specification-and-golden-vectors) (blocks LBT-8). Milestone M1, Deterministic Core.
 - Governing ADRs: ADR-004 (primary), ADR-001, ADR-002, ADR-003, ADR-006, ADR-007 (all mirrored in `docs/adr/`).
@@ -86,20 +86,20 @@ Tick a box to approve, or edit the value. The implementation run uses approved v
 
 | ID | Parameter | Proposed value | Approve |
 |---|---|---|---|
-| D-1 | Multiplier scale | `S = 10,000` (4 decimal places) | [ ] |
-| D-2 | Time quantum | `Q = 10 ms = 10,000 µs`; `tick = floor(e / Q)` | [ ] |
-| D-3 | Growth coefficient | `M(n) = floor(S * exp(0.0006 * n))`, i.e. `e^(0.06 t)` with `t` in seconds | [ ] |
-| D-4 | apd context and rounding | Precision 34, MaxExponent 6144, MinExponent -6143, `RoundHalfEven`, `apd.DefaultTraps`; one floor at the end | [ ] |
-| D-5 | Crash distribution and house edge | `C = clamp(floor(9,900 * 2^64 / (2^64 - r)), 10,000, 100,000,000)`; edge 1% | [ ] |
-| D-6 | Max multiplier and max duration | 10,000.0000x; 15,351 ticks = 153.51 s | [ ] |
-| D-7 | Limits and overflow | bet 1 to 1,000,000,000 credits; typed errors, never wrap or saturate | [ ] |
-| D-8 | Payout | `floor(bet * m / 10,000)`, exact checked product, single floor | [ ] |
-| D-9 | Deadline and eligibility | `n_c = min{n : M(n) >= C}`; `D = n_c * Q`; eligible iff `0 < e < D` | [ ] |
-| D-10 | Seed, commitment, outcome derivation | 32-byte `crypto/rand` seed; commitment `SHA-256(seed)`; `r` = first 8 bytes of `HMAC-SHA256(seed, "orvex/crash/v1/crash-point:" + roundID)` | [ ] |
-| D-11 | Round identity encoding | UUID, canonical lowercase 8-4-4-4-12 text | [ ] |
-| D-12 | Canonical encoding of numeric outputs | int64 in fixed units; canonical base-10 text; lowercase hex for bytes; no floats | [ ] |
-| D-13 | apd pin | `github.com/cockroachdb/apd/v3 v3.2.3` | [ ] |
-| D-14 | Golden vectors | Python 3 stdlib oracle (libmpdec); exhaustive tick table plus boundary sets; `make golden-check` in CI | [ ] |
+| D-1 | Multiplier scale | `S = 10,000` (4 decimal places) | [x] |
+| D-2 | Time quantum | `Q = 10 ms = 10,000 µs`; `tick = floor(e / Q)` | [x] |
+| D-3 | Growth coefficient | `M(n) = floor(S * exp(0.0006 * n))`, i.e. `e^(0.06 t)` with `t` in seconds | [x] |
+| D-4 | apd context and rounding | Precision 34, MaxExponent 6144, MinExponent -6143, `RoundHalfEven`, `apd.DefaultTraps`; one floor at the end | [x] |
+| D-5 | Crash distribution and house edge | `C = clamp(floor(9,900 * 2^64 / (2^64 - r)), 10,000, 100,000,000)`; edge 1% | [x] |
+| D-6 | Max multiplier and max duration | 10,000.0000x; 15,351 ticks = 153.51 s | [x] |
+| D-7 | Limits and overflow | bet 1 to 1,000,000,000 credits; typed errors, never wrap or saturate | [x] |
+| D-8 | Payout | `floor(bet * m / 10,000)`, exact checked product, single floor | [x] |
+| D-9 | Deadline and eligibility | `n_c = min{n : M(n) >= C}`; `D = n_c * Q`; eligible iff `0 < e < D` | [x] |
+| D-10 | Seed, commitment, outcome derivation | 32-byte `crypto/rand` seed; commitment `SHA-256(seed)`; `r` = first 8 bytes of `HMAC-SHA256(seed, "orvex/crash/v1/crash-point:" + roundID)` | [x] |
+| D-11 | Round identity encoding | UUID, canonical lowercase 8-4-4-4-12 text | [x] |
+| D-12 | Canonical encoding of numeric outputs | int64 in fixed units; canonical base-10 text; lowercase hex for bytes; no floats | [x] |
+| D-13 | apd pin | `github.com/cockroachdb/apd/v3 v3.2.3` | [x] |
+| D-14 | Golden vectors | Python 3 stdlib oracle (libmpdec); exhaustive tick table plus boundary sets; `make golden-check` in CI | [x] |
 
 ## 4. Decisions
 
