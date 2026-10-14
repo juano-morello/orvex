@@ -39,14 +39,16 @@ If a change conflicts with, or needs to deviate from, an ADR, say so explicitly 
 - Keep dependencies minimal and pinned. Justify each new module in the PR (ADR-004 names `cockroachdb/apd/v3` as the planned arithmetic dependency).
 - Released historical rules versions, golden vectors and canonical serializers are immutable (ADR-001, ADR-003, ADR-007).
 - Game `Decide`/`Evolve` code is pure: no I/O, wall clock or uncontrolled randomness (ADR-003).
+- Merged migrations in `migrations/` are immutable; change the schema with a new migration (checksums are enforced).
 
 ## Commands
 
 - `make build`: build all binaries into `bin/`.
 - `make build-gateway`, `make build-engine`, `make build-crashctl`: build one binary.
 - `make test`: `go test -race ./...`. Override with `make test GOTESTFLAGS=` on hosts without cgo.
+- `make test-integration`: the tests plus the PostgreSQL integration tests (`-tags integration`, Testcontainers). It needs a Docker daemon and fails without one. Override with `make test-integration GOTESTFLAGS=` on hosts without cgo.
 - `make lint`: golangci-lint. It requires v2.14.0. The pin lives in both `Makefile` and `.github/workflows/ci.yml`; change both together.
 - `make golden-check`: regenerate the Crash v1 golden vectors and the audit golden histories with the independent Python oracles (Python 3.11+, standard library only) and fail if they differ from the committed files. Never regenerate vectors or fixtures from Go output.
 - `make clean`: remove `bin/`.
 
-Run `make test` and `make lint` before handing off work.
+Run `make test` and `make lint` before handing off work. When you change `migrations/` or `internal/persistence/`, also run `make test-integration`.

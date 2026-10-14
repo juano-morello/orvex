@@ -1,5 +1,5 @@
-# Orvex build orchestration (ADR-007). Add targets (proto, dev, audit,
-# test-integration) only when they become meaningful.
+# Orvex build orchestration (ADR-007). Add targets (proto, dev, audit) only
+# when they become meaningful.
 
 GO ?= go
 BINARIES := gateway engine crashctl
@@ -21,7 +21,7 @@ GOLANGCI_LINT_VERSION := v2.14.0
 
 BUILD_TARGETS := $(addprefix build-,$(BINARIES))
 
-.PHONY: all build $(BUILD_TARGETS) test lint golden-check clean
+.PHONY: all build $(BUILD_TARGETS) test test-integration lint golden-check clean
 
 all: build
 
@@ -33,6 +33,10 @@ $(BUILD_TARGETS): build-%:
 
 test:
 	$(GO) test $(GOTESTFLAGS) ./...
+
+# PostgreSQL integration tests (ADR-006): Testcontainers, needs a Docker daemon.
+test-integration:
+	$(GO) test $(GOTESTFLAGS) -tags integration -count=1 ./...
 
 lint:
 	@found="$$($(GOLANGCI_LINT) version --short 2>/dev/null)"; \
