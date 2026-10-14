@@ -331,6 +331,76 @@ func TestCodecRejectsMalformed(t *testing.T) {
 	if _, err := c.DecodeConfig(workedRoundID, []byte(upper), []byte(vecConfigSecret)); !errors.Is(err, game.ErrMalformed) || errors.Is(err, game.ErrRevealMismatch) {
 		t.Errorf("DecodeConfig(uppercase commitment) = %v; want ErrMalformed only", err)
 	}
+
+	// Missing and unknown keys per type (spec section 10 step 3), derived
+	// from the valid section 5.6 vectors: every required non-type key is
+	// removed in turn, and an unknown key is added at each end of the
+	// sorted key order.
+	for _, vec := range []string{vecPlaceBet, vecStartRound, vecCashOut, vecCloseRound, vecSettleRound} {
+		if _, err := c.DecodeCommand([]byte(vec)); err != nil {
+			t.Fatalf("DecodeCommand(%s) valid vector: %v", vec, err)
+		}
+		for _, in := range keyVariants(t, vec) {
+			if got, err := c.DecodeCommand([]byte(in)); !errors.Is(err, game.ErrMalformed) || got != nil {
+				t.Errorf("DecodeCommand(%s) = %#v, %v; want ErrMalformed", in, got, err)
+			}
+		}
+	}
+	for _, vec := range []string{vecBetPlaced, vecRoundStarted, vecBetCashedOut, vecRoundCrashed, vecBetLost, vecRoundSettled} {
+		if _, err := c.DecodeEvent([]byte(vec)); err != nil {
+			t.Fatalf("DecodeEvent(%s) valid vector: %v", vec, err)
+		}
+		for _, in := range keyVariants(t, vec) {
+			if got, err := c.DecodeEvent([]byte(in)); !errors.Is(err, game.ErrMalformed) || got != nil {
+				t.Errorf("DecodeEvent(%s) = %#v, %v; want ErrMalformed", in, got, err)
+			}
+		}
+	}
+}
+
+// keyVariants returns canonical encodings of the payload vec with each
+// non-type key removed in turn, then with an unknown key added first and
+// last in key order.
+func keyVariants(t *testing.T, vec string) []string {
+	t.Helper()
+	o, err := canonjson.Unmarshal([]byte(vec))
+	if err != nil {
+		t.Fatalf("Unmarshal(%s): %v", vec, err)
+	}
+	var out []string
+	add := func(m canonjson.Object) {
+		b, err := canonjson.Marshal(m)
+		if err != nil {
+			t.Fatalf("Marshal(%v): %v", m, err)
+		}
+		out = append(out, string(b))
+	}
+	clone := func() canonjson.Object {
+		m := make(canonjson.Object, len(o)+1)
+		for k, v := range o {
+			m[k] = v
+		}
+		return m
+	}
+	removed := 0
+	for k := range o {
+		if k == "type" {
+			continue
+		}
+		m := clone()
+		delete(m, k)
+		add(m)
+		removed++
+	}
+	if removed == 0 {
+		t.Fatalf("vector %s has no non-type key to remove", vec)
+	}
+	for _, k := range []string{"aaa", "zzz"} {
+		m := clone()
+		m[k] = canonjson.String("x")
+		add(m)
+	}
+	return out
 }
 
 func TestCodecRejectsUnencodable(t *testing.T) {
