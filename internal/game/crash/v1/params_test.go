@@ -81,7 +81,8 @@ func TestApdCheck(t *testing.T) {
 }
 
 // TestNoIOImports keeps the package pure (ADR-003): no I/O, clock, randomness,
-// floats or mutable package state in any non-test file.
+// floats or mutable package state in any non-test file, covering the frozen
+// math files and the round lifecycle files (LBT-8) alike.
 func TestNoIOImports(t *testing.T) {
 	allowed := map[string]bool{
 		"crypto/hmac":                   true,
@@ -92,9 +93,18 @@ func TestNoIOImports(t *testing.T) {
 		"fmt":                           true,
 		"math":                          true,
 		"math/bits":                     true,
+		"slices":                        true,
 		"github.com/cockroachdb/apd/v3": true,
+		"github.com/juano-morello/orvex/internal/game": true,
 	}
-	allowedVars := map[string]bool{"ErrOutOfRange": true, "ErrArithmetic": true}
+	allowedVars := map[string]bool{
+		"ErrOutOfRange":         true,
+		"ErrArithmetic":         true,
+		"ErrInvalidConfig":      true,
+		"ErrInvalidState":       true,
+		"ErrEventNotApplicable": true,
+		"ErrRejected":           true,
+	}
 
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -154,7 +164,10 @@ func TestNoIOImports(t *testing.T) {
 		})
 	}
 
-	for _, want := range []string{"params.go", "curve.go", "payout.go", "fairness.go"} {
+	for _, want := range []string{
+		"params.go", "curve.go", "payout.go", "fairness.go",
+		"round.go", "commands.go", "events.go", "decide.go", "evolve.go", "projection.go",
+	} {
 		if !checked[want] {
 			t.Errorf("%s was not checked", want)
 		}
