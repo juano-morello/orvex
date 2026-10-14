@@ -11,7 +11,7 @@ import (
 
 func TestAdapterMatchesTypedGame(t *testing.T) {
 	typed := tally{}
-	a := game.Adapt(sampleDescriptor(1), tally{})
+	a := game.Adapt(sampleDescriptor(1), tally{}, tallyCodec{})
 	viaAdapter := erased{a}
 
 	if got := a.Descriptor(); got != sampleDescriptor(1) {
@@ -81,7 +81,7 @@ func TestAdapterMatchesTypedGame(t *testing.T) {
 }
 
 func TestAdapterRejectsWrongTypes(t *testing.T) {
-	a := game.Adapt(sampleDescriptor(1), tally{})
+	a := game.Adapt(sampleDescriptor(1), tally{}, tallyCodec{})
 	in := game.Input{Sequence: 1, EffectiveTimeUnixMicro: 1}
 
 	cases := []struct {
@@ -131,7 +131,7 @@ func (sloppy) Evolve(tallyState, tallyEvent) (tallyState, error) {
 }
 
 func TestAdapterGameErrors(t *testing.T) {
-	a := game.Adapt(sampleDescriptor(1), tally{})
+	a := game.Adapt(sampleDescriptor(1), tally{}, tallyCodec{})
 	in := game.Input{Sequence: 1, EffectiveTimeUnixMicro: 1}
 
 	events, err := a.Decide(baseState(), score{Player: "bob", Points: 1_000}, in)
@@ -150,7 +150,7 @@ func TestAdapterGameErrors(t *testing.T) {
 		t.Fatalf("InitialState: state = %#v, want nil", s)
 	}
 
-	sa := game.Adapt(sampleDescriptor(1), sloppy{})
+	sa := game.Adapt(sampleDescriptor(1), sloppy{}, tallyCodec{})
 	events, err = sa.Decide(baseState(), closeTally{}, in)
 	if !errors.Is(err, errClosed) || events != nil {
 		t.Fatalf("sloppy Decide = %#v, %v; want nil, errClosed", events, err)
@@ -168,7 +168,7 @@ var (
 
 func newTestRegistry(t *testing.T) *game.Registry {
 	t.Helper()
-	r, err := game.NewRegistry(game.Adapt(v1, tally{}), game.Adapt(v2, tally{}))
+	r, err := game.NewRegistry(game.Adapt(v1, tally{}, tallyCodec{}), game.Adapt(v2, tally{}, tallyCodec{}))
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestNewRegistryRejectsInvalid(t *testing.T) {
 	with := func(f func(*game.Descriptor)) game.Adapter {
 		d := v1
 		f(&d)
-		return game.Adapt(d, tally{})
+		return game.Adapt(d, tally{}, tallyCodec{})
 	}
 	cases := []struct {
 		name     string
@@ -238,7 +238,7 @@ func TestNewRegistryRejectsInvalid(t *testing.T) {
 		{
 			"duplicate rules version",
 			[]game.Adapter{
-				game.Adapt(v1, tally{}),
+				game.Adapt(v1, tally{}, tallyCodec{}),
 				with(func(d *game.Descriptor) { d.SchemaVersion = 2; d.StateVersion = 2 }),
 			},
 			game.ErrDuplicateRules,

@@ -135,7 +135,7 @@ func gamesUnderTest() []struct {
 		g    tallyGame
 	}{
 		{"typed", tally{}},
-		{"adapter", erased{game.Adapt(sampleDescriptor(1), tally{})}},
+		{"adapter", erased{game.Adapt(sampleDescriptor(1), tally{}, tallyCodec{})}},
 	}
 }
 
@@ -340,7 +340,7 @@ func TestNoIOImports(t *testing.T) {
 		})
 	}
 
-	for _, want := range []string{"contract.go", "registry.go", "sample_game_test.go"} {
+	for _, want := range []string{"codec.go", "contract.go", "registry.go", "sample_game_test.go"} {
 		if !checked[want] {
 			t.Errorf("%s was not checked", want)
 		}

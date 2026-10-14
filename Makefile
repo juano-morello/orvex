@@ -9,9 +9,11 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X $(MODULE)/internal/buildinfo.Version=$(VERSION)
 GOTESTFLAGS ?= -race
 
-# Independent Crash v1 golden-vector oracle (Python 3.11+, standard library only).
+# Independent golden oracles (Python 3.11+, standard library only): one for the
+# Crash v1 math vectors, one for the audit golden histories.
 PYTHON ?= python3
 GOLDEN_GEN := internal/game/crash/v1/testdata/golden/generate.py
+AUDIT_GOLDEN_GEN := internal/audit/verification/testdata/golden/generate.py
 
 # Pinned linter version. Keep in sync with .github/workflows/ci.yml.
 GOLANGCI_LINT ?= golangci-lint
@@ -43,6 +45,7 @@ lint:
 
 golden-check:
 	$(PYTHON) $(GOLDEN_GEN) --check
+	$(PYTHON) $(AUDIT_GOLDEN_GEN) --check
 
 clean:
 	rm -rf $(BIN_DIR)

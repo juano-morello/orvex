@@ -1,6 +1,7 @@
 // Package game defines the typed rules contract every Orvex game implements
-// (ADR-003) and the versioned, type-erased adapter and registry through which
-// the runtime and the audit verifier select a rules version (ADR-001, ADR-006).
+// (ADR-003), the canonical codec contract of each rules version (ADR-001),
+// and the versioned, type-erased adapter and registry through which the
+// runtime and the audit verifier select a rules version (ADR-001, ADR-006).
 //
 // It is deliberately small: no plugin loading, no reflection and no global
 // registration. Games are wired explicitly with Adapt and NewRegistry.
@@ -31,10 +32,12 @@ type Game[S, C, E, Cfg any] interface {
 	InitialState(config Cfg) (S, error)
 
 	// Decide validates command against state and returns the events it
-	// produces. A non-nil error rejects the command: no events apply and
-	// the runtime records a terminal command result (ADR-003). Rejections
-	// must be as deterministic as events, because decision replay re-runs
-	// Decide with the recorded Input and compares the results.
+	// produces. A non-nil error is either a deterministic rejection, which
+	// the rules version's Codec.RejectionCode recognises and the runtime
+	// records as a terminal command result, or a fail-closed error: no
+	// events and no terminal result. Rejections must be as deterministic as
+	// events, because decision replay re-runs Decide with the recorded Input
+	// and compares the results.
 	Decide(state S, command C, in Input) ([]E, error)
 
 	// Evolve applies one event to state and returns the next state. It

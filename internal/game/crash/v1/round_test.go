@@ -260,6 +260,15 @@ func TestAdapterRegistration(t *testing.T) {
 	if _, err := reg.Lookup("crash", 2); !errors.Is(err, game.ErrUnknownRules) {
 		t.Errorf("Lookup(crash, 2) = %v, want ErrUnknownRules", err)
 	}
+
+	// The adapter carries the canonical codec (LBT-9, A-6).
+	b, err := a.EncodeEvent(RoundStarted{StartedAtUnixMicro: 1760000000000000})
+	if want := `{"startedAtUnixMicro":"1760000000000000","type":"RoundStarted"}`; err != nil || string(b) != want {
+		t.Errorf("EncodeEvent(RoundStarted) = %s, %v; want %s", b, err, want)
+	}
+	if _, err := a.EncodeEvent(struct{}{}); !errors.Is(err, game.ErrTypeMismatch) {
+		t.Errorf("EncodeEvent(struct{}{}) = %v, want ErrTypeMismatch", err)
+	}
 }
 
 func TestRoundAddNonNeg(t *testing.T) {

@@ -95,7 +95,8 @@ func TestNoIOImports(t *testing.T) {
 		"math/bits":                     true,
 		"slices":                        true,
 		"github.com/cockroachdb/apd/v3": true,
-		"github.com/juano-morello/orvex/internal/game": true,
+		"github.com/juano-morello/orvex/internal/game":      true,
+		"github.com/juano-morello/orvex/internal/canonjson": true,
 	}
 	allowedVars := map[string]bool{
 		"ErrOutOfRange":         true,
@@ -166,7 +167,7 @@ func TestNoIOImports(t *testing.T) {
 
 	for _, want := range []string{
 		"params.go", "curve.go", "payout.go", "fairness.go",
-		"round.go", "commands.go", "events.go", "decide.go", "evolve.go", "projection.go",
+		"round.go", "commands.go", "events.go", "decide.go", "evolve.go", "projection.go", "codec.go",
 	} {
 		if !checked[want] {
 			t.Errorf("%s was not checked", want)

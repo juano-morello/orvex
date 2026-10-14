@@ -1,44 +1,192 @@
-// Command crashctl is the Orvex replay/audit CLI (ADR-007). It is a scaffold: no commands are implemented yet.
+// Command crashctl is the Orvex replay/audit CLI (ADR-007). It verifies
+// exported audit histories: crashctl audit verify|replay|chain (ADR-001,
+// ADR-006; decision A-16 and section 7 of
+// docs/specs/8bebb70f_canonical-codec-audit-cli.md).
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/juano-morello/orvex/internal/audit/chain"
+	"github.com/juano-morello/orvex/internal/audit/verification"
 	"github.com/juano-morello/orvex/internal/buildinfo"
+	"github.com/juano-morello/orvex/internal/canonjson"
+	"github.com/juano-morello/orvex/internal/game"
+	crashv1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 )
 
 const name = "crashctl"
 
+const usage = `usage: crashctl [-version]
+       crashctl audit verify [-expect-head HEX] FILE
+       crashctl audit replay [-expect-head HEX] FILE
+       crashctl audit chain  [-expect-head HEX] FILE
+FILE "-" reads standard input.
+`
+
+// Exit codes (spec section 7).
+const (
+	exitOK          = 0
+	exitFailed      = 1
+	exitUsage       = 2
+	exitUnsupported = 3
+	exitIO          = 4
+)
+
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-// run is the testable entry point. Exit codes: 0 success/help, 1 not
-// implemented or write failure, 2 usage error.
-func run(args []string, stdout, stderr io.Writer) int {
+// run is the testable entry point. Exit codes: 0 success or help, 1
+// verification failed (or -version could not write), 2 usage error, 3
+// unsupported artifact, 4 I/O error.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() { _, _ = fmt.Fprint(stderr, usage) }
 	showVersion := fs.Bool("version", false, "print the build version and exit")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return 0
+			return exitOK
 		}
-		return 2
+		return exitUsage
 	}
-	if fs.NArg() > 0 {
-		_, _ = fmt.Fprintf(stderr, "%s: unexpected arguments: %v\n", name, fs.Args())
-		return 2
-	}
-	if *showVersion {
+	switch {
+	case *showVersion && fs.NArg() == 0:
 		if _, err := fmt.Fprintln(stdout, buildinfo.String(name)); err != nil {
-			return 1
+			return exitFailed
 		}
-		return 0
+		return exitOK
+	case fs.NArg() == 0:
+		_, _ = fmt.Fprint(stderr, usage)
+		return exitUsage
+	case !*showVersion && fs.Arg(0) == "audit":
+		return runAudit(fs.Args()[1:], stdin, stdout, stderr)
+	default:
+		_, _ = fmt.Fprintf(stderr, "%s: unexpected arguments: %v\n", name, fs.Args())
+		return exitUsage
 	}
-	_, _ = fmt.Fprintf(stderr, "%s: not implemented yet\n", name)
-	return 1
+}
+
+func runAudit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		_, _ = fmt.Fprint(stderr, usage)
+		return exitUsage
+	}
+	sub := args[0]
+	var mode verification.Mode
+	switch sub {
+	case "verify":
+		mode = verification.ModeVerify
+	case "replay":
+		mode = verification.ModeReplay
+	case "chain":
+		mode = verification.ModeChain
+	default:
+		_, _ = fmt.Fprintf(stderr, "%s: audit: unknown subcommand %q\n%s", name, sub, usage)
+		return exitUsage
+	}
+	prefix := name + ": audit " + sub + ": "
+
+	fs := flag.NewFlagSet(name+" audit "+sub, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		_, _ = fmt.Fprintf(stderr, "usage: %s audit %s [-expect-head HEX] FILE\n", name, sub)
+		fs.PrintDefaults()
+	}
+	expectHead := fs.String("expect-head", "", "fail unless the history head equals this `HEX` value (64 lowercase hex characters)")
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitUsage
+	}
+	opt := verification.Options{Mode: mode}
+	headSet := false
+	fs.Visit(func(f *flag.Flag) { headSet = headSet || f.Name == "expect-head" })
+	if headSet {
+		b, err := canonjson.ParseHex(canonjson.String(*expectHead), len(chain.Hash{}))
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "%s-expect-head must be 64 lowercase hex characters\n", prefix)
+			return exitUsage
+		}
+		var h chain.Hash
+		copy(h[:], b)
+		opt.ExpectHead = &h
+	}
+	if fs.NArg() != 1 {
+		_, _ = fmt.Fprintf(stderr, "%swant exactly one FILE, got %d arguments\n", prefix, fs.NArg())
+		fs.Usage()
+		return exitUsage
+	}
+
+	in := stdin
+	if path := fs.Arg(0); path != "-" {
+		f, err := os.Open(path)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "%s%v\n", prefix, err)
+			return exitIO
+		}
+		defer func() { _ = f.Close() }()
+		in = f
+	}
+
+	if mode != verification.ModeChain {
+		reg, err := game.NewRegistry(crashv1.Adapter())
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "%s%v\n", prefix, err)
+			return exitFailed
+		}
+		opt.Registry = reg
+	}
+
+	rep, err := verification.Verify(in, opt)
+	if err != nil {
+		var f *verification.Failure
+		if !errors.As(err, &f) {
+			_, _ = fmt.Fprintf(stderr, "%s%v\n", prefix, err)
+			return exitIO
+		}
+		_, _ = fmt.Fprintf(stderr, "%s%v\n", prefix, f)
+		if f.Unsupported {
+			return exitUnsupported
+		}
+		return exitFailed
+	}
+
+	if _, err := stdout.Write(report(rep, mode)); err != nil {
+		_, _ = fmt.Fprintf(stderr, "%swrite report: %v\n", prefix, err)
+		return exitIO
+	}
+	return exitOK
+}
+
+// report formats the success report of spec section 7.
+func report(rep verification.Report, mode verification.Mode) []byte {
+	var b bytes.Buffer
+	_, _ = fmt.Fprintf(&b, "verifier %s\n", buildinfo.String(name))
+	_, _ = fmt.Fprintf(&b, "format %s chain %s\n", rep.Format, rep.Chain)
+	_, _ = fmt.Fprintf(&b, "round %s\n", canonjson.UUID(rep.RoundID))
+	d := rep.Descriptor
+	if mode != verification.ModeChain {
+		_, _ = fmt.Fprintf(&b, "rules %s %d schema %d state %d\n", d.Game, d.RulesVersion, d.SchemaVersion, d.StateVersion)
+	}
+	_, _ = fmt.Fprintf(&b, "chain ok records %d head %s\n", rep.Records, rep.Head)
+	if mode != verification.ModeChain {
+		_, _ = fmt.Fprintf(&b, "fairness ok\n")
+	}
+	if mode == verification.ModeVerify {
+		_, _ = fmt.Fprintf(&b, "decision-replay ok commands %d accepted %d rejected %d events %d\n",
+			rep.Commands, rep.Accepted, rep.Rejected, rep.Events)
+	}
+	for _, cp := range rep.Checkpoints {
+		_, _ = fmt.Fprintf(&b, "state-replay ok sequence %d state %s\n", cp.Sequence, cp.StateHash)
+	}
+	b.WriteString("ok\n")
+	return b.Bytes()
 }
