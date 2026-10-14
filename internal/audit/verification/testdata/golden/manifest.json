@@ -1,0 +1,546 @@
+{
+ "format": "orvex/audit-history/v1",
+ "histories": [
+  {
+   "accepted": 8,
+   "checkpoints": [
+    {
+     "sequence": 0,
+     "stateHash": "1c98ea460213ad0d5900a92fbf37cc3078fa9e822d2065a65037b667734de7e7"
+    },
+    {
+     "sequence": 9,
+     "stateHash": "bbf9bc3861a0bdcfccf201b185f4f08a9da2c8c61a53142a5caf13b1edd9f90f"
+    },
+    {
+     "sequence": 22,
+     "stateHash": "ba0cff56c3e9473736d3ef45dfc2d9cd4d4cf0f31ea6f600af9ada84125bb02a"
+    }
+   ],
+   "commands": 22,
+   "events": 9,
+   "file": "worked-example.jsonl",
+   "head": "7cf8cc4b1807099cdd1f16cbc0c790f1a877f30b696ebc0de751997d73ac3da7",
+   "name": "worked-example",
+   "records": 23,
+   "rejected": 14
+  },
+  {
+   "accepted": 4,
+   "checkpoints": [
+    {
+     "sequence": 5,
+     "stateHash": "e2279a511cb001a65fd7d4d5ae02cddd0e16ad69fe3ca5b84771fc7f94b51b1c"
+    }
+   ],
+   "commands": 5,
+   "events": 5,
+   "file": "instant-crash.jsonl",
+   "head": "feea2c86497a5af3450c768129b71626619ae594c5f933b41ca7613e1a6d64da",
+   "name": "instant-crash",
+   "records": 6,
+   "rejected": 1
+  },
+  {
+   "accepted": 3,
+   "checkpoints": [
+    {
+     "sequence": 3,
+     "stateHash": "5c721dac63311a77641622be880591c77d2997aaa8296f7f7ffbbd20065d0ef8"
+    }
+   ],
+   "commands": 3,
+   "events": 3,
+   "file": "empty-round.jsonl",
+   "head": "700d572f193400c59c64b24e3989d8a4477b9791a689ecfdfc0e47de35229bd6",
+   "name": "empty-round",
+   "records": 4,
+   "rejected": 0
+  },
+  {
+   "accepted": 3,
+   "checkpoints": [
+    {
+     "sequence": 0,
+     "stateHash": "9eafd3962055c7ef130563c7d46870628fc38a8b85e4070816540edec91dde09"
+    },
+    {
+     "sequence": 3,
+     "stateHash": "559fa7527d33184bbc9fe6842a1c1c6fb26620e77f62f52101a06a2972c57e28"
+    }
+   ],
+   "commands": 3,
+   "events": 3,
+   "file": "in-progress.jsonl",
+   "head": "f041d95d5bb917ce0f0d51d30c47738c1b97932bebd26ac7f117f98a279c46f6",
+   "name": "in-progress",
+   "records": 4,
+   "rejected": 0
+  }
+ ],
+ "tamper": [
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "9",
+     "stage": "state-replay"
+    },
+    {
+     "args": [],
+     "command": "chain",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "swap records 1 and 2 (bob's bet first), renumber sequence and eventSequence",
+   "file": "tamper/reorder-bets.jsonl",
+   "name": "reorder-bets"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "9",
+     "stage": "decision-replay"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 1,
+     "sequence": "9",
+     "stage": "state-replay"
+    }
+   ],
+   "description": "move record 12 to position 9; shift 9-11 to 10-12; renumber",
+   "file": "tamper/cashout-before-start.jsonl",
+   "name": "cashout-before-start"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "12",
+     "stage": "decision-replay"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 1,
+     "sequence": "12",
+     "stage": "state-replay"
+    }
+   ],
+   "description": "record 12 payoutCredits 134 -> 135",
+   "file": "tamper/payout-edited.jsonl",
+   "name": "payout-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "12",
+     "stage": "decision-replay"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "record 12 effectiveTimeUnixMicro +10,000 (event unchanged)",
+   "file": "tamper/effective-time-edited.jsonl",
+   "name": "effective-time-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "13",
+     "stage": "decision-replay"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "record 13 reason no_bet -> wrong_phase",
+   "file": "tamper/rejection-reason-edited.jsonl",
+   "name": "rejection-reason-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "17",
+     "stage": "decision-replay"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 1,
+     "sequence": "21",
+     "stage": "state-replay"
+    }
+   ],
+   "description": "record 17 result -> rejected deadline_passed, events removed, later eventSequence renumbered",
+   "file": "tamper/accepted-to-rejected.jsonl",
+   "name": "accepted-to-rejected"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "19",
+     "stage": "decision-replay"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 1,
+     "sequence": "19",
+     "stage": "state-replay"
+    }
+   ],
+   "description": "record 19 crashPointScaled -> 20000",
+   "file": "tamper/crash-point-edited.jsonl",
+   "name": "crash-point-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "0",
+     "stage": "fairness"
+    },
+    {
+     "args": [],
+     "command": "chain",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "genesis commitment -> SHA-256(32 x 0x01)",
+   "file": "tamper/commitment-edited.jsonl",
+   "name": "commitment-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "0",
+     "stage": "chain"
+    }
+   ],
+   "description": "genesis prevHash last digit -> 1",
+   "file": "tamper/genesis-prevhash-nonzero.jsonl",
+   "name": "genesis-prevhash-nonzero"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "7",
+     "stage": "chain"
+    }
+   ],
+   "description": "record 7 roundId -> ...000000000009",
+   "file": "tamper/roundid-mismatch.jsonl",
+   "name": "roundid-mismatch"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "12",
+     "stage": "chain"
+    }
+   ],
+   "description": "record 12 eventSequence 5 -> 6",
+   "file": "tamper/event-sequence-gap.jsonl",
+   "name": "event-sequence-gap"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "8",
+     "stage": "chain"
+    }
+   ],
+   "description": "record 8 commandId = record 7's",
+   "file": "tamper/duplicate-command-id.jsonl",
+   "name": "duplicate-command-id"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "4",
+     "stage": "chain"
+    }
+   ],
+   "description": "record 4 gains a BetPlaced event at eventSequence 4; later ones renumbered",
+   "file": "tamper/rejected-with-events.jsonl",
+   "name": "rejected-with-events"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 3,
+     "sequence": "0",
+     "stage": "format"
+    }
+   ],
+   "description": "genesis chain -> orvex/audit/v2",
+   "file": "tamper/chain-v2.jsonl",
+   "name": "chain-v2"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 3,
+     "sequence": "0",
+     "stage": "rules"
+    },
+    {
+     "args": [],
+     "command": "chain",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "genesis rulesVersion -> 2",
+   "file": "tamper/rules-version-2.jsonl",
+   "name": "rules-version-2"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 3,
+     "sequence": "0",
+     "stage": "rules"
+    }
+   ],
+   "description": "genesis schemaVersion -> 2",
+   "file": "tamper/schema-version-2.jsonl",
+   "name": "schema-version-2"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 3,
+     "sequence": "0",
+     "stage": "rules"
+    }
+   ],
+   "description": "genesis stateVersion -> 2",
+   "file": "tamper/state-version-2.jsonl",
+   "name": "state-version-2"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 3,
+     "sequence": "0",
+     "stage": "rules"
+    }
+   ],
+   "description": "genesis game -> dice",
+   "file": "tamper/unknown-game.jsonl",
+   "name": "unknown-game"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "5",
+     "stage": "format"
+    }
+   ],
+   "description": "record 5 written with sequence as its first key (raw bytes, hash over them)",
+   "file": "tamper/unsorted-keys.jsonl",
+   "name": "unsorted-keys"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "5",
+     "stage": "format"
+    }
+   ],
+   "description": "record 5 \"sequence\":\"5\" -> \"sequence\":5",
+   "file": "tamper/json-number.jsonl",
+   "name": "json-number"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "1",
+     "stage": "decode"
+    }
+   ],
+   "description": "record 1 command betCredits -> \"0100\"",
+   "file": "tamper/leading-zero-int.jsonl",
+   "name": "leading-zero-int"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "0",
+     "stage": "decode"
+    }
+   ],
+   "description": "genesis config commitment in uppercase",
+   "file": "tamper/uppercase-hex.jsonl",
+   "name": "uppercase-hex"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "1",
+     "stage": "decode"
+    }
+   ],
+   "description": "record 1 event gains \"note\":\"x\"",
+   "file": "tamper/unknown-event-field.jsonl",
+   "name": "unknown-event-field"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "1",
+     "stage": "decode"
+    }
+   ],
+   "description": "record 1 event type -> BetVoided",
+   "file": "tamper/unknown-event-type.jsonl",
+   "name": "unknown-event-type"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "5",
+     "stage": "format"
+    }
+   ],
+   "description": "record 5 kind -> admission",
+   "file": "tamper/unknown-record-kind.jsonl",
+   "name": "unknown-record-kind"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    },
+    {
+     "args": [
+      "-expect-head",
+      "7cf8cc4b1807099cdd1f16cbc0c790f1a877f30b696ebc0de751997d73ac3da7"
+     ],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "21",
+     "stage": "chain"
+    }
+   ],
+   "description": "delete record 13 (no_bet); renumber 14-22 -> 13-21; final checkpoint sequence -> 21 (hash unchanged)",
+   "file": "tamper/delete-rejection.jsonl",
+   "name": "delete-rejection"
+  }
+ ]
+}

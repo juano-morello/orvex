@@ -31,7 +31,7 @@ func Descriptor() game.Descriptor {
 
 // Adapter returns the type-erased crash/v1 adapter for game.NewRegistry.
 func Adapter() game.Adapter {
-	return game.Adapt(Descriptor(), Rules{})
+	return game.Adapt(Descriptor(), Rules{}, Codec{})
 }
 
 // MaxBetsPerRound is the hard crash/v1 limit on bets in one round (LBT-8;

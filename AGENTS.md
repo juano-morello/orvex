@@ -46,7 +46,7 @@ If a change conflicts with, or needs to deviate from, an ADR, say so explicitly 
 - `make build-gateway`, `make build-engine`, `make build-crashctl`: build one binary.
 - `make test`: `go test -race ./...`. Override with `make test GOTESTFLAGS=` on hosts without cgo.
 - `make lint`: golangci-lint. It requires v2.14.0. The pin lives in both `Makefile` and `.github/workflows/ci.yml`; change both together.
-- `make golden-check`: regenerate the Crash v1 golden vectors with the independent Python oracle (Python 3.11+, standard library only) and fail if they differ from the committed files. Never regenerate vectors from Go output.
+- `make golden-check`: regenerate the Crash v1 golden vectors and the audit golden histories with the independent Python oracles (Python 3.11+, standard library only) and fail if they differ from the committed files. Never regenerate vectors or fixtures from Go output.
 - `make clean`: remove `bin/`.
 
 Run `make test` and `make lint` before handing off work.
