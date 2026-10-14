@@ -11,7 +11,10 @@
 # "# detected: ..." came from this repo's own manifests — verify them.
 
 quality:
-  test: make test        # ADR-007 / LBT-5: Makefile is the command surface
+  # ADR-007 / LBT-5: Makefile is the command surface. Integration tests
+  # (real PostgreSQL via Testcontainers, needs Docker) join odin's loop from
+  # LBT-10 on (engineer decision, 2026-10-14).
+  test: make test && make test-integration
   lint: make lint        # golangci-lint, version pinned in Makefile + CI
   typecheck: go vet ./...
   build: make build
