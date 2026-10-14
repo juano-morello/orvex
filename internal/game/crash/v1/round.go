@@ -169,7 +169,7 @@ var (
 )
 
 // Rules implements game.Game[State, Command, Event, Config] for crash/v1
-// (ADR-003, ADR-004, LBT-8; spec specs/712614a2_crash-lifecycle-rules.md).
+// (ADR-003, ADR-004, LBT-8; spec docs/specs/712614a2_crash-lifecycle-rules.md).
 //
 // A round moves BETTING -> RUNNING -> CRASHED -> SETTLED. Players place one
 // bet each while BETTING and cash out while RUNNING strictly before the

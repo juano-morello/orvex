@@ -1,5 +1,5 @@
 // Package v1 holds the frozen arithmetic and fairness derivation of Crash rules
-// "crash/v1" (ADR-004; LBT-7; spec specs/e96d124d_crash-v1-math-spec.md).
+// "crash/v1" (ADR-004; LBT-7; spec docs/specs/e96d124d_crash-v1-math-spec.md).
 //
 // Its functions are pure and deterministic: no I/O, no clock, no randomness and
 // no package state. The Crash Decide/Evolve (LBT-8) may therefore call them
