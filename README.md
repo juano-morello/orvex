@@ -2,7 +2,7 @@
 
 Orvex is a deterministic, audit-first multiplayer Crash game platform. It uses simulated credits only.
 
-Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-module-and-repository-conventions)). No game, runtime or persistence logic exists yet.
+Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-module-and-repository-conventions)) plus the game contract ([LBT-6](https://linear.app/lbtworks/issue/LBT-6/implement-generic-game-contract-and-versioned-adapter)). No Crash rules, runtime or persistence logic exists yet.
 
 ## Layout
 
@@ -10,6 +10,7 @@ Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-mo
 - `cmd/engine`: game execution service (scaffold)
 - `cmd/crashctl`: replay/audit CLI (scaffold)
 - `internal/buildinfo`: build identifier stamped at link time
+- `internal/game`: typed game contract, deterministic input envelope, versioned adapter and rules registry (ADR-003)
 - `docs/adr`: architecture decision records ADR-001 to ADR-007
 
 ## Development
