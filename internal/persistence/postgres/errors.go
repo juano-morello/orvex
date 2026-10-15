@@ -30,6 +30,9 @@ const (
 	// CodeRecordBinding: chain record bytes disagree with the record's
 	// columns, its admission or its round.
 	CodeRecordBinding = "OX008"
+	// CodeHoldUnreleased: at commit, a command record's admission still
+	// holds credits (LBT-12 spec E-11).
+	CodeHoldUnreleased = "OX009"
 )
 
 // Standard SQLSTATEs that IsRetryable accepts.

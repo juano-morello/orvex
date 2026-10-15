@@ -40,6 +40,7 @@ func TestIsRetryable(t *testing.T) {
 		{"deadlock", fmt.Errorf("commit: %w", &pgconn.PgError{Code: "40P01"}), true},
 		{"unique violation", &pgconn.PgError{Code: "23505"}, false},
 		{"append-only", &pgconn.PgError{Code: CodeAppendOnly}, false},
+		{"hold unreleased", &pgconn.PgError{Code: CodeHoldUnreleased}, false},
 		{"nil", nil, false},
 		{"plain error", errors.New("boom"), false},
 	}
@@ -49,5 +50,25 @@ func TestIsRetryable(t *testing.T) {
 				t.Errorf("IsRetryable = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCodes pins the class OX SQLSTATEs the migrations raise.
+func TestCodes(t *testing.T) {
+	codes := []struct{ got, want string }{
+		{CodeAppendOnly, "OX001"},
+		{CodeLedgerAccount, "OX002"},
+		{CodeDownRefused, "OX003"},
+		{CodeNotFenced, "OX004"},
+		{CodeHeadRegression, "OX005"},
+		{CodeOutboxImmutable, "OX006"},
+		{CodeEncoding, "OX007"},
+		{CodeRecordBinding, "OX008"},
+		{CodeHoldUnreleased, "OX009"},
+	}
+	for _, c := range codes {
+		if c.got != c.want {
+			t.Errorf("code = %q, want %q", c.got, c.want)
+		}
 	}
 }

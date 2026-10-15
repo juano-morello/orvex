@@ -125,14 +125,14 @@ func (m Migration) fileName(dir string) string {
 	return fmt.Sprintf("%04d_%s.%s.sql", m.Version, m.Name, dir)
 }
 
-var header = regexp.MustCompile(`^-- ([0-9]{4}) ([a-z][a-z0-9_]*): .+ \((?:LBT-10 spec P|LBT-11 spec S)-[0-9]+[^)]*\)$`)
+var header = regexp.MustCompile(`^-- ([0-9]{4}) ([a-z][a-z0-9_]*): .+ \(LBT-[0-9]+ spec [A-Z]-[0-9]+[^)]*\)$`)
 
 func TestEmbeddedMigrations(t *testing.T) {
 	ms, err := LoadMigrations(migrations.FS)
 	if err != nil {
 		t.Fatalf("LoadMigrations(migrations.FS): %v", err)
 	}
-	want := []string{"foundation", "rounds_admissions", "chain_execution", "snapshots", "ledger", "outbox", "admission_window"}
+	want := []string{"foundation", "rounds_admissions", "chain_execution", "snapshots", "ledger", "outbox", "admission_window", "execution_ledger", "close_bound"}
 	if len(ms) < len(want) {
 		t.Fatalf("got %d migrations, want at least %d", len(ms), len(want))
 	}
@@ -147,7 +147,7 @@ func TestEmbeddedMigrations(t *testing.T) {
 			first, _, _ := strings.Cut(body, "\n")
 			h := header.FindStringSubmatch(first)
 			if h == nil || h[1] != fmt.Sprintf("%04d", m.Version) || h[2] != m.Name {
-				t.Errorf("%04d %s: first line %q is not \"-- %04d %s: <purpose> (LBT-10 spec P-n)\" or \"(LBT-11 spec S-n)\"", m.Version, m.Name, first, m.Version, m.Name)
+				t.Errorf("%04d %s: first line %q is not \"-- %04d %s: <purpose> (LBT-n spec X-n)\"", m.Version, m.Name, first, m.Version, m.Name)
 			}
 		}
 	}

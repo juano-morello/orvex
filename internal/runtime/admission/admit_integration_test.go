@@ -382,7 +382,7 @@ func rawAdmit(t *testing.T, q interface {
 		t.Fatal(err)
 	}
 	var outcome string
-	if err := q.QueryRow(ctx, `SELECT outcome FROM orvex.admit_command($1, 'crash', 1, $2, $3, 'ordinary', NULL, NULL, NULL, $4, $5)`,
+	if err := q.QueryRow(ctx, `SELECT outcome FROM orvex.admit_command($1, 'crash', 1, $2, $3, 'ordinary', NULL, NULL, $4, $5)`,
 		round, id, b, lockMs, idleMs).Scan(&outcome); err != nil {
 		t.Fatalf("admit_command: %v", err)
 	}
@@ -487,12 +487,12 @@ func TestFastPathSkipsLock(t *testing.T) {
 	e := newEnv(t, 0)
 	s := newSequencer(t, e.pool, func(c *admission.Config) { c.LockTimeout = 30 * time.Second })
 	round := newRoundID()
-	createRound(t, e.pool, round, testSeed)
+	createRound(t, e.pool, round, instantSeed(t, round))
 
-	start := mustAdmit(t, s, request(round, cmdID(1), startRound))
+	mustAdmit(t, s, request(round, cmdID(1), startRound))
 	admitted := request(round, cmdID(2), cashOut("alice"))
 	first := mustAdmit(t, s, admitted)
-	mustAdmit(t, s, closeRequest(round, cmdID(3), start.EffectiveTimeUnixMicro))
+	mustAdmit(t, s, closeRequest(round, cmdID(3)))
 
 	holdHead(t, e, round)
 	within := func(name string, fn func(c context.Context)) {

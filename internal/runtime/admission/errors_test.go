@@ -30,13 +30,13 @@ func TestRejectedError(t *testing.T) {
 }
 
 func TestClosureNotDueError(t *testing.T) {
-	e := &ClosureNotDueError{EffectiveTimeUnixMicro: 1760000000123457, NotBeforeUnixMicro: 1760000009410000}
+	e := &ClosureNotDueError{EffectiveTimeUnixMicro: 1760000000123457}
 	err := fmt.Errorf("wrapped: %w", e)
 	if !errors.Is(err, ErrClosureNotDue) {
 		t.Error("errors.Is(err, ErrClosureNotDue) = false")
 	}
 	var got *ClosureNotDueError
-	if !errors.As(err, &got) || got.EffectiveTimeUnixMicro != 1760000000123457 || got.NotBeforeUnixMicro != 1760000009410000 {
+	if !errors.As(err, &got) || got.EffectiveTimeUnixMicro != 1760000000123457 {
 		t.Errorf("errors.As recovered %+v", got)
 	}
 	if strings.ContainsAny(e.Error(), "0123456789") {

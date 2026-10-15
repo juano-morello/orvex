@@ -111,8 +111,8 @@ func (tx *fakeTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 		return fakeRow{vals: []any{r.round, r.sequence, r.effTime, r.command, r.status, r.reason}}
 	}
 	a := tx.admit
-	if len(args) != 11 {
-		tx.db.t.Errorf("admit_command called with %d arguments, want 11", len(args))
+	if len(args) != 10 {
+		tx.db.t.Errorf("admit_command called with %d arguments, want 10", len(args))
 	}
 	if a.callErr != nil {
 		return fakeRow{err: a.callErr}
@@ -291,7 +291,6 @@ func TestNewValidation(t *testing.T) {
 func TestAdmitValidation(t *testing.T) {
 	db := &fakeDB{t: t, forbid: true}
 	s := newTestSequencer(t, db, nil)
-	closeRound := request(v1.CloseRound{Authority: v1.AuthoritySystem})
 	cases := []struct {
 		name string
 		edit func(*Request)
@@ -299,9 +298,6 @@ func TestAdmitValidation(t *testing.T) {
 	}{
 		{"nil round id", func(r *Request) { r.RoundID = [16]byte{} }, ErrInvalidRequest},
 		{"nil command id", func(r *Request) { r.CommandID = [16]byte{} }, ErrInvalidRequest},
-		{"not-before on CashOut", func(r *Request) { r.NotBeforeUnixMicro = 5 }, ErrInvalidRequest},
-		{"close with not-before 0", func(r *Request) { *r = closeRound }, ErrInvalidRequest},
-		{"close with not-before -1", func(r *Request) { *r = closeRound; r.NotBeforeUnixMicro = -1 }, ErrInvalidRequest},
 		{"game dice", func(r *Request) { r.Game = "dice" }, ErrUnknownRules},
 		{"rules version 2", func(r *Request) { r.RulesVersion = 2 }, ErrUnknownRules},
 		{"unencodable authority", func(r *Request) { r.Command = v1.PlaceBet{Authority: 7, Player: "alice", BetCredits: 1} }, ErrInvalidCommand},
@@ -338,7 +334,6 @@ func TestAdmitValidation(t *testing.T) {
 
 func TestAdmitOutcomeMapping(t *testing.T) {
 	closeReq := request(v1.CloseRound{Authority: v1.AuthoritySystem})
-	closeReq.NotBeforeUnixMicro = 1000
 	nilRow := func(outcome string) attemptScript { return attemptScript{outcome: outcome} }
 	cases := []struct {
 		name    string
@@ -357,11 +352,11 @@ func TestAdmitOutcomeMapping(t *testing.T) {
 		{name: "not_due", req: closeReq, script: attemptScript{outcome: "not_due", effTime: new(int64(900))}, wantErr: ErrClosureNotDue,
 			check: func(t *testing.T, err error) {
 				var e *ClosureNotDueError
-				if !errors.As(err, &e) || e.EffectiveTimeUnixMicro != 900 || e.NotBeforeUnixMicro != 1000 {
-					t.Errorf("err = %#v, want ClosureNotDueError{900, 1000}", err)
+				if !errors.As(err, &e) || e.EffectiveTimeUnixMicro != 900 {
+					t.Errorf("err = %#v, want ClosureNotDueError{900}", err)
 				}
 			}},
-		{name: "invalid_not_before", req: closeReq, script: nilRow("invalid_not_before"), wantErr: ErrInvalidRequest},
+		{name: "retired invalid_not_before", req: closeReq, script: nilRow("invalid_not_before"), wantErr: ErrInternal},
 		{name: "rules_mismatch", req: cashOut(), script: nilRow("rules_mismatch"), wantErr: ErrInvalidRequest},
 		{name: "not_found", req: cashOut(), script: nilRow("not_found"), wantErr: ErrRoundNotFound},
 		{name: "corrupt", req: cashOut(), script: nilRow("corrupt"), wantErr: ErrInternal},

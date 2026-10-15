@@ -171,9 +171,9 @@ func mustUUID(s string) [16]byte {
 }
 
 // createRound creates a crash/v1 round as round creation would: rounds,
-// round_secrets, both heads with their defaults, and the genesis chain
-// record, in one execution transaction. It returns the round's config and
-// initial state.
+// round_secrets with the round's secret close offset D, both heads with
+// their defaults, and the genesis chain record, in one execution
+// transaction. It returns the round's config and initial state.
 func createRound(t *testing.T, db *pgxpool.Pool, roundID [16]byte, seed [32]byte) (v1.Config, v1.State) {
 	t.Helper()
 	return createRoundRules(t, db, roundID, seed, v1.RulesVersionNumber)
@@ -183,11 +183,27 @@ func createRound(t *testing.T, db *pgxpool.Pool, roundID [16]byte, seed [32]byte
 // and the genesis record overridden.
 func createRoundRules(t *testing.T, db *pgxpool.Pool, roundID [16]byte, seed [32]byte, rules game.RulesVersion) (v1.Config, v1.State) {
 	t.Helper()
+	_, state := roundConfig(t, roundID, seed)
+	return createRoundWith(t, db, roundID, seed, rules, &state.CrashDeadlineOffsetMicros)
+}
+
+// roundConfig returns the config createRound uses and its initial state.
+func roundConfig(t *testing.T, roundID [16]byte, seed [32]byte) (v1.Config, v1.State) {
+	t.Helper()
 	cfg := v1.Config{RoundID: roundID, Seed: seed, MinBetCredits: 1, MaxBetCredits: 1_000_000_000, MaxBets: 100}
 	state, err := v1.Rules{}.InitialState(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return cfg, state
+}
+
+// createRoundWith is createRoundRules with round_secrets.close_offset_micros
+// set to *offset, or NULL when offset is nil (a round created before
+// migration 0009).
+func createRoundWith(t *testing.T, db *pgxpool.Pool, roundID [16]byte, seed [32]byte, rules game.RulesVersion, offset *int64) (v1.Config, v1.State) {
+	t.Helper()
+	cfg, state := roundConfig(t, roundID, seed)
 	public, secret, err := v1.Adapter().EncodeConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +223,8 @@ func createRoundRules(t *testing.T, db *pgxpool.Pool, roundID [16]byte, seed [32
 			(round_id, game, rules_version, schema_version, state_version, chain, created_at_unix_micro)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 			roundID, string(g.Game), int64(rules), int64(g.SchemaVersion), int64(g.StateVersion), chain.Version, g.CreatedAtUnixMicro)
-		mustExec(t, tx, `INSERT INTO orvex.round_secrets (round_id, config_secret) VALUES ($1, $2)`, roundID, secret)
+		mustExec(t, tx, `INSERT INTO orvex.round_secrets (round_id, config_secret, close_offset_micros) VALUES ($1, $2, $3)`,
+			roundID, secret, offset)
 		mustExec(t, tx, `INSERT INTO orvex.round_admission_heads (round_id) VALUES ($1)`, roundID)
 		mustExec(t, tx, `INSERT INTO orvex.round_execution_heads (round_id, processed_sequence, fencing_token)
 			VALUES ($1, 0, 0)`, roundID)
@@ -216,6 +233,34 @@ func createRoundRules(t *testing.T, db *pgxpool.Pool, roundID [16]byte, seed [32
 			VALUES ($1, 0, $2, $3, $4, NULL, NULL, 0)`, roundID, make([]byte, 32), hash[:], record)
 	})
 	return cfg, state
+}
+
+// seedWithOffset scans 32-byte big-endian counters from 1 for a seed whose
+// round (config as in createRound) has min <= D <= max. Counter 0 is the
+// all-zero seed, which InitialState rejects.
+func seedWithOffset(t *testing.T, roundID [16]byte, minD, maxD int64) [32]byte {
+	t.Helper()
+	for n := uint64(1); n <= 100_000; n++ {
+		var seed [32]byte
+		binary.BigEndian.PutUint64(seed[24:], n)
+		cfg := v1.Config{RoundID: roundID, Seed: seed, MinBetCredits: 1, MaxBetCredits: 1_000_000_000, MaxBets: 100}
+		state, err := v1.Rules{}.InitialState(cfg)
+		if err != nil {
+			continue
+		}
+		if d := state.CrashDeadlineOffsetMicros; d >= minD && d <= maxD {
+			return seed
+		}
+	}
+	t.Fatalf("no seed with D in [%d, %d] within 100000 counters", minD, maxD)
+	return [32]byte{}
+}
+
+// instantSeed returns a seed whose round crashes instantly (D = 0), so its
+// closure bound equals the start's effective time.
+func instantSeed(t *testing.T, roundID [16]byte) [32]byte {
+	t.Helper()
+	return seedWithOffset(t, roundID, 0, 0)
 }
 
 // genesisHash reads the round's genesis link hash.
@@ -325,14 +370,16 @@ type headRow struct {
 	admitted                int64
 	state                   string
 	started, closed, sealed *int64
+	bound                   *int64 // close_not_before_unix_micro
 }
 
 func head(t *testing.T, db *pgxpool.Pool, roundID [16]byte) headRow {
 	t.Helper()
 	var h headRow
-	if err := db.QueryRow(ctx, `SELECT admitted_sequence, admission_state, started_sequence, closed_sequence, sealed_sequence
+	if err := db.QueryRow(ctx, `SELECT admitted_sequence, admission_state, started_sequence, closed_sequence, sealed_sequence,
+		close_not_before_unix_micro
 		FROM orvex.round_admission_heads WHERE round_id = $1`, roundID).
-		Scan(&h.admitted, &h.state, &h.started, &h.closed, &h.sealed); err != nil {
+		Scan(&h.admitted, &h.state, &h.started, &h.closed, &h.sealed, &h.bound); err != nil {
 		t.Fatal(err)
 	}
 	return h
@@ -573,10 +620,8 @@ func request(roundID, commandID [16]byte, cmd v1.Command) admission.Request {
 	return admission.Request{RoundID: roundID, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber, CommandID: commandID, Command: cmd}
 }
 
-func closeRequest(roundID, commandID [16]byte, notBefore int64) admission.Request {
-	r := request(roundID, commandID, v1.CloseRound{Authority: v1.AuthoritySystem})
-	r.NotBeforeUnixMicro = notBefore
-	return r
+func closeRequest(roundID, commandID [16]byte) admission.Request {
+	return request(roundID, commandID, v1.CloseRound{Authority: v1.AuthoritySystem})
 }
 
 func placeBet(player string, credits int64) v1.PlaceBet {

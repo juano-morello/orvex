@@ -5,6 +5,8 @@ package admission_test
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,11 +17,13 @@ import (
 )
 
 // windowAt drives a fresh round to state through Admit and returns the
-// round and the start's effective time T0 (0 when open).
+// round and the start's effective time T0 (0 when open). The round crashes
+// instantly (D = 0), so its closure bound is T0 and a CloseRound right after
+// the start is due.
 func windowAt(t *testing.T, e env, s *admission.Sequencer, state string) (round [16]byte, t0 int64) {
 	t.Helper()
 	round = newRoundID()
-	createRound(t, e.pool, round, testSeed)
+	createRound(t, e.pool, round, instantSeed(t, round))
 	if state == "open" {
 		return round, 0
 	}
@@ -27,7 +31,7 @@ func windowAt(t *testing.T, e env, s *admission.Sequencer, state string) (round 
 	if state == "started" {
 		return round, t0
 	}
-	mustAdmit(t, s, closeRequest(round, freshID(), t0))
+	mustAdmit(t, s, closeRequest(round, freshID()))
 	if state == "closed" {
 		return round, t0
 	}
@@ -59,7 +63,7 @@ func TestWindowTransitions(t *testing.T) {
 		for ci, class := range classes {
 			want := table[from][ci]
 			t.Run(from+"/"+class, func(t *testing.T) {
-				round, t0 := windowAt(t, e, s, from)
+				round, _ := windowAt(t, e, s, from)
 				before := head(t, e.obs, round)
 				id := freshID()
 				req := request(round, id, cashOut("alice"))
@@ -67,7 +71,7 @@ func TestWindowTransitions(t *testing.T) {
 				case "start":
 					req.Command = startRound
 				case "close":
-					req = closeRequest(round, id, max(t0, 1))
+					req = closeRequest(round, id)
 				case "settle":
 					req.Command = settleRound
 				}
@@ -125,13 +129,13 @@ func TestBarrierRejectsLateCommands(t *testing.T) {
 	e := newEnv(t, 0)
 	s := newSequencer(t, e.pool, nil)
 	round := newRoundID()
-	createRound(t, e.pool, round, testSeed)
+	createRound(t, e.pool, round, instantSeed(t, round))
 	fundPlayer(t, e.pool, "alice", 100)
 	fundPlayer(t, e.pool, "carol", 100)
 
 	mustAdmit(t, s, request(round, cmdID(1), placeBet("alice", 10)))
-	start := mustAdmit(t, s, request(round, cmdID(2), startRound))
-	mustAdmit(t, s, closeRequest(round, cmdID(3), start.EffectiveTimeUnixMicro))
+	mustAdmit(t, s, request(round, cmdID(2), startRound))
+	mustAdmit(t, s, closeRequest(round, cmdID(3)))
 	late := []v1.Command{cashOut("alice"), placeBet("carol", 10), v1.StartRound{Authority: v1.AuthorityPlayer}}
 	for i, cmd := range late {
 		_, err := s.Admit(ctx, request(round, cmdID(10+i), cmd))
@@ -153,12 +157,12 @@ func TestAdmitDuplicateAfterWindowClosed(t *testing.T) {
 	e := newEnv(t, 0)
 	s := newSequencer(t, e.pool, nil)
 	round := newRoundID()
-	createRound(t, e.pool, round, testSeed)
+	createRound(t, e.pool, round, instantSeed(t, round))
 
-	start := mustAdmit(t, s, request(round, cmdID(1), startRound))
+	mustAdmit(t, s, request(round, cmdID(1), startRound))
 	req := request(round, cmdID(2), cashOut("alice"))
 	first := mustAdmit(t, s, req)
-	mustAdmit(t, s, closeRequest(round, cmdID(3), start.EffectiveTimeUnixMicro))
+	mustAdmit(t, s, closeRequest(round, cmdID(3)))
 	again := mustAdmit(t, s, req)
 	mustAdmit(t, s, request(round, cmdID(4), settleRound))
 	sealed := mustAdmit(t, s, req)
@@ -172,11 +176,11 @@ func TestAdmitDuplicateAfterWindowClosed(t *testing.T) {
 func TestBarrierSealIsFinal(t *testing.T) {
 	e := newEnv(t, 0)
 	s := newSequencer(t, e.pool, nil)
-	round, t0 := windowAt(t, e, s, "sealed")
+	round, _ := windowAt(t, e, s, "sealed")
 	for _, req := range []admission.Request{
 		request(round, freshID(), cashOut("alice")),
 		request(round, freshID(), startRound),
-		closeRequest(round, freshID(), t0),
+		closeRequest(round, freshID()),
 		request(round, freshID(), settleRound),
 	} {
 		_, err := s.Admit(ctx, req)
@@ -209,64 +213,118 @@ func TestBarrierSealIsFinal(t *testing.T) {
 	}
 }
 
+// startWorkedRound creates the worked round (D = 9,410,000), seeds an
+// ordinary admission at x = now + 1 h and admits StartRound, which the
+// S-7 clamp gives the effective time exactly x. It returns x and D.
+func startWorkedRound(t *testing.T, e env, s *admission.Sequencer) (x, d int64) {
+	t.Helper()
+	_, state := createRound(t, e.pool, workedRoundID, workedSeed)
+	d = state.CrashDeadlineOffsetMicros
+	if d != 9_410_000 {
+		t.Fatalf("D = %d, want 9410000 for the worked round", d)
+	}
+	x = time.Now().Add(time.Hour).UnixMicro()
+	seedAdmission(t, e.pool, workedRoundID, cmdID(1), cashOut("zed"), x)
+	start := mustAdmit(t, s, request(workedRoundID, cmdID(2), startRound))
+	if start.EffectiveTimeUnixMicro != x {
+		t.Fatalf("StartRound effective time = %d, want exactly %d", start.EffectiveTimeUnixMicro, x)
+	}
+	h := head(t, e.obs, workedRoundID)
+	if h.state != "started" || h.bound == nil || *h.bound != x+d {
+		t.Fatalf("head = %+v (bound %s), want started with bound T0 + D = %d", h, show(h.bound), x+d)
+	}
+	return x, d
+}
+
 func TestClosureNotBefore(t *testing.T) {
 	e := newEnv(t, 0)
 	s := newSequencer(t, e.pool, nil)
-	round, t0 := windowAt(t, e, s, "started")
-	next := 1
+	x, d := startWorkedRound(t, e, s)
+	round := workedRoundID
+	before := head(t, e.obs, round)
 
-	notBefore := time.Now().Add(time.Hour).UnixMicro()
-	_, err := s.Admit(ctx, closeRequest(round, cmdID(next), notBefore))
+	_, err := s.Admit(ctx, closeRequest(round, cmdID(3)))
 	var nd *admission.ClosureNotDueError
 	if !errors.As(err, &nd) || !errors.Is(err, admission.ErrClosureNotDue) {
 		t.Fatalf("err = %v, want ClosureNotDueError", err)
 	}
-	if nd.NotBeforeUnixMicro != notBefore || nd.EffectiveTimeUnixMicro >= notBefore || nd.EffectiveTimeUnixMicro < t0 {
-		t.Errorf("ClosureNotDueError = %+v, want effective time in [T0 %d, not-before %d)", *nd, t0, notBefore)
+	if nd.EffectiveTimeUnixMicro != x {
+		t.Errorf("ClosureNotDueError effective time = %d, want exactly %d", nd.EffectiveTimeUnixMicro, x)
 	}
-	requireNoRow(t, e.obs, cmdID(next))
+	for _, text := range []string{err.Error(), fmt.Sprintf("%+v", err)} {
+		for _, secret := range []string{strconv.FormatInt(x+d, 10), strconv.FormatInt(d, 10)} {
+			if strings.Contains(text, secret) {
+				t.Errorf("error text %q reveals %s", text, secret)
+			}
+		}
+	}
+	requireNoRow(t, e.obs, cmdID(3))
+	after := head(t, e.obs, round)
+	if after.state != "started" || after.closed != nil || after.admitted != before.admitted || !equalPtr(after.bound, before.bound) {
+		t.Errorf("head = %+v, want unchanged %+v", after, before)
+	}
+
+	// The window stays open.
+	a := mustAdmit(t, s, request(round, cmdID(4), cashOut("alice")))
+	if a.EffectiveTimeUnixMicro != x {
+		t.Errorf("CashOut alice effective time = %d, want %d", a.EffectiveTimeUnixMicro, x)
+	}
+	requireRow(t, e.obs, a)
+
+	// One microsecond before the bound is still not due.
+	seedAdmission(t, e.pool, round, cmdID(5), cashOut("zed"), x+d-1)
+	_, err = s.Admit(ctx, closeRequest(round, cmdID(6)))
+	if !errors.As(err, &nd) || nd.EffectiveTimeUnixMicro != x+d-1 {
+		t.Fatalf("err = %v (%+v), want ClosureNotDueError with effective time %d", err, nd, x+d-1)
+	}
+	requireNoRow(t, e.obs, cmdID(6))
 	if h := head(t, e.obs, round); h.state != "started" {
 		t.Errorf("state = %s, want started", h.state)
-	}
-
-	if _, err := s.Admit(ctx, closeRequest(round, cmdID(next+1), t0-1)); !errors.Is(err, admission.ErrInvalidRequest) {
-		t.Errorf("not-before T0-1: err = %v, want ErrInvalidRequest", err)
-	}
-	requireNoRow(t, e.obs, cmdID(next+1))
-
-	a := mustAdmit(t, s, closeRequest(round, cmdID(next+2), t0))
-	requireRow(t, e.obs, a)
-	if h := head(t, e.obs, round); h.state != "closed" || h.closed == nil || *h.closed != int64(a.Sequence) {
-		t.Errorf("head = %+v, want closed at %d", h, a.Sequence)
 	}
 }
 
 func TestClosureNotBeforeEqualityAdmits(t *testing.T) {
 	e := newEnv(t, 0)
 	s := newSequencer(t, e.pool, nil)
-	round, _ := windowAt(t, e, s, "started")
-	next := 1
-	x := time.Now().Add(time.Hour).UnixMicro()
-	seedAdmission(t, e.pool, round, cmdID(next), cashOut("zed"), x)
+	x, d := startWorkedRound(t, e, s)
+	round := workedRoundID
 
-	_, err := s.Admit(ctx, closeRequest(round, cmdID(next+1), x+1))
-	var nd *admission.ClosureNotDueError
-	if !errors.As(err, &nd) || nd.EffectiveTimeUnixMicro != x || nd.NotBeforeUnixMicro != x+1 {
-		t.Fatalf("err = %v (%+v), want ClosureNotDueError with effective time %d", err, nd, x)
-	}
-	a := mustAdmit(t, s, closeRequest(round, cmdID(next+2), x))
-	if a.EffectiveTimeUnixMicro != x {
-		t.Errorf("close effective time = %d, want exactly %d", a.EffectiveTimeUnixMicro, x)
+	seedAdmission(t, e.pool, round, cmdID(3), cashOut("zed"), x+d)
+	a := mustAdmit(t, s, closeRequest(round, cmdID(4)))
+	if a.EffectiveTimeUnixMicro != x+d {
+		t.Errorf("close effective time = %d, want exactly T0 + D = %d", a.EffectiveTimeUnixMicro, x+d)
 	}
 	requireRow(t, e.obs, a)
+	if h := head(t, e.obs, round); h.state != "closed" || h.closed == nil || *h.closed != int64(a.Sequence) {
+		t.Errorf("head = %+v, want closed at %d", h, a.Sequence)
+	}
+	mustAdmit(t, s, request(round, cmdID(5), settleRound))
+	if h := head(t, e.obs, round); h.state != "sealed" {
+		t.Errorf("state = %s, want sealed", h.state)
+	}
+}
+
+func TestStartWithoutCloseOffsetFailsClosed(t *testing.T) {
+	e := newEnv(t, 0)
+	s := newSequencer(t, e.pool, nil)
+	round := newRoundID()
+	createRoundWith(t, e.pool, round, testSeed, v1.RulesVersionNumber, nil)
+
+	if _, err := s.Admit(ctx, request(round, cmdID(1), startRound)); !errors.Is(err, admission.ErrInternal) {
+		t.Fatalf("StartRound without a close offset: err = %v, want ErrInternal", err)
+	}
+	requireNoRow(t, e.obs, cmdID(1))
+	if h := head(t, e.obs, round); h.state != "open" || h.admitted != 0 || h.bound != nil {
+		t.Errorf("head = %+v (bound %s), want open, admitted 0, no bound", h, show(h.bound))
+	}
 }
 
 func TestBarrierConcurrentCloseAndCashOuts(t *testing.T) {
 	e := newEnv(t, 16)
 	s := newSequencer(t, e.pool, nil)
 	round := newRoundID()
-	createRound(t, e.pool, round, testSeed)
-	start := mustAdmit(t, s, request(round, cmdID(1), startRound))
+	createRound(t, e.pool, round, instantSeed(t, round))
+	mustAdmit(t, s, request(round, cmdID(1), startRound))
 
 	const goroutines = 32
 	acks := make([][]admission.Admission, goroutines)
@@ -300,7 +358,7 @@ func TestBarrierConcurrentCloseAndCashOuts(t *testing.T) {
 	}()
 
 	poll(t, "admitted_sequence >= 200", func() bool { return head(t, e.obs, round).admitted >= 200 })
-	closed := mustAdmit(t, s, closeRequest(round, cmdID(2), start.EffectiveTimeUnixMicro))
+	closed := mustAdmit(t, s, closeRequest(round, cmdID(2)))
 	c := closed.Sequence
 	<-done
 	errs.report(t)
@@ -366,7 +424,17 @@ func TestAdmissionStreamDrivesCrashRound(t *testing.T) {
 	expectSeq(start, 3)
 	t0 := start.EffectiveTimeUnixMicro
 	deadline := t0 + d
+	if h := head(t, e.obs, round); h.bound == nil || *h.bound != deadline {
+		t.Fatalf("closure bound = %s, want T0 + D = %d", show(h.bound), deadline)
+	}
 	expectSeq(mustAdmit(t, s, request(round, cmdID(4), cashOut("alice"))), 4)
+	// An early CloseRound is not due and writes nothing.
+	_, err := s.Admit(ctx, closeRequest(round, cmdID(7)))
+	var nd *admission.ClosureNotDueError
+	if !errors.As(err, &nd) || nd.EffectiveTimeUnixMicro >= deadline {
+		t.Fatalf("early CloseRound: err = %v, want ClosureNotDueError before %d", err, deadline)
+	}
+	requireNoRow(t, e.obs, cmdID(7))
 	if seq := seedAdmission(t, e.pool, round, cmdID(5), cashOut("zed"), deadline); seq != 5 {
 		t.Fatalf("seeded sequence %d, want 5", seq)
 	}
@@ -375,12 +443,7 @@ func TestAdmissionStreamDrivesCrashRound(t *testing.T) {
 	if bob.EffectiveTimeUnixMicro != deadline {
 		t.Fatalf("CashOut bob effective time = %d, want exactly T0 + D = %d", bob.EffectiveTimeUnixMicro, deadline)
 	}
-	_, err := s.Admit(ctx, closeRequest(round, cmdID(7), deadline+1))
-	var nd *admission.ClosureNotDueError
-	if !errors.As(err, &nd) || nd.EffectiveTimeUnixMicro != deadline {
-		t.Fatalf("CloseRound at T0+D+1: err = %v, want ClosureNotDueError at %d", err, deadline)
-	}
-	closed := mustAdmit(t, s, closeRequest(round, cmdID(8), deadline))
+	closed := mustAdmit(t, s, closeRequest(round, cmdID(8)))
 	expectSeq(closed, 7)
 	if closed.EffectiveTimeUnixMicro != deadline {
 		t.Fatalf("CloseRound effective time = %d, want %d", closed.EffectiveTimeUnixMicro, deadline)
