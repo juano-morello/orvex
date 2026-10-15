@@ -152,10 +152,6 @@ type Request struct {
 	RulesVersion game.RulesVersion
 	CommandID    [16]byte // not the nil UUID; reuse it on every retry of this command
 	Command      any      // the rules version's command value, e.g. v1.CashOut{...}
-	// NotBeforeUnixMicro is the earliest effective time at which a closing
-	// command may be admitted: the absolute crash deadline T0 + D (S-8).
-	// > 0 for ClassClose, 0 for every other class.
-	NotBeforeUnixMicro int64
 }
 
 // Admission is a durable admission receipt. Admit returns one only after
@@ -177,12 +173,17 @@ func (a Admission) Input() game.Input {
 
 // admitSQL is Transaction A's single statement (S-3).
 const admitSQL = `SELECT outcome, reason, sequence, effective_time_unix_micro
-	FROM orvex.admit_command($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+	FROM orvex.admit_command($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 
 // Admit durably admits req.Command to round req.RoundID and returns its
 // admission once COMMIT succeeded, or the original admission of a command
 // already admitted under req.CommandID (Duplicate). A rejection at
 // admission is a *RejectedError or *ClosureNotDueError; nothing was written.
+// A closing command is admitted only at an effective time at or after the
+// round's closure bound T0 + D, which admitting the start command recorded
+// from the round's secret close offset (LBT-11 S-8 as amended by the LBT-12
+// engineer addendum); before it, Admit returns *ClosureNotDueError and the
+// caller resubmits later.
 //
 // On ErrOutcomeUnknown, ErrUnavailable, ErrBusy or a context error, resubmit
 // the same Request with the same command ID; never treat these as
@@ -211,13 +212,6 @@ func (s *Sequencer) Admit(ctx context.Context, req Request) (Admission, error) {
 	}
 	if !cl.valid() {
 		return Admission{}, fmt.Errorf("%w: policy returned an invalid classification", ErrInternal)
-	}
-	if cl.Class == ClassClose {
-		if req.NotBeforeUnixMicro <= 0 {
-			return Admission{}, fmt.Errorf("%w: a closing command needs NotBeforeUnixMicro > 0", ErrInvalidRequest)
-		}
-	} else if req.NotBeforeUnixMicro != 0 {
-		return Admission{}, fmt.Errorf("%w: NotBeforeUnixMicro is only for a closing command", ErrInvalidRequest)
 	}
 
 	release, err := s.gate.acquire(ctx, req.RoundID)
@@ -300,12 +294,9 @@ func (s *Sequencer) attempt(ctx context.Context, c admitCall) (Admission, attemp
 
 	class, _ := c.cl.Class.sqlText()
 	var holdPlayer *string
-	var holdCredits, notBefore *int64
+	var holdCredits *int64
 	if c.cl.Hold.PlayerID != "" {
 		holdPlayer, holdCredits = &c.cl.Hold.PlayerID, &c.cl.Hold.Credits
-	}
-	if c.cl.Class == ClassClose {
-		notBefore = &c.req.NotBeforeUnixMicro
 	}
 	var (
 		outcome  string
@@ -315,7 +306,7 @@ func (s *Sequencer) attempt(ctx context.Context, c admitCall) (Admission, attemp
 	)
 	err = tx.QueryRow(ctx, admitSQL,
 		c.req.RoundID, string(c.req.Game), int64(c.req.RulesVersion), c.req.CommandID, c.command,
-		class, holdPlayer, holdCredits, notBefore, s.lockMs, s.idleMs,
+		class, holdPlayer, holdCredits, s.lockMs, s.idleMs,
 	).Scan(&outcome, &reason, &sequence, &effTime)
 	if err != nil {
 		rollback(ctx, tx)
@@ -379,18 +370,13 @@ func (s *Sequencer) attempt(ctx context.Context, c admitCall) (Admission, attemp
 		if effTime == nil {
 			return internal("not_due outcome without effective time")
 		}
-		return Admission{}, attemptDone, &ClosureNotDueError{
-			EffectiveTimeUnixMicro: *effTime,
-			NotBeforeUnixMicro:     c.req.NotBeforeUnixMicro,
-		}
-	case "invalid_not_before":
-		return Admission{}, attemptDone, fmt.Errorf("%w: NotBeforeUnixMicro is before the round's start", ErrInvalidRequest)
+		return Admission{}, attemptDone, &ClosureNotDueError{EffectiveTimeUnixMicro: *effTime}
 	case "rules_mismatch":
 		return Admission{}, attemptDone, fmt.Errorf("%w: the round's game or rules version differs", ErrInvalidRequest)
 	case "not_found":
 		return Admission{}, attemptDone, ErrRoundNotFound
 	case "corrupt":
-		return internal("round admission head missing or inconsistent")
+		return internal("round admission head or closure bound missing or inconsistent")
 	default:
 		return internal("unknown outcome")
 	}

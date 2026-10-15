@@ -20,7 +20,7 @@ Every application object lives in schema `orvex`. The migration runner's bookkee
 | Table | Kind | Holds | Invariants |
 |---|---|---|---|
 | `rounds` | append-only | round identity, game, rules/schema/state versions, chain version, creation time | non-nil UUID; game `^[a-z][a-z0-9-]{0,31}$`; versions in `[1, 2^32-1]`; chain `orvex/audit/v1` |
-| `round_secrets` | append-only | the codec's secret config bytes (the seed) | one row per round |
+| `round_secrets` | append-only | the codec's secret config bytes (the seed) and, from `0009`, the secret close offset `close_offset_micros` (§12) | one row per round; offset `>= 0` |
 | `admissions` | append-only | admitted commands: sequence, command ID, effective time (µs), canonical command bytes | gapless from 1 by a self foreign key; `command_id` unique across all rounds and non-nil |
 | `round_admission_heads` | mutable, undeletable | `admitted_sequence`, the admission window (§12), Transaction A's lock row | forward-only (`OX005`); deferred foreign key to the last admission; window forward-only (`OX005`); sealed is final |
 | `chain_records` | append-only | exact LBT-9 record bytes, link hash, previous hash, result columns, fencing token | see below |
@@ -29,7 +29,7 @@ Every application object lives in schema `orvex`. The migration runner's bookkee
 | `round_snapshots` | append-only | engine-computed state hash per chain record, optional state bytes | references its chain record |
 | `ledger_accounts` | totals mutable by triggers only | player and system accounts, `debits_posted`, `credits_posted`, `held` | floor `debits_posted + held <= credits_posted` on player accounts |
 | `ledger_transactions` | append-only | one per business operation | at most one per chain record |
-| `ledger_postings` | append-only | one amount moved from a debit to a credit account | `amount > 0`; distinct accounts; balanced by construction |
+| `ledger_postings` | append-only | one amount moved from a debit to a credit account | `amount > 0`; distinct accounts; balanced by construction; at most one posting per chained event (`ledger_postings_event_key`, §13) |
 | `ledger_holds`, `ledger_hold_releases` | append-only | reservations at admission and their releases | a release needs the admission's chain record |
 | `outbox_messages` | delivery columns mutable | messages with dedupe key `(round_id, sequence, message_index)` | `OX006` guard; published rows may be deleted |
 
@@ -46,7 +46,9 @@ Every application object lives in schema `orvex`. The migration runner's bookkee
 - the `chain_records_binding` trigger (`OX008`) compares the record's fixed prefix and suffix with byte
   templates built from the row's columns, its admission and its `rounds` row (spec §5.3);
 - the deferred `chain_records_fenced` trigger (`OX004`) requires, at commit, the round's current
-  fencing token and a processed sequence covering the record.
+  fencing token and a processed sequence covering the record;
+- the deferred `chain_records_holds_released` trigger (`OX009`, §13) requires, at commit, a release for
+  every credit hold of the record's admission.
 
 Relationships: `rounds` 1–1 `round_secrets`, `round_admission_heads` and `round_execution_heads`;
 `rounds` 1–n `admissions` 1–0..1 `chain_records` (sequence ≥ 1); exactly one genesis record per round;
@@ -79,6 +81,7 @@ Custom SQLSTATEs, class `OX`, exported as Go constants in `internal/persistence/
 | `OX006` | `CodeOutboxImmutable` | an outbox update touches a non-delivery column, changes a published row, or deletes an unpublished row |
 | `OX007` | `CodeEncoding` | migrating a database whose encoding is not UTF8 |
 | `OX008` | `CodeRecordBinding` | chain record bytes disagree with its columns, its admission or its round |
+| `OX009` | `CodeHoldUnreleased` | at commit, a command record's admission still holds credits without a release (§13) |
 
 Named constraints that callers and tests rely on (standard SQLSTATEs):
 
@@ -97,9 +100,10 @@ Named constraints that callers and tests rely on (standard SQLSTATEs):
 | `chain_records_record_check` | 23514 | record over 64 MiB or containing a newline |
 | `domain_events_prev_fkey`, `domain_events_record_fkey` | 23503 | event gap; event of an unknown record |
 | `round_snapshots_record_fkey` | 23503 | snapshot of an unknown record |
-| `ledger_accounts_floor_check` | 23514 | insufficient available credits (a business outcome) |
+| `ledger_accounts_floor_check` | 23514 | insufficient available credits (a business outcome in A; a bug in B, §13) |
 | `ledger_accounts_kind_check`, `ledger_accounts_player_id_key`, `ledger_accounts_system_name_key` | 23514, 23505 | account shape and uniqueness (a partial unique index for system names) |
 | `ledger_transactions_record_key` | 23505 | a second ledger transaction for one chain record (duplicate payout) |
+| `ledger_postings_event_key` | 23505 | a second posting for one chained event (duplicate payout, §13) |
 | `ledger_postings_amount_check`, `ledger_postings_accounts_check` | 23514 | non-positive amount; same account on both sides |
 | `ledger_postings_round_fkey`, `ledger_postings_event_fkey` | 23503 | posting round differs from its transaction's; event of another round |
 | `ledger_hold_releases_record_fkey` | 23503 | release before the admission's chain record exists |
@@ -115,8 +119,8 @@ those report their own SQLSTATE.
 | Transaction | Go options | Concurrency control |
 |---|---|---|
 | A: admission (LBT-11) | `AdmissionTxOptions()`: READ COMMITTED, read-write | `orvex.admit_command` (§12): lock-free dedupe and window read, then `round_admission_heads` `FOR UPDATE`; then `clock_timestamp()`, dedupe, window, holds, admission insert |
-| B: execution (LBT-12) | `ExecutionTxOptions()`: READ COMMITTED, read-write | first statement is the compare-and-set `UPDATE round_execution_heads … WHERE processed_sequence = k-1 AND fencing_token = t` (0 rows means a conflict); then inserts; deferred `OX004` and head foreign keys at commit; account floors at each statement |
-| Round creation | `ExecutionTxOptions()` | inserts only; deferred foreign keys require the genesis record |
+| B: execution (LBT-12) | `ExecutionTxOptionsWithTimeouts(lock, idle)`: READ COMMITTED, read-write, transaction-local timeouts in the `BEGIN` | the compare-and-set `UPDATE round_execution_heads … WHERE processed_sequence = k-1 AND fencing_token = t` is the first statement that touches data (0 rows means a conflict); then one batch of inserts; deferred `OX004`, `OX009` and head foreign keys at commit; account floors at each statement (§13) |
+| Round creation (LBT-12) | `ExecutionTxOptionsWithTimeouts(lock, idle)` | inserts only; deferred foreign keys require the genesis record |
 | Ownership takeover (LBT-14) | `ExecutionTxOptions()` | conditional `UPDATE` of the execution head |
 | Export and multi-statement reads | `SnapshotReadTxOptions()`: REPEATABLE READ, read-only | one consistent snapshot |
 | Migrations | server default, READ COMMITTED | advisory transaction lock, one file per transaction |
@@ -151,8 +155,8 @@ would retry.
 ## 5. Migration policy
 
 - Files are `migrations/NNNN_name.up.sql` and `NNNN_name.down.sql`, contiguous from `0001`, each version
-  with one name and both files. The first line is `-- NNNN name: <purpose> (LBT-10 spec P-n)` or, from
-  `0007`, `(LBT-11 spec S-n)`.
+  with one name and both files. The first line is `-- NNNN name: <purpose> (LBT-n spec X-n)`, naming the
+  spec decision: `(LBT-10 spec P-n)`, from `0007` `(LBT-11 spec S-n)`, from `0008` `(LBT-12 spec E-n)`.
 - A file must not be empty, hold a transaction statement on its own line (`BEGIN;`, `COMMIT;`,
   `ROLLBACK;`, `START TRANSACTION`), use `CONCURRENTLY` or start a line with a psql meta-command.
 - Each step is one READ COMMITTED transaction: `pg_advisory_xact_lock(7766444933939532367)` (the first
@@ -175,6 +179,10 @@ would retry.
 `round_secrets.config_secret` stores the codec's secret config (for crash/v1 `{"seed":"<hex>"}`)
 verbatim and **unencrypted** (P-25). It is never inside a chain record. Before settlement, anyone who can
 read `round_secrets`, `round_snapshots.state` or a database backup can predict the round's crash point.
+`round_secrets.close_offset_micros` (the crash/v1 crash deadline offset `D`) and
+`round_admission_heads.close_not_before_unix_micro` (the closure bound `T0 + D`, from `0009`) are secret
+until the crash in the same way: only `orvex.admit_command` reads them (§12), and no admission result,
+error, outbox message or export carries them.
 Credits are simulated (ADR-004), and application-level encryption with key management is deferred to
 its own issue.
 
@@ -186,12 +194,20 @@ and verify complete histories and needs an ADR-001-level decision.
 
 ## 8. Grant matrix (recommended, LBT-14)
 
-Migrations create no roles and grant nothing. LBT-14 owns roles and grants. Recommended matrix (P-13):
+Migrations create no roles and grant nothing, with one exception: `0009` revokes `PUBLIC`'s default
+`EXECUTE` on the `SECURITY DEFINER` function `orvex.admit_command` (§12), so a role that LBT-14 gives
+`USAGE` on `orvex` cannot admit commands with the owner's rights. LBT-14 owns roles and grants.
+Recommended matrix (P-13):
 
 | Role | Append-only tables | Heads, `ledger_accounts`, `outbox_messages` | `round_secrets`, `round_snapshots.state` |
 |---|---|---|---|
 | application | `SELECT`, `INSERT` only | `SELECT`, `INSERT`, `UPDATE` | readable (engine recovery, export) |
 | gateway (if it admits commands) | as needed for admission | as needed for admission | no `SELECT` |
+
+The engine role reads `round_secrets.config_secret` for the cold load (§13). LBT-14 should grant it
+column-level `SELECT (round_id, config_secret)` on `round_secrets` and no `SELECT` on
+`round_admission_heads.close_not_before_unix_micro`, so that only the owner of `orvex.admit_command`
+reads the close offset and the closure bound.
 
 Triggers enforce immutability for every role except table owners and superusers, independent of grants.
 
@@ -232,7 +248,10 @@ skips.
 
 Migration `0007_admission_window` and `internal/runtime/admission` implement Transaction A, the durable
 per-round admission sequencer. The normative design is
-[the LBT-11 spec](../specs/5a3d52fc_admission-sequencer.md) (decisions S-1 to S-14).
+[the LBT-11 spec](../specs/5a3d52fc_admission-sequencer.md) (decisions S-1 to S-14). Migration
+`0009_close_bound` amends the closure guard (S-8) per the
+[LBT-12 engineer addendum](../specs/e0df34d3_execution-commit-ledger-outbox.md#engineer-addendum-2026-10-15):
+the bound is stored, not supplied by the caller.
 
 ### Window columns
 
@@ -244,6 +263,7 @@ per-round admission sequencer. The normative design is
 | `started_sequence` | admission sequence of the admitted system `StartRound` |
 | `closed_sequence` | admission sequence of the admitted system `CloseRound`, the closure barrier |
 | `sealed_sequence` | admission sequence of the admitted system `SettleRound`, the round's last admission |
+| `close_not_before_unix_micro` | from `0009`: the secret closure bound `T0 + D`, set once when the `start` command is admitted (`T0` its effective time, `D` the round's `round_secrets.close_offset_micros`) |
 
 - `round_admission_heads_window_check`: `open` has no sequence; `started` has only `started_sequence`;
   `closed` adds `closed_sequence > started_sequence`; `sealed` has all three increasing and
@@ -252,24 +272,30 @@ per-round admission sequencer. The normative design is
   to `admissions (round_id, sequence)`.
 - Trigger `round_admission_heads_window` (`orvex.check_admission_window()`) raises `OX005` when the state
   rank decreases or a set sequence changes. With the window check this makes a sealed round final.
+- `round_admission_heads_close_bound_check`: a bound only once `started_sequence` is set. Trigger
+  `round_admission_heads_close_bound` (`orvex.check_close_bound()`) raises `OX005` when a set bound
+  changes; its message never formats the bound.
 
 Transitions under the head lock (S-8), by the class the rules version's policy assigns:
 
 | State | `ordinary` | `start` | `close` | `settle` |
 |---|---|---|---|---|
 | `open` | admit | admit → `started` | `lifecycle_order` | `lifecycle_order` |
-| `started` | admit | `lifecycle_order` | admit → `closed` if effective ≥ `NotBeforeUnixMicro`, else not due | `lifecycle_order` |
+| `started` | admit | `lifecycle_order` | admit → `closed` if effective ≥ `close_not_before_unix_micro` (recorded when `start` was admitted), else `not_due`; a missing bound is `corrupt` | `lifecycle_order` |
 | `closed` | `round_closed` | `lifecycle_order` | `lifecycle_order` | admit → `sealed` |
 | `sealed` | `round_sealed` | `round_sealed` | `round_sealed` | `round_sealed` |
 
 For crash/v1, system `StartRound`, `CloseRound` and `SettleRound` are `start`, `close` and `settle`;
 everything else is `ordinary`. A player `PlaceBet` with a non-empty player and an amount in
-`[1, 1,000,000,000]` holds its amount.
+`[1, 1,000,000,000]` holds its amount. A `start` additionally fails closed (`corrupt`) when the round
+has no `close_offset_micros` (a round created before `0009`).
 
 ### `orvex.admit_command`
 
 Transaction A is one `AdmissionTxOptions()` transaction that calls `orvex.admit_command` once, then
-commits only on `admitted` and rolls back otherwise. The function, in order:
+commits only on `admitted` and rolls back otherwise. From `0009` the function is `SECURITY DEFINER`
+with `SET search_path = pg_catalog` and every relation schema-qualified, and `PUBLIC`'s default
+`EXECUTE` on it is revoked. It takes 10 arguments (the caller's not-before bound is gone). In order:
 
 1. sets `lock_timeout` and `idle_in_transaction_session_timeout` transaction-locally, and
    `synchronous_commit = on` if it is `off`, so an acknowledged `COMMIT` is flushed;
@@ -281,12 +307,14 @@ commits only on `admitted` and rolls back otherwise. The function, in order:
 5. clamps it to at least the effective time of admission `admitted_sequence`, so effective times are
    non-decreasing in sequence order even if the clock steps back;
 6. repeats the dedupe on a fresh snapshot, then applies the window table;
-7. for `close`: `invalid_not_before` if `NotBeforeUnixMicro` is before the start's effective time,
-   `not_due` if the effective time is before it (equality admits);
+7. for `start`: reads `round_secrets.close_offset_micros` (missing: `corrupt`) and computes the bound
+   `T0 + D` (saturating); for `close`: `not_due` if the effective time is before the head's bound
+   (equality admits; a missing bound is `corrupt`). Neither the offset nor the bound appears in any
+   outcome or message;
 8. for a hold: locks the player's account `FOR NO KEY UPDATE`; no account or too few available credits
    is `insufficient_credits`;
 9. inserts the admission, then the hold (the hold trigger adds it to `held`), then advances the head
-   and the window.
+   and the window and, for `start`, the bound.
 
 It never catches exceptions. Argument errors raise `22023`. `orvex.unix_micro` is the only conversion
 of a timestamp into an effective time. Rejections at admission write nothing and are not stored (S-13).
@@ -309,8 +337,8 @@ of a timestamp into an effective time. Rejections at admission write nothing and
 | `duplicate` | the original `Admission`, `Duplicate = true` |
 | `conflict`, or `23505` on `admissions_command_id_key` resolving to another round or other bytes | `ErrCommandIDReused` |
 | `rejected`, or `23514` on `ledger_accounts_floor_check` | `*RejectedError` with the reason |
-| `not_due` | `*ClosureNotDueError` |
-| `invalid_not_before`, `rules_mismatch` | `ErrInvalidRequest` |
+| `not_due` | `*ClosureNotDueError` (carries only the too-early effective time) |
+| `rules_mismatch` | `ErrInvalidRequest` |
 | `not_found` | `ErrRoundNotFound` |
 | `55P03` | `ErrBusy`, no retry |
 | `40001`, `40P01`, connection loss, classes `08`, `53`, `57`, `25P03` before `COMMIT` | retry |
@@ -326,10 +354,126 @@ error, callers resubmit the same request with the same command ID. `Lookup` read
 
 ### Grants the admitting role needs (input to LBT-14)
 
-- `EXECUTE` on `orvex.admit_command`;
-- `SELECT` on `rounds`, `round_admission_heads`, `admissions` and `ledger_accounts`;
-- `INSERT` on `admissions` and `ledger_holds`;
-- `UPDATE` on `round_admission_heads` and `ledger_accounts` (the latter through the hold trigger);
-- `SELECT` on `chain_records`, for `Lookup` only.
+With `orvex.admit_command` `SECURITY DEFINER` (`0009`), the admitting role needs only:
 
-It needs nothing on `round_secrets` or `round_snapshots`.
+- `USAGE` on schema `orvex`;
+- `EXECUTE` on `orvex.admit_command(uuid, text, bigint, uuid, bytea, text, text, bigint, integer, integer)`;
+- `SELECT` on `admissions` and `chain_records`, for `Lookup` and the `23505` resolve.
+
+It must have nothing on `round_secrets` and no `SELECT` on `round_admission_heads`, which hold the
+secret close offset and closure bound; nothing on `round_snapshots` either. `TestAdmittingRoleCannotReadCloseBound`
+(`internal/runtime/admission`) creates a role with exactly these grants and checks it.
+
+## 13. Execution (LBT-12)
+
+Migrations `0008_execution_ledger` and `0009_close_bound`, `internal/runtime/execution` and
+`internal/ledger` implement Transaction B, the simulated-credit ledger, the outbox and production round
+creation. The normative design is [the LBT-12 spec](../specs/e0df34d3_execution-commit-ledger-outbox.md)
+(decisions E-1 to E-17 and the engineer addendum), built per
+[the implementation plan](../specs/6f13b30a_execution-ledger-implementation.md).
+
+### Migration `0008_execution_ledger`
+
+- `ledger_postings_event_key`: a unique partial index on `ledger_postings (round_id, event_sequence)
+  WHERE event_sequence IS NOT NULL`, replacing the non-unique `ledger_postings_event_idx`. At most one
+  posting per chained event, so a bet settles at most once (`23505`).
+- `chain_records_holds_released`: a deferred constraint trigger (`orvex.check_record_holds_released()`)
+  that raises `OX009` at commit when a command record's admission still has a hold without a release.
+  At commit the deferred triggers fire in name order: `chain_records_fenced` (`OX004`) first.
+- The down drops both and recreates `ledger_postings_event_idx`; it drops no table and refuses nothing.
+  `0009`'s down refuses with `OX003` while `round_admission_heads` or `round_secrets` holds rows.
+
+### Transaction B
+
+`Executor.ExecuteNext(ctx, Lease{RoundID, FencingToken})` executes exactly admission
+`k = processed_sequence + 1`:
+
+1. Before B, one statement without locks reads admission `k` joined with its holds and their accounts'
+   players. Decide and Evolve run outside any transaction against the round's cached state (a replay of
+   the chain, below); the LBT-9 command record is built from the admission's exact bytes.
+2. `BeginTx(ExecutionTxOptionsWithTimeouts(LockTimeout, IdleInTransactionTimeout))`: the `BEGIN` sets
+   `lock_timeout`, `idle_in_transaction_session_timeout` and, only when it is `off`,
+   `synchronous_commit = on`, transaction-locally. It reads no table.
+3. The compare-and-set alone: `UPDATE orvex.round_execution_heads SET processed_sequence = k WHERE
+   round_id = $1 AND processed_sequence = k - 1 AND fencing_token = $t`. Not exactly one row: roll back
+   and run the conflict check.
+4. One pipelined batch, in this order: the chain record (`prev_hash` = the cached head, fencing token
+   `t`); `domain_events` in one `unnest` insert; `ledger_hold_releases` for every hold of the admission,
+   ascending `account_id`, before any posting; the ledger transaction and its postings when there are
+   postings; one `outbox_messages` row; a `round_snapshots` row when the record is a checkpoint.
+5. `COMMIT`; the deferred `OX004`, `OX009` and head foreign keys run.
+
+Lock order: the round's execution head, then at most one shared account row (one player, or `house`
+at settlement) plus the round's own `round_pool`. B never raises a player's `debits_posted + held`: a
+`BetPlaced` releases its hold (`held -= b`) and then debits it (`debits_posted += b`) on the same row
+under one lock, so a floor violation in B is a bug (`ErrInternal`). Admission in another round waits on
+that row lock and then sees the converted or released credits (ADR-005 cross-round balances).
+
+**Conflict check** (on a fresh connection): `SELECT h.processed_sequence, h.fencing_token, r.hash FROM
+round_execution_heads h LEFT JOIN chain_records r ON (round_id, sequence = k)`. No head: `ErrCorrupt`;
+another token: `ErrFenced` (stop driving the round); record `k` committed with the computed hash: adopt
+it (`Outcome.Adopted`); `processed = k - 1`: retry; otherwise reload the cache.
+
+**State.** The authoritative state is the chain. The executor caches, per round, the state replayed from
+genesis through every record (`replay.StateOnly`), checking every snapshot's `state_hash` on the way
+(the cold load, one `SnapshotReadTxOptions()` transaction). The compare-and-set and
+`chain_records_prev_fkey` prove the cache current at commit; any conflict drops it.
+
+### Accounts and postings (crash/v1)
+
+| Account | Row | IDs (`internal/ledger`, UUIDv8 of SHA-256) |
+|---|---|---|
+| player | existing `kind = 'player'` account, floor enforced | random, created by operations |
+| `round_pool` | system, `round_id` set, no floor; created with the round | `uuid8("orvex/ledger/v1/account:<round>/round_pool")` |
+| `house` | system, global, no floor; created by the first round (`ON CONFLICT DO NOTHING`) | `uuid8("orvex/ledger/v1/account:global/house")` |
+
+| Event | Posting | Ledger transaction kind |
+|---|---|---|
+| `BetPlaced{P, b}` | player `P` → `round_pool`, `b`, consuming the admission's hold | `crash_bet` |
+| `BetCashedOut{P, payout}` | `round_pool` → player `P`, `payout` | `crash_cash_out` |
+| `RoundSettled{B, W}` | `B > W`: `round_pool` → `house`, `B − W`; `B < W`: `house` → `round_pool`, `W − B` | `crash_settlement` |
+| `RoundStarted`, `RoundCrashed`, `BetLost` | none | |
+
+Each record with postings has exactly one ledger transaction, `uuid8("orvex/ledger/v1/transaction:<round>/<k>")`.
+Each posting carries its event's `event_sequence`. After settlement the round account is 0.
+
+### Outbox and snapshots
+
+- One `outbox_messages` row per chain record, genesis included: key `(round_id, sequence, 0)`, topic
+  `round.record.v1`, payload the exact record bytes. No payload carries a secret before it is due.
+- Snapshots (`state` NULL, `engine_build` the executor's build): sequence 0 at creation, then every
+  record that emits `RoundStarted`, `RoundCrashed` or `RoundSettled`.
+
+### Round creation
+
+`Executor.CreateRound` writes, in one `ExecutionTxOptionsWithTimeouts` transaction: `rounds`,
+`round_secrets` (the secret config and, per the addendum, `close_offset_micros = D`), both heads with
+their defaults, the genesis record (token 0), snapshot 0, the `round_pool` account, the `house` account
+if absent and the genesis outbox message. `23505` on `rounds_pkey` with equal genesis bytes is
+`Created.Duplicate`; different bytes are `ErrRoundExists`.
+
+### Errors
+
+| Condition | Go result |
+|---|---|
+| invalid lease, Drain limit < 1 | `ErrInvalidRequest`, no database call |
+| no round; head token ≠ lease | `ErrRoundNotFound`; `ErrFenced` |
+| no policy, descriptor mismatch | `ErrUnknownRules`, round halted |
+| decode, replay or snapshot mismatch; missing hold or player account | `ErrCorrupt`, round halted |
+| Decide, Evolve, codec or posting rule fails | `*FailClosedError` (`ErrFailClosed`), nothing written, round halted until `Forget` |
+| `40001`, `40P01`, connection loss, classes `08`, `53`, `57`, `25P03` before `COMMIT` | retry |
+| `55P03` | `ErrBusy` |
+| compare-and-set 0 rows, `23503` on `chain_records_prev_fkey`, commit-time `OX004` or `23503` on `round_execution_heads_head_fkey` | conflict check |
+| any other `23xxx`, `OX`, `22xxx`, `42xxx`, `XX000` in the batch; `OX009`, class `23`/`OX`, `40002` at `COMMIT` | `ErrInternal`, cache dropped |
+| ambiguous `COMMIT` | the next attempt starts with the conflict check |
+| attempts exhausted (default 3, full-jitter backoff 5 ms doubling, cap 50 ms) | `ErrUnavailable`; calling again is safe |
+| `ctx` ended (including `57014` while `ctx` is done) | an error wrapping `ctx.Err()` and the driver's error; the cache is kept |
+
+### Grants the engine role needs (input to LBT-14)
+
+`SELECT` on `rounds`, `round_secrets (round_id, config_secret)` (column-level, not
+`close_offset_micros`), `admissions`, `ledger_holds`, `ledger_accounts`, `chain_records`,
+`round_snapshots`, `round_execution_heads`; `INSERT` on `rounds`, `round_secrets`,
+`round_admission_heads`, `round_execution_heads`, `chain_records`, `domain_events`, `round_snapshots`,
+`ledger_accounts`, `ledger_transactions`, `ledger_postings`, `ledger_hold_releases`, `outbox_messages`;
+`UPDATE` on `round_execution_heads` and `ledger_accounts` (through the ledger triggers).

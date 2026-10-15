@@ -135,7 +135,6 @@ func TestAdmitCommandArgumentChecks(t *testing.T) {
 		class                                    string
 		holdPlayer                               *string
 		holdCredits                              *int64
-		notBefore                                *int64
 		lockMs                                   int32
 		idleMs                                   int32
 	}
@@ -157,8 +156,6 @@ func TestAdmitCommandArgumentChecks(t *testing.T) {
 		{"hold player without credits", func(a *args) { a.holdPlayer = new("alice") }},
 		{"hold credits without player", func(a *args) { a.holdCredits = new(int64(5)) }},
 		{"hold credits 0", func(a *args) { a.holdPlayer, a.holdCredits = new("alice"), new(int64(0)) }},
-		{"not-before on ordinary", func(a *args) { a.notBefore = new(int64(5)) }},
-		{"close without not-before", func(a *args) { a.class = "close" }},
 		{"lock timeout 0", func(a *args) { a.lockMs = 0 }},
 		{"idle timeout 0", func(a *args) { a.idleMs = 0 }},
 	}
@@ -168,9 +165,9 @@ func TestAdmitCommandArgumentChecks(t *testing.T) {
 			a.commandID = newID()
 			c.edit(&a)
 			requireStmtCode(t, pool, func(tx pgx.Tx) error {
-				return exec(tx, `SELECT * FROM orvex.admit_command($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+				return exec(tx, `SELECT * FROM orvex.admit_command($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 					a.roundID, a.game, a.rules, a.commandID, a.command,
-					a.class, a.holdPlayer, a.holdCredits, a.notBefore, a.lockMs, a.idleMs)
+					a.class, a.holdPlayer, a.holdCredits, a.lockMs, a.idleMs)
 			}, "22023", "")
 		})
 	}

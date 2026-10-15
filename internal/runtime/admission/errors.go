@@ -10,9 +10,8 @@ var (
 	// ErrInvalidConfig: New was given a Config outside its ranges, no
 	// policy, a duplicate policy, or a policy without a matching adapter.
 	ErrInvalidConfig = errors.New("admission: invalid config")
-	// ErrInvalidRequest: a nil round or command ID, a NotBeforeUnixMicro
-	// that does not fit the command's class, or a request whose game or
-	// rules version differs from the round's.
+	// ErrInvalidRequest: a nil round or command ID, or a request whose game
+	// or rules version differs from the round's.
 	ErrInvalidRequest = errors.New("admission: invalid request")
 	// ErrInvalidCommand: the command cannot be encoded or classified by the
 	// rules version, or a player ID contains U+0000.
@@ -73,9 +72,11 @@ func (e *RejectedError) Error() string { return "admission: rejected: " + string
 func (e *RejectedError) Unwrap() error { return ErrRejected }
 
 // ClosureNotDueError reports a closing command whose effective time was
-// before NotBeforeUnixMicro (S-8). Nothing was written. Its text names
-// neither time.
-type ClosureNotDueError struct{ EffectiveTimeUnixMicro, NotBeforeUnixMicro int64 }
+// before the round's stored closure bound T0 + D (LBT-11 S-8 as amended by
+// the LBT-12 engineer addendum). Nothing was written; resubmit the same
+// request later. It never carries the bound, which is secret until the
+// crash, and its text names no time.
+type ClosureNotDueError struct{ EffectiveTimeUnixMicro int64 }
 
 // Error returns "admission: round closure not due".
 func (e *ClosureNotDueError) Error() string { return "admission: round closure not due" }

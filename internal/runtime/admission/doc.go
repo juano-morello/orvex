@@ -27,7 +27,10 @@
 //   - The admission window moves open -> started -> closed -> sealed on
 //     admitted system StartRound, CloseRound and SettleRound commands. A
 //     CloseRound is admitted only at an effective time at or after the
-//     caller's NotBeforeUnixMicro; a sealed round admits nothing.
+//     bound T0 + D that admitting StartRound recorded from the round's
+//     secret close offset (LBT-12 engineer addendum); a sealed round admits
+//     nothing. orvex.admit_command is SECURITY DEFINER, so the admitting
+//     role never reads the offset or the bound.
 //
 // Errors wrap exactly one sentinel (or a context error); ambiguous commits
 // and connection loss are retried with the same command ID up to

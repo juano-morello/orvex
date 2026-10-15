@@ -143,7 +143,7 @@ func TestMigrateUpDownClean(t *testing.T) {
 		t.Fatal("fingerprint unchanged by migrating up")
 	}
 	reverted := down(t, pool, ms, 0)
-	if want := []int{7, 6, 5, 4, 3, 2, 1}; !equalInts(versions(reverted), want) {
+	if want := []int{9, 8, 7, 6, 5, 4, 3, 2, 1}; !equalInts(versions(reverted), want) {
 		t.Errorf("reverted %v, want %v", versions(reverted), want)
 	}
 	if f2 := fingerprint(t, pool); f2 != f0 {
@@ -380,16 +380,17 @@ func TestMigrateDownRefusesAuditData(t *testing.T) {
 	records := count(t, pool, "SELECT count(*) FROM orvex.chain_records")
 	snapshots := count(t, pool, "SELECT count(*) FROM orvex.round_snapshots")
 
-	// 0007 refuses first: round_admission_heads holds the loaded round's head.
+	// 0009 refuses first: round_admission_heads and round_secrets hold the
+	// loaded round's rows.
 	reverted, err := postgres.MigrateDown(ctx, pool, ms, 0)
 	if got := versions(reverted); len(got) != 0 {
-		t.Errorf("reverted %v, want nothing (0007 refuses)", got)
+		t.Errorf("reverted %v, want nothing (0009 refuses)", got)
 	}
 	if code := postgres.SQLState(err); code != postgres.CodeDownRefused {
 		t.Fatalf("err = %v, want SQLSTATE %s", err, postgres.CodeDownRefused)
 	}
-	if v := schemaVersion(t, pool); v != 7 {
-		t.Errorf("version = %d, want 7", v)
+	if v := schemaVersion(t, pool); v != 9 {
+		t.Errorf("version = %d, want 9", v)
 	}
 	if n := count(t, pool, "SELECT count(*) FROM orvex.chain_records"); n != records {
 		t.Errorf("chain records = %d, want %d", n, records)
