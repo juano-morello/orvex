@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,12 +17,6 @@ import (
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
 	"github.com/juano-morello/orvex/migrations"
 )
-
-// databaseURLEnv names the database crashctl migrate connects to.
-const databaseURLEnv = "ORVEX_DATABASE_URL"
-
-// defaultConnectTimeout applies unless the DSN sets connect_timeout.
-const defaultConnectTimeout = 10 * time.Second
 
 var canonicalTarget = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
 
@@ -82,26 +75,14 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	dsn, ok := os.LookupEnv(databaseURLEnv)
-	if !ok || dsn == "" {
-		_, _ = fmt.Fprintf(stderr, "%s%s is not set\n", prefix, databaseURLEnv)
-		return exitUsage
-	}
-	cfg, err := pgx.ParseConfig(dsn)
+	cfg, err := databaseConfig()
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "%sinvalid %s\n", prefix, databaseURLEnv)
+		_, _ = fmt.Fprintln(stderr, prefix+err.Error())
 		return exitUsage
-	}
-	if cfg.ConnectTimeout == 0 {
-		cfg.ConnectTimeout = defaultConnectTimeout
 	}
 	// fail prints one stderr line; the password never appears in it.
 	fail := func(err error) {
-		msg := oneLine(err.Error())
-		if cfg.Password != "" {
-			msg = strings.ReplaceAll(msg, cfg.Password, "xxxxx")
-		}
-		_, _ = fmt.Fprintln(stderr, prefix+msg)
+		_, _ = fmt.Fprintln(stderr, prefix+mask(cfg, err))
 	}
 
 	ctx := context.Background()
@@ -172,10 +153,4 @@ func migrateExitCode(err error) int {
 	default:
 		return exitFailed
 	}
-}
-
-// oneLine collapses whitespace so that a multi-line driver error prints as
-// one line.
-func oneLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
 }

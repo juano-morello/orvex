@@ -41,9 +41,12 @@ type Checkpoint struct {
 type Export struct {
 	RoundID [16]byte
 	// Records is S + 1, where S is the newest snapshot's sequence.
-	Records     int
-	Head        chain.Hash
-	Checkpoints []Checkpoint
+	Records int
+	// RoundRecords is N + 1, the round's chain records in the same snapshot;
+	// Records ≤ RoundRecords.
+	RoundRecords int
+	Head         chain.Hash
+	Checkpoints  []Checkpoint
 }
 
 // Errors returned by ExportHistory; test them with errors.Is.
@@ -56,8 +59,11 @@ var (
 // ExportHistory writes round roundID as an "orvex/audit-history/v1" file
 // (LBT-9 A-11) to w. It reads one REPEATABLE READ READ ONLY snapshot and
 // ends the file at the round's newest snapshot S: records 0..S verbatim,
-// with every snapshot as a checkpoint. On error, w may hold a partial file
-// the caller must discard.
+// with every snapshot as a checkpoint. It also reports, from the same
+// snapshot, how many chain records the round has (Export.RoundRecords), so
+// callers can tell when records after S were left out; the written bytes do
+// not depend on that count. On error, w may hold a partial file the caller
+// must discard.
 func ExportHistory(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Writer) (Export, error) {
 	tx, err := db.BeginTx(ctx, postgres.SnapshotReadTxOptions())
 	if err != nil {
@@ -120,6 +126,18 @@ func ExportHistory(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Wr
 	var head chain.Hash
 	copy(head[:], headBytes)
 
+	var newest *int64
+	err = tx.QueryRow(ctx, `SELECT max(sequence) FROM orvex.chain_records WHERE round_id = $1`,
+		roundID).Scan(&newest)
+	switch {
+	case err != nil:
+		return Export{}, fmt.Errorf("eventstore: read record count: %w", err)
+	case newest == nil:
+		return Export{}, fmt.Errorf("%w: round has no chain records", ErrCorrupt)
+	case *newest < int64(last):
+		return Export{}, fmt.Errorf("%w: newest record %d before snapshot %d", ErrCorrupt, *newest, last)
+	}
+
 	header, err := encodeHeader(head, cps, secret)
 	if err != nil {
 		return Export{}, err
@@ -164,7 +182,13 @@ func ExportHistory(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Wr
 	if err := bw.Flush(); err != nil {
 		return Export{}, fmt.Errorf("eventstore: write: %w", err)
 	}
-	return Export{RoundID: roundID, Records: int(n), Head: head, Checkpoints: cps}, nil
+	return Export{
+		RoundID:      roundID,
+		Records:      int(n),
+		RoundRecords: int(*newest) + 1,
+		Head:         head,
+		Checkpoints:  cps,
+	}, nil
 }
 
 func writeLine(w *bufio.Writer, b []byte) error {

@@ -1,9 +1,11 @@
 // Command crashctl is the Orvex replay/audit and operations CLI (ADR-007).
 // It verifies exported audit histories: crashctl audit verify|replay|chain
 // (ADR-001, ADR-006; decision A-16 and section 7 of
-// docs/specs/8bebb70f_canonical-codec-audit-cli.md), and migrates the
-// PostgreSQL schema: crashctl migrate up|down|status (ADR-005; decision P-6
-// of docs/specs/17380a6e_postgresql-schema-migrations.md).
+// docs/specs/8bebb70f_canonical-codec-audit-cli.md), exports a round's
+// history from PostgreSQL: crashctl audit export (LBT-19,
+// docs/specs/73dbe98d_audit-export-cli.md), and migrates the PostgreSQL
+// schema: crashctl migrate up|down|status (ADR-005; decision P-6 of
+// docs/specs/17380a6e_postgresql-schema-migrations.md).
 package main
 
 import (
@@ -20,6 +22,7 @@ import (
 	"github.com/juano-morello/orvex/internal/canonjson"
 	"github.com/juano-morello/orvex/internal/game"
 	crashv1 "github.com/juano-morello/orvex/internal/game/crash/v1"
+	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
 const name = "crashctl"
@@ -28,20 +31,23 @@ const usage = `usage: crashctl [-version]
        crashctl audit verify [-expect-head HEX] FILE
        crashctl audit replay [-expect-head HEX] FILE
        crashctl audit chain  [-expect-head HEX] FILE
+       crashctl audit export [-unsettled] [-format NAME] ROUND_ID FILE
        crashctl migrate up [-to N]
        crashctl migrate down -to N
        crashctl migrate status
-FILE "-" reads standard input.
-ORVEX_DATABASE_URL names the database for migrate (a PostgreSQL URL or key=value connection string).
+FILE "-" reads standard input (export: writes standard output).
+ORVEX_DATABASE_URL names the database for migrate and export (a PostgreSQL URL or key=value connection string).
 `
 
-// Exit codes (spec section 7).
+// Exit codes (spec section 7; 5 and 6: LBT-19 X-9).
 const (
 	exitOK          = 0
 	exitFailed      = 1
 	exitUsage       = 2
 	exitUnsupported = 3
 	exitIO          = 4
+	exitNotFound    = 5
+	exitNotSettled  = 6
 )
 
 func main() {
@@ -50,7 +56,8 @@ func main() {
 
 // run is the testable entry point. Exit codes: 0 success or help, 1
 // verification failed (or -version could not write), 2 usage error, 3
-// unsupported artifact, 4 I/O error.
+// unsupported artifact, 4 I/O error; crashctl audit export adds 5 round not
+// found and 6 round not settled.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -87,6 +94,9 @@ func runAudit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	sub := args[0]
+	if sub == "export" {
+		return runExport(args[1:], stdout, stderr)
+	}
 	var mode verification.Mode
 	switch sub {
 	case "verify":
@@ -145,7 +155,7 @@ func runAudit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if mode != verification.ModeChain {
-		reg, err := game.NewRegistry(crashv1.Adapter())
+		reg, err := newRegistry()
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "%s%v\n", prefix, err)
 			return exitFailed
@@ -172,6 +182,19 @@ func runAudit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitIO
 	}
 	return exitOK
+}
+
+// newRegistry returns the rules versions crashctl replays, shared by audit
+// and export.
+func newRegistry() (*game.Registry, error) {
+	return game.NewRegistry(crashv1.Adapter())
+}
+
+// settlementPolicies returns the execution policies crashctl audit export
+// asks whether a round is settled (LBT-19 X-7), one per rules version in
+// newRegistry. Historical policies are added with their adapters.
+func settlementPolicies() []execution.Policy {
+	return []execution.Policy{execution.CrashV1Policy()}
 }
 
 // report formats the success report of spec section 7.

@@ -65,7 +65,9 @@ each chain record has 0..n `domain_events` and 0..1 `round_snapshots` rows.
 - **Engine-computed:** `round_snapshots.state_hash`, written at commit and never recomputed by replay at
   export time (LBT-9 §11).
 - Columns are never the source for hashing or export. `eventstore.ExportHistory` copies record bytes
-  verbatim, in sequence order, up to the newest snapshot (P-24).
+  verbatim, in sequence order, up to the newest snapshot (P-24). It also returns `RoundRecords`, the
+  round's chain record count read in the same snapshot, so a caller can tell when records after the
+  newest snapshot were left out. `crashctl audit export` (§14) writes the file.
 
 ## 3. Constraint catalogue
 
@@ -203,11 +205,14 @@ Recommended matrix (P-13):
 |---|---|---|---|
 | application | `SELECT`, `INSERT` only | `SELECT`, `INSERT`, `UPDATE` | readable (engine recovery, export) |
 | gateway (if it admits commands) | as needed for admission | as needed for admission | no `SELECT` |
+| auditor (`crashctl audit export`) | `SELECT` on `rounds` and `chain_records`; `SELECT (round_id, sequence, state_hash)` on `round_snapshots` | none | `SELECT (round_id, config_secret)` on `round_secrets` only (every round's seed, §6); no `close_offset_micros`, no `round_snapshots.state` |
 
 The engine role reads `round_secrets.config_secret` for the cold load (§13). LBT-14 should grant it
 column-level `SELECT (round_id, config_secret)` on `round_secrets` and no `SELECT` on
 `round_admission_heads.close_not_before_unix_micro`, so that only the owner of `orvex.admit_command`
 reads the close offset and the closure bound.
+
+The auditor role that runs `crashctl audit export` and the grants it needs are in §14.
 
 Triggers enforce immutability for every role except table owners and superusers, independent of grants.
 
@@ -477,3 +482,93 @@ if absent and the genesis outbox message. `23505` on `rounds_pkey` with equal ge
 `round_admission_heads`, `round_execution_heads`, `chain_records`, `domain_events`, `round_snapshots`,
 `ledger_accounts`, `ledger_transactions`, `ledger_postings`, `ledger_hold_releases`, `outbox_messages`;
 `UPDATE` on `round_execution_heads` and `ledger_accounts` (through the ledger triggers).
+
+## 14. History export CLI (LBT-19)
+
+`crashctl audit export` writes one round's audit history file from the database named by
+`ORVEX_DATABASE_URL`. The normative design is [the LBT-19 spec](../specs/73dbe98d_audit-export-cli.md)
+(decisions X-1 to X-13).
+
+```
+crashctl audit export [-unsettled] [-format NAME] ROUND_ID FILE
+```
+
+- `ROUND_ID` is canonical lowercase UUID text, never the nil UUID. `FILE` `-` writes the history to
+  standard output and the report to standard error. `-format` accepts only `orvex/audit-history/v1`,
+  its default; a well-formed later version is exit 3.
+- `ORVEX_DATABASE_URL` is read as `crashctl migrate` reads it: a 10 s connect timeout unless the DSN
+  sets one, and the password masked in every message.
+
+### Reading
+
+- The export uses one connection and exactly one transaction, `ExportHistory`'s
+  `SnapshotReadTxOptions()` (REPEATABLE READ, READ ONLY, always rolled back). The CLI issues no
+  statement of its own and takes `AccessShare` locks only.
+- Session parameters: `default_transaction_read_only=on`, always, overriding the DSN;
+  `application_name=crashctl` and `idle_in_transaction_session_timeout=60000` unless the DSN sets them.
+- The file holds records `0..S`, where `S` is the round's newest snapshot (P-24). The report line
+  `records <S+1> of <N+1> head <hex64>` gives `S` and the round's newest record `N` from the same
+  snapshot. When `S < N` a `note:` line names the sequences left out. In production LBT-11 seals
+  admission at `SettleRound`, so a settled round's export is complete.
+
+### Settlement gate
+
+Every v1 file carries `configSecret`, the seed. By default the CLI writes a file only if the round is
+settled at `S`: it replays the exported bytes (`verification.Verify` in replay mode, which also checks
+the seed against the commitment) and asks the round's execution policy whether the replayed state is
+final (`Policy.Final`, crash/v1: `PhaseSettled`). The file's own chain then already reveals the secret
+it holds (ADR-003, ADR-004). Otherwise nothing is written and the exit code is 6 (not settled), 3 (an
+unsupported rules version or no policy) or 1 (the replay failed).
+
+`-unsettled` writes the file whatever the check says, and the report then says `settled no` or
+`settled unknown` with a warning. Such a file can disclose the crash point of a running round: keep it
+private.
+
+### Output
+
+- The history is built in memory, so the snapshot stays short and nothing reaches disk before the
+  settlement check.
+- `FILE` must not exist (a file, directory or symlink, dangling or not): the CLI never overwrites. It
+  checks before connecting, creates `FILE` with `O_EXCL` and mode `0600`, then writes, syncs and closes
+  it. Any failure after the open, including a failed report write, removes `FILE`. Exit 0 if and only
+  if `FILE` holds the complete history.
+- The report's `head` is the file header's head, in exactly the form `crashctl audit verify
+  -expect-head` accepts. It comes from the same database as the file, so it becomes a trust anchor only
+  once recorded elsewhere at export time (ADR-001 limitation, §9).
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | the history was written and the report printed |
+| 1 | the stored round violates an export invariant (`ErrCorrupt`, `ErrNoCheckpoint`), or the settlement check's replay failed or `Final` returned an error |
+| 2 | usage: arguments, flags, `ROUND_ID`, a malformed `-format`, `ORVEX_DATABASE_URL` unset, empty or unparsable, `FILE` exists |
+| 3 | unsupported: `-format` names a version this build does not write; the history's format, chain, game, rules, schema or state version is unknown; no settlement policy for the rules version |
+| 4 | I/O: `FILE`'s directory is not usable; cannot connect; any database error (`42501`, `42P01`, `40001`, connection loss, …); cannot write `FILE`, stdout or the report |
+| 5 | round not found |
+| 6 | round not settled at its newest snapshot, and `-unsettled` was not given |
+
+Every failure prints nothing on stdout and one stderr line `crashctl: audit export: <message>`.
+
+### Grants the auditor role needs (input to LBT-14)
+
+```sql
+CREATE ROLE orvex_auditor NOLOGIN;
+GRANT CONNECT ON DATABASE orvex TO orvex_auditor;
+GRANT USAGE ON SCHEMA orvex TO orvex_auditor;
+GRANT SELECT ON orvex.rounds, orvex.chain_records TO orvex_auditor;
+GRANT SELECT (round_id, config_secret) ON orvex.round_secrets TO orvex_auditor;
+GRANT SELECT (round_id, sequence, state_hash) ON orvex.round_snapshots TO orvex_auditor;
+-- login roles: CREATE ROLE <name> LOGIN IN ROLE orvex_auditor;
+```
+
+- Nothing else: no `INSERT`, `UPDATE`, `DELETE` or `TRUNCATE`; nothing on `admissions`, heads, the
+  ledger, the outbox, `domain_events` or `orvex_migrate`.
+- The column lists exclude `round_secrets.close_offset_micros` (§6: only `orvex.admit_command` reads it)
+  and `round_snapshots.state`. The spec's X-11 grants table-level `SELECT` on `round_secrets`; it predates
+  `0009`, and the column-level grant is what `ExportHistory` needs.
+- The role can read every round's seed, unsettled rounds included (§6, P-25); format v1 needs it. A
+  row-level restriction is future work with LBT-14.
+- `TestExportMinimalGrants` (`cmd/crashctl`) proves the set is sufficient and that `round_snapshots.state`,
+  `admissions` and `close_offset_micros` are denied; `TestExportDatabaseErrors` shows that a missing
+  grant is exit 4.
