@@ -22,7 +22,7 @@ Every application object lives in schema `orvex`. The migration runner's bookkee
 | `rounds` | append-only | round identity, game, rules/schema/state versions, chain version, creation time | non-nil UUID; game `^[a-z][a-z0-9-]{0,31}$`; versions in `[1, 2^32-1]`; chain `orvex/audit/v1` |
 | `round_secrets` | append-only | the codec's secret config bytes (the seed) | one row per round |
 | `admissions` | append-only | admitted commands: sequence, command ID, effective time (µs), canonical command bytes | gapless from 1 by a self foreign key; `command_id` unique across all rounds and non-nil |
-| `round_admission_heads` | mutable, undeletable | `admitted_sequence`, Transaction A's lock row | forward-only (`OX005`); deferred foreign key to the last admission |
+| `round_admission_heads` | mutable, undeletable | `admitted_sequence`, the admission window (§12), Transaction A's lock row | forward-only (`OX005`); deferred foreign key to the last admission; window forward-only (`OX005`); sealed is final |
 | `chain_records` | append-only | exact LBT-9 record bytes, link hash, previous hash, result columns, fencing token | see below |
 | `round_execution_heads` | mutable, undeletable | `processed_sequence`, `fencing_token`, `owner_id`, `lease_expires_at` | forward-only; an owner change needs a higher token (`OX005`); deferred foreign key to the last record |
 | `domain_events` | append-only | `(round_id, event_sequence)` → emitting record, event type | contiguous from 1 by a self foreign key |
@@ -114,7 +114,7 @@ those report their own SQLSTATE.
 
 | Transaction | Go options | Concurrency control |
 |---|---|---|
-| A: admission (LBT-11) | `AdmissionTxOptions()`: READ COMMITTED, read-write | first statement locks `round_admission_heads` for the round; then dedupe, window, `clock_timestamp()`, admission insert, holds |
+| A: admission (LBT-11) | `AdmissionTxOptions()`: READ COMMITTED, read-write | `orvex.admit_command` (§12): lock-free dedupe and window read, then `round_admission_heads` `FOR UPDATE`; then `clock_timestamp()`, dedupe, window, holds, admission insert |
 | B: execution (LBT-12) | `ExecutionTxOptions()`: READ COMMITTED, read-write | first statement is the compare-and-set `UPDATE round_execution_heads … WHERE processed_sequence = k-1 AND fencing_token = t` (0 rows means a conflict); then inserts; deferred `OX004` and head foreign keys at commit; account floors at each statement |
 | Round creation | `ExecutionTxOptions()` | inserts only; deferred foreign keys require the genesis record |
 | Ownership takeover (LBT-14) | `ExecutionTxOptions()` | conditional `UPDATE` of the execution head |
@@ -137,8 +137,9 @@ Rules (spec §6):
    - `23505` on `admissions_command_id_key` in A: a duplicate; return the original admission;
    - `23514` on `ledger_accounts_floor_check`: insufficient available credits;
    - any other `23xxx` or `OX` code: a bug; fail closed and do not retry.
-5. Effective time in A: after the lock, `(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint`.
-   Never `now()`, which is the transaction start time (ADR-002).
+5. Effective time in A: after the lock, `(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint`
+   (`orvex.unix_micro`, clamped to the previous admission's time, §12). Never `now()`, which is the
+   transaction start time (ADR-002).
 6. B commits only when its compare-and-set affected exactly one row. The deferred checks are a
    backstop, not the protocol.
 
@@ -150,7 +151,8 @@ would retry.
 ## 5. Migration policy
 
 - Files are `migrations/NNNN_name.up.sql` and `NNNN_name.down.sql`, contiguous from `0001`, each version
-  with one name and both files. The first line is `-- NNNN name: <purpose> (LBT-10 spec P-n)`.
+  with one name and both files. The first line is `-- NNNN name: <purpose> (LBT-10 spec P-n)` or, from
+  `0007`, `(LBT-11 spec S-n)`.
 - A file must not be empty, hold a transaction statement on its own line (`BEGIN;`, `COMMIT;`,
   `ROLLBACK;`, `START TRANSACTION`), use `CONCURRENTLY` or start a line with a psql meta-command.
 - Each step is one READ COMMITTED transaction: `pg_advisory_xact_lock(7766444933939532367)` (the first
@@ -225,3 +227,109 @@ The Compose service uses the same pinned image as the tests (`pgtest.Image`,
 `postgres:18.6-trixie@sha256:7493…4336`). `make test-integration` starts its own Testcontainers
 PostgreSQL per test package and needs a Docker-compatible daemon; without one it fails rather than
 skips.
+
+## 12. Admission (LBT-11)
+
+Migration `0007_admission_window` and `internal/runtime/admission` implement Transaction A, the durable
+per-round admission sequencer. The normative design is
+[the LBT-11 spec](../specs/5a3d52fc_admission-sequencer.md) (decisions S-1 to S-14).
+
+### Window columns
+
+`round_admission_heads` gains:
+
+| Column | Meaning |
+|---|---|
+| `admission_state` | `open`, `started`, `closed` or `sealed`; default `open` (`round_admission_heads_state_check`) |
+| `started_sequence` | admission sequence of the admitted system `StartRound` |
+| `closed_sequence` | admission sequence of the admitted system `CloseRound`, the closure barrier |
+| `sealed_sequence` | admission sequence of the admitted system `SettleRound`, the round's last admission |
+
+- `round_admission_heads_window_check`: `open` has no sequence; `started` has only `started_sequence`;
+  `closed` adds `closed_sequence > started_sequence`; `sealed` has all three increasing and
+  `sealed_sequence = admitted_sequence`; every set sequence lies in `[1, admitted_sequence]`.
+- `round_admission_heads_started_fkey`, `…_closed_fkey`, `…_sealed_fkey`: `NOT DEFERRABLE` foreign keys
+  to `admissions (round_id, sequence)`.
+- Trigger `round_admission_heads_window` (`orvex.check_admission_window()`) raises `OX005` when the state
+  rank decreases or a set sequence changes. With the window check this makes a sealed round final.
+
+Transitions under the head lock (S-8), by the class the rules version's policy assigns:
+
+| State | `ordinary` | `start` | `close` | `settle` |
+|---|---|---|---|---|
+| `open` | admit | admit → `started` | `lifecycle_order` | `lifecycle_order` |
+| `started` | admit | `lifecycle_order` | admit → `closed` if effective ≥ `NotBeforeUnixMicro`, else not due | `lifecycle_order` |
+| `closed` | `round_closed` | `lifecycle_order` | `lifecycle_order` | admit → `sealed` |
+| `sealed` | `round_sealed` | `round_sealed` | `round_sealed` | `round_sealed` |
+
+For crash/v1, system `StartRound`, `CloseRound` and `SettleRound` are `start`, `close` and `settle`;
+everything else is `ordinary`. A player `PlaceBet` with a non-empty player and an amount in
+`[1, 1,000,000,000]` holds its amount.
+
+### `orvex.admit_command`
+
+Transaction A is one `AdmissionTxOptions()` transaction that calls `orvex.admit_command` once, then
+commits only on `admitted` and rolls back otherwise. The function, in order:
+
+1. sets `lock_timeout` and `idle_in_transaction_session_timeout` transaction-locally, and
+   `synchronous_commit = on` if it is `off`, so an acknowledged `COMMIT` is flushed;
+2. fast path, without locks: an existing command ID returns `duplicate` (same round and bytes) or
+   `conflict`; an unknown round `not_found`; a game or rules mismatch `rules_mismatch`; a sealed round
+   `round_sealed`; an ordinary command in a closed round `round_closed`;
+3. locks the round's head `FOR UPDATE`;
+4. reads the clock once: `orvex.unix_micro(clock_timestamp())`, the first statement after the lock;
+5. clamps it to at least the effective time of admission `admitted_sequence`, so effective times are
+   non-decreasing in sequence order even if the clock steps back;
+6. repeats the dedupe on a fresh snapshot, then applies the window table;
+7. for `close`: `invalid_not_before` if `NotBeforeUnixMicro` is before the start's effective time,
+   `not_due` if the effective time is before it (equality admits);
+8. for a hold: locks the player's account `FOR NO KEY UPDATE`; no account or too few available credits
+   is `insufficient_credits`;
+9. inserts the admission, then the hold (the hold trigger adds it to `held`), then advances the head
+   and the window.
+
+It never catches exceptions. Argument errors raise `22023`. `orvex.unix_micro` is the only conversion
+of a timestamp into an effective time. Rejections at admission write nothing and are not stored (S-13).
+
+### Locks and timeouts
+
+- Lock order inside A: the round's admission head, then at most one ledger account. A never locks an
+  execution head.
+- `lock_timeout` (default 3 s) bounds the head wait, the account wait and the unique-index wait of a
+  cross-round duplicate; expiry is `55P03`.
+- `idle_in_transaction_session_timeout` (default 1 s) ends a session that called the function and then
+  went idle, releasing the head.
+- The sequencer lets at most 4 calls per round hold a pool connection at once (`MaxInFlightPerRound`).
+
+### Outcomes and errors
+
+| Outcome or error | Go result |
+|---|---|
+| `admitted` | `COMMIT`, then the `Admission` |
+| `duplicate` | the original `Admission`, `Duplicate = true` |
+| `conflict`, or `23505` on `admissions_command_id_key` resolving to another round or other bytes | `ErrCommandIDReused` |
+| `rejected`, or `23514` on `ledger_accounts_floor_check` | `*RejectedError` with the reason |
+| `not_due` | `*ClosureNotDueError` |
+| `invalid_not_before`, `rules_mismatch` | `ErrInvalidRequest` |
+| `not_found` | `ErrRoundNotFound` |
+| `55P03` | `ErrBusy`, no retry |
+| `40001`, `40P01`, connection loss, classes `08`, `53`, `57`, `25P03` before `COMMIT` | retry |
+| ambiguous `COMMIT` failure (connection loss, `40003`, classes `08`, `53`, `57`, `58`, `XX`) | retry with the same command ID, else `ErrOutcomeUnknown` |
+| `COMMIT` failure of class `23` or `OX`, `40002` | `ErrInternal` |
+| any other SQLSTATE, `corrupt` or an unknown outcome | `ErrInternal` |
+
+An `Admit` call makes at most 3 attempts (`MaxAttempts`) with full-jitter backoff (5 ms doubling, cap
+50 ms). After the last attempt it returns `ErrOutcomeUnknown` if the last failure was an ambiguous
+`COMMIT`, otherwise `ErrUnavailable`. On `ErrOutcomeUnknown`, `ErrUnavailable`, `ErrBusy` or a context
+error, callers resubmit the same request with the same command ID. `Lookup` reads an admission and its
+`chain_records` result in one `SnapshotReadTxOptions()` transaction.
+
+### Grants the admitting role needs (input to LBT-14)
+
+- `EXECUTE` on `orvex.admit_command`;
+- `SELECT` on `rounds`, `round_admission_heads`, `admissions` and `ledger_accounts`;
+- `INSERT` on `admissions` and `ledger_holds`;
+- `UPDATE` on `round_admission_heads` and `ledger_accounts` (the latter through the hold trigger);
+- `SELECT` on `chain_records`, for `Lookup` only.
+
+It needs nothing on `round_secrets` or `round_snapshots`.
