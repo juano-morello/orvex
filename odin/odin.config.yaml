@@ -35,8 +35,9 @@ agents:
     # Approval specs here (LBT-9 took 28m, LBT-10 hit the 30m default) need room.
     max_time: 60m
   - name: builder
-    # M2 builds run integration suites and resume long sessions (LBT-11 hit 30m).
-    max_time: 60m
+    # M2 builds run integration suites, -count=5 flakiness checks, and resume long
+    # sessions (LBT-11 hit 30m; LBT-12's build alone took 37m).
+    max_time: 120m
   - name: documenter
     writes:
       - docs/
