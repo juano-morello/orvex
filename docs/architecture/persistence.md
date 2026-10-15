@@ -467,6 +467,7 @@ if absent and the genesis outbox message. `23505` on `rounds_pkey` with equal ge
 | any other `23xxx`, `OX`, `22xxx`, `42xxx`, `XX000` in the batch; `OX009`, class `23`/`OX`, `40002` at `COMMIT` | `ErrInternal`, cache dropped |
 | ambiguous `COMMIT` | the next attempt starts with the conflict check |
 | attempts exhausted (default 3, full-jitter backoff 5 ms doubling, cap 50 ms) | `ErrUnavailable`; calling again is safe |
+| `ctx` ended (including `57014` while `ctx` is done) | an error wrapping `ctx.Err()` and the driver's error; the cache is kept |
 
 ### Grants the engine role needs (input to LBT-14)
 

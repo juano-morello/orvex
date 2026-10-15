@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -405,10 +406,20 @@ func goldenHold(t *testing.T, c chain.Command) *holdSpec {
 
 // --- Effects ---
 
-// effectSet captures everything Transaction B writes for a round (E-17).
+// effectSet captures everything Transaction B writes for a round (E-17):
+// the head, the round's row counts and the totals of every ledger account,
+// keyed by playerKey or the system account's name and round.
 type effectSet struct {
 	processed, records, events, transactions, postings, releases, outbox, snapshots int64
-	accounts                                                                        string
+	accounts                                                                        map[string]account
+}
+
+// playerKey and roundPoolKey are effectSet.accounts keys: player accounts
+// by player ID, system accounts by name and round (or "global").
+func playerKey(player string) string { return "player:" + player }
+
+func roundPoolKey(roundID [16]byte) string {
+	return "system:round_pool:" + string(canonjson.UUID(roundID))
 }
 
 func effects(t *testing.T, db *pgxpool.Pool, roundID [16]byte) effectSet {
@@ -422,18 +433,47 @@ func effects(t *testing.T, db *pgxpool.Pool, roundID [16]byte) effectSet {
 		(SELECT count(*) FROM orvex.ledger_postings WHERE round_id = $1),
 		(SELECT count(*) FROM orvex.ledger_hold_releases WHERE round_id = $1),
 		(SELECT count(*) FROM orvex.outbox_messages WHERE round_id = $1),
-		(SELECT count(*) FROM orvex.round_snapshots WHERE round_id = $1),
-		(SELECT coalesce(string_agg(account_id::text || ':' || debits_posted || '/' || credits_posted || '/' || held, ',' ORDER BY account_id), '')
-			FROM orvex.ledger_accounts)`, roundID).
-		Scan(&s.processed, &s.records, &s.events, &s.transactions, &s.postings, &s.releases, &s.outbox, &s.snapshots, &s.accounts); err != nil {
+		(SELECT count(*) FROM orvex.round_snapshots WHERE round_id = $1)`, roundID).
+		Scan(&s.processed, &s.records, &s.events, &s.transactions, &s.postings, &s.releases, &s.outbox, &s.snapshots); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(ctx, `SELECT
+		CASE WHEN kind = 'player' THEN 'player:' || player_id
+			ELSE 'system:' || name || ':' || coalesce(round_id::text, 'global') END,
+		debits_posted, credits_posted, held
+		FROM orvex.ledger_accounts`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	s.accounts = map[string]account{}
+	for rows.Next() {
+		var k string
+		var a account
+		if err := rows.Scan(&k, &a.debits, &a.credits, &a.held); err != nil {
+			t.Fatal(err)
+		}
+		s.accounts[k] = a
+	}
+	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
 	return s
 }
 
+// clone returns a deep copy of e.
+func (e effectSet) clone() effectSet {
+	out := e
+	out.accounts = make(map[string]account, len(e.accounts))
+	for k, v := range e.accounts {
+		out.accounts[k] = v
+	}
+	return out
+}
+
 func requireEffects(t *testing.T, got, want effectSet) {
 	t.Helper()
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("effects = %+v\nwant      %+v", got, want)
 	}
 }

@@ -3,6 +3,7 @@
 package execution_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -31,8 +32,11 @@ func betRound(t *testing.T, pool *pgxpool.Pool, x *execution.Executor) [16]byte 
 	return round
 }
 
-// oneBet and oneStart are the effects of executing the bet and the start.
-func oneBet(e effectSet) effectSet {
+// oneBet returns e after one execution of betRound's bet: one record,
+// event, ledger transaction, posting, release and outbox message; alice's
+// hold of 100 converted into a debit; the round account credited 100.
+func oneBet(e effectSet, round [16]byte) effectSet {
+	e = e.clone()
 	e.processed++
 	e.records++
 	e.events++
@@ -40,22 +44,25 @@ func oneBet(e effectSet) effectSet {
 	e.postings++
 	e.releases++
 	e.outbox++
-	e.accounts = ""
+	alice := e.accounts[playerKey("alice")]
+	alice.debits += 100
+	alice.held -= 100
+	e.accounts[playerKey("alice")] = alice
+	pot := e.accounts[roundPoolKey(round)]
+	pot.credits += 100
+	e.accounts[roundPoolKey(round)] = pot
 	return e
 }
 
-func oneStart(e effectSet) effectSet {
+// oneStart returns e after one execution of betRound's StartRound: one
+// record, event, outbox message and snapshot; no account changes.
+func oneStart(e effectSet, _ [16]byte) effectSet {
+	e = e.clone()
 	e.processed++
 	e.records++
 	e.events++
 	e.outbox++
 	e.snapshots++
-	e.accounts = ""
-	return e
-}
-
-func withoutAccounts(e effectSet) effectSet {
-	e.accounts = ""
 	return e
 }
 
@@ -84,7 +91,7 @@ func TestInjectedFailureLeavesNoPartialEffects(t *testing.T) {
 			if out, err := x.ExecuteNext(ctx, lease(round)); err != nil || !out.Executed {
 				t.Fatalf("ExecuteNext after the fault = %+v, %v", out, err)
 			}
-			requireEffects(t, withoutAccounts(effects(t, pool, round)), after(before))
+			requireEffects(t, effects(t, pool, round), after(before, round))
 		})
 	}
 }
@@ -117,7 +124,7 @@ func TestLedgerFailureRetried(t *testing.T) {
 	if n := count(t, pool, `SELECT last_value FROM orvex_test.fault_budget`); n < 2 {
 		t.Errorf("fault budget sequence at %d: the fault did not fire before the retry", n)
 	}
-	requireEffects(t, withoutAccounts(effects(t, pool, round)), oneBet(before))
+	requireEffects(t, effects(t, pool, round), oneBet(before, round))
 }
 
 func TestCommitFailureRollsBack(t *testing.T) {
@@ -234,8 +241,7 @@ func TestTakeoverBeforeCompareAndSet(t *testing.T) {
 	if _, err := x.ExecuteNext(ctx, lease(round)); !errors.Is(err, execution.ErrFenced) {
 		t.Fatalf("ExecuteNext = %v, want ErrFenced", err)
 	}
-	b := withoutAccounts(before)
-	requireEffects(t, withoutAccounts(effects(t, pool, round)), b)
+	requireEffects(t, effects(t, pool, round), before)
 	if n := count(t, pool, `SELECT fencing_token FROM orvex.round_execution_heads WHERE round_id = $1`, round); n != 1 {
 		t.Errorf("fencing token %d, want 1", n)
 	}
@@ -273,7 +279,7 @@ func TestCrashBeforeCommit(t *testing.T) {
 		if err != nil || out.Sequence != 1 {
 			t.Fatalf("ExecuteNext = %+v, %v; want success on a later attempt", out, err)
 		}
-		requireEffects(t, withoutAccounts(effects(t, pool, round)), oneBet(before))
+		requireEffects(t, effects(t, pool, round), oneBet(before, round))
 	})
 	t.Run("abandoned instance", func(t *testing.T) {
 		_, pool := newDB(t)
@@ -292,7 +298,7 @@ func TestCrashBeforeCommit(t *testing.T) {
 		if err != nil || out.Sequence != 1 || out.Adopted {
 			t.Fatalf("new instance = %+v, %v", out, err)
 		}
-		requireEffects(t, withoutAccounts(effects(t, pool, round)), oneBet(before))
+		requireEffects(t, effects(t, pool, round), oneBet(before, round))
 	})
 }
 
@@ -322,7 +328,7 @@ func TestCrashAfterCommit(t *testing.T) {
 		if err != nil || !out.Adopted || out.Sequence != 1 || !out.Executed {
 			t.Fatalf("ExecuteNext = %+v, %v; want Adopted sequence 1", out, err)
 		}
-		requireEffects(t, withoutAccounts(effects(t, pool, round)), oneBet(before))
+		requireEffects(t, effects(t, pool, round), oneBet(before, round))
 		var status string
 		if err := pool.QueryRow(ctx, `SELECT status FROM orvex.command_results WHERE command_id = $1`, cmdID(1)).Scan(&status); err != nil || status != "accepted" {
 			t.Errorf("command_results = %q, %v; want accepted", status, err)
@@ -333,7 +339,7 @@ func TestCrashAfterCommit(t *testing.T) {
 		if _, err := crashing.ExecuteNext(ctx, lease(round)); !errors.Is(err, execution.ErrUnavailable) {
 			t.Fatalf("crashing instance = %v, want ErrUnavailable", err)
 		}
-		requireEffects(t, withoutAccounts(effects(t, pool, round)), oneBet(before))
+		requireEffects(t, effects(t, pool, round), oneBet(before, round))
 		y := newExecutor(t, pool, nil, nil)
 		out, err := y.ExecuteNext(ctx, lease(round))
 		if err != nil || !out.Executed || out.Sequence != 2 {
@@ -482,4 +488,46 @@ func requireStmtError(t *testing.T, db *pgxpool.Pool, fn func(tx pgx.Tx) error, 
 	if !errors.As(err, &pgErr) || pgErr.Code != sqlstate || pgErr.ConstraintName != constraint {
 		t.Errorf("err = %v, want SQLSTATE %s on %s", err, sqlstate, constraint)
 	}
+}
+
+// TestContextEndedKeepsEntry: the context ends inside Transaction B and the
+// driver reports 57014 (query canceled), which does not wrap the context
+// error. ExecuteNext returns an error wrapping ctx.Err() and the PgError,
+// writes nothing, and keeps the round's cached state: the next call runs
+// Transaction B without a cold load (E-15).
+func TestContextEndedKeepsEntry(t *testing.T) {
+	_, pool := newDB(t)
+	fdb := &faultDB{pool: pool}
+	x := newExecutor(t, fdb, nil, nil)
+	round := betRound(t, pool, x)
+	before := effects(t, pool, round)
+
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var once sync.Once
+	fdb.set(func(f *faultDB) {
+		f.beforeCAS = func(pgx.Tx) error {
+			var err error
+			once.Do(func() {
+				cancel()
+				err = &pgconn.PgError{Code: "57014", Message: "canceling statement due to user request"}
+			})
+			return err
+		}
+	})
+	_, err := x.ExecuteNext(cctx, lease(round))
+	if !errors.Is(err, context.Canceled) || postgres.SQLState(err) != "57014" {
+		t.Fatalf("ExecuteNext = %v; want an error wrapping context.Canceled and the 57014 PgError", err)
+	}
+	requireEffects(t, effects(t, pool, round), before)
+
+	begins := fdb.begins.Load()
+	out, err := x.ExecuteNext(ctx, lease(round))
+	if err != nil || out.Sequence != 1 || out.Adopted {
+		t.Fatalf("ExecuteNext after the context error = %+v, %v", out, err)
+	}
+	if n := fdb.begins.Load() - begins; n != 1 {
+		t.Errorf("%d transactions for the next call, want 1: the entry was dropped and cold-loaded", n)
+	}
+	requireEffects(t, effects(t, pool, round), oneBet(before, round))
 }

@@ -100,7 +100,7 @@ func (e *Executor) CreateRound(ctx context.Context, r NewRound) (Created, error)
 	for attempt := 1; attempt <= e.cfg.MaxAttempts; attempt++ {
 		if attempt > 1 {
 			if err := e.sleep(ctx, backoff(attempt)); err != nil {
-				return Created{}, contextError(err)
+				return Created{}, contextError(ctx, err)
 			}
 		}
 		res, err := e.insertRound(ctx, r, re, secret, offset, out)
@@ -127,7 +127,7 @@ func (e *Executor) CreateRound(ctx context.Context, r NewRound) (Created, error)
 			lastErr = err
 			switch classifyStatementError(ctx, err) {
 			case stmtContext:
-				return Created{}, contextError(err)
+				return Created{}, contextError(ctx, err)
 			case stmtRetry:
 				continue
 			default:
@@ -138,7 +138,7 @@ func (e *Executor) CreateRound(ctx context.Context, r NewRound) (Created, error)
 		case createBusy:
 			return Created{}, fmt.Errorf("%w: %w", ErrBusy, err)
 		case createContext:
-			return Created{}, contextError(err)
+			return Created{}, contextError(ctx, err)
 		default:
 			return Created{}, fmt.Errorf("%w: create round: %w", ErrInternal, err)
 		}

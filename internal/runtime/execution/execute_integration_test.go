@@ -599,30 +599,125 @@ func TestSettlementResolvesEarlierCommands(t *testing.T) {
 		if n := count(t, pool, `SELECT processed_sequence FROM orvex.round_execution_heads WHERE round_id = $1`, round); n != 8 {
 			t.Fatalf("processed %d, want 8", n)
 		}
-		var types []string
-		rows, err := pool.Query(ctx, `SELECT event_type FROM orvex.domain_events WHERE round_id = $1 AND sequence = 8 ORDER BY event_sequence`, round)
+		// Decode every persisted record of the round.
+		placed := map[string]int64{}
+		cashedOut := map[string]int64{}
+		var (
+			settlement []chain.Event
+			records    int
+		)
+		rows, err := pool.Query(ctx, `SELECT sequence, record FROM orvex.chain_records WHERE round_id = $1 AND sequence > 0 ORDER BY sequence`, round)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for rows.Next() {
-			var s string
-			_ = rows.Scan(&s)
-			types = append(types, s)
+			var seq int64
+			var b []byte
+			if err := rows.Scan(&seq, &b); err != nil {
+				t.Fatal(err)
+			}
+			records++
+			rec, err := chain.Decode(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := rec.(chain.Command)
+			if c.Sequence != uint64(records) {
+				t.Fatalf("record %d at position %d", c.Sequence, records)
+			}
+			if seq == 8 {
+				settlement = c.Events
+				continue
+			}
+			for _, ev := range c.Events {
+				e, err := v1.Adapter().DecodeEvent(ev.Payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch e := e.(type) {
+				case v1.BetPlaced:
+					placed[string(e.Player)] = e.BetCredits
+				case v1.BetCashedOut:
+					cashedOut[string(e.Player)] = e.PayoutCredits
+				}
+			}
 		}
 		rows.Close()
-		if !reflect.DeepEqual(types, []string{"BetLost", "RoundSettled"}) {
-			t.Errorf("settlement events = %v, want one BetLost (bob) and RoundSettled", types)
+		if records != 8 {
+			t.Fatalf("%d command records, want 8", records)
 		}
-		var payout int64
-		if err := pool.QueryRow(ctx, `SELECT coalesce(sum(credits_posted), 0) - 3000 FROM orvex.ledger_accounts WHERE kind = 'player'`).Scan(&payout); err != nil {
-			t.Fatal(err)
+		if !reflect.DeepEqual(placed, map[string]int64{"alice": 100, "bob": 200, "carol": 300}) {
+			t.Errorf("bets = %v", placed)
 		}
-		// Settlement posting = TotalBetCredits - TotalPayoutCredits (600 - payouts).
-		house := accountByID(t, pool, ledger.HouseAccountID())
-		if house.balance() != 600-payout {
-			t.Errorf("house balance %d, want %d", house.balance(), 600-payout)
+		if len(cashedOut) != 2 || cashedOut["alice"] < 100 || cashedOut["carol"] < 300 {
+			t.Fatalf("cash-outs = %v, want alice and carol", cashedOut)
 		}
-		if got := accountByID(t, pool, ledger.RoundAccountID(round)); got.balance() != 0 {
+		var (
+			lost      = map[string]int64{}
+			settled   v1.RoundSettled
+			settledAt uint64
+		)
+		for i, ev := range settlement {
+			e, err := v1.Adapter().DecodeEvent(ev.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch e := e.(type) {
+			case v1.BetLost:
+				lost[string(e.Player)] = e.BetCredits
+			case v1.RoundSettled:
+				if i != len(settlement)-1 {
+					t.Errorf("RoundSettled is event %d of %d, want the last", i, len(settlement))
+				}
+				settled, settledAt = e, ev.Sequence
+			default:
+				t.Errorf("settlement event %d is %T", i, e)
+			}
+		}
+		// BetLost events are exactly the bets without a cash-out.
+		wantLost := map[string]int64{}
+		for p, b := range placed {
+			if _, ok := cashedOut[p]; !ok {
+				wantLost[p] = b
+			}
+		}
+		if !reflect.DeepEqual(lost, wantLost) || !reflect.DeepEqual(lost, map[string]int64{"bob": 200}) {
+			t.Errorf("BetLost = %v, want %v (bob only)", lost, wantLost)
+		}
+		payouts := cashedOut["alice"] + cashedOut["carol"]
+		if settledAt == 0 || settled.TotalBetCredits != 600 || settled.TotalPayoutCredits != payouts || settled.BetCount != 3 {
+			t.Fatalf("RoundSettled = %+v at event %d, want totals 600 / %d", settled, settledAt, payouts)
+		}
+		// The settlement posting equals TotalBetCredits - TotalPayoutCredits.
+		net := settled.TotalBetCredits - settled.TotalPayoutCredits
+		var (
+			amount        int64
+			eventSeq      int64
+			debit, credit [16]byte
+			kind          string
+		)
+		if err := pool.QueryRow(ctx, `SELECT p.amount, p.event_sequence, p.debit_account_id, p.credit_account_id, x.kind
+			FROM orvex.ledger_postings p JOIN orvex.ledger_transactions x USING (transaction_id)
+			WHERE x.round_id = $1 AND x.sequence = 8`, round).Scan(&amount, &eventSeq, &debit, &credit, &kind); err != nil {
+			t.Fatalf("settlement posting: %v", err)
+		}
+		if n := count(t, pool, `SELECT count(*) FROM orvex.ledger_postings p JOIN orvex.ledger_transactions x USING (transaction_id)
+			WHERE x.round_id = $1 AND x.sequence = 8`, round); n != 1 {
+			t.Errorf("%d settlement postings, want 1", n)
+		}
+		pot, house := ledger.RoundAccountID(round), ledger.HouseAccountID()
+		wantDebit, wantCredit, wantAmount := pot, house, net
+		if net < 0 {
+			wantDebit, wantCredit, wantAmount = house, pot, -net
+		}
+		if kind != "crash_settlement" || eventSeq != int64(settledAt) || amount != wantAmount || debit != wantDebit || credit != wantCredit {
+			t.Errorf("settlement posting = %s %d at event %d (%x -> %x), want crash_settlement %d at event %d (%x -> %x)",
+				kind, amount, eventSeq, debit, credit, wantAmount, settledAt, wantDebit, wantCredit)
+		}
+		if got := accountByID(t, pool, house); got.balance() != net {
+			t.Errorf("house balance %d, want TotalBetCredits - TotalPayoutCredits = %d", got.balance(), net)
+		}
+		if got := accountByID(t, pool, pot); got.balance() != 0 {
 			t.Errorf("round account balance %d, want 0", got.balance())
 		}
 		requireBalanced(t, pool)

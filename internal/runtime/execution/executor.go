@@ -283,7 +283,7 @@ func (e *Executor) ExecuteNext(ctx context.Context, lease Lease) (Outcome, error
 	for attempt := 1; attempt <= e.cfg.MaxAttempts; attempt++ {
 		if wait {
 			if err := e.sleep(ctx, backoff(attempt)); err != nil {
-				return Outcome{}, contextError(err)
+				return Outcome{}, contextError(ctx, err)
 			}
 		}
 		wait = false
@@ -328,7 +328,7 @@ func (e *Executor) ExecuteNext(ctx context.Context, lease Lease) (Outcome, error
 			if err != nil {
 				switch classifyStatementError(ctx, err) {
 				case stmtContext:
-					return Outcome{}, contextError(err)
+					return Outcome{}, contextError(ctx, err)
 				case stmtRetry:
 					lastErr, wait = err, true
 					continue
@@ -362,7 +362,7 @@ func (e *Executor) ExecuteNext(ctx context.Context, lease Lease) (Outcome, error
 			}
 			switch classifyStatementError(ctx, err) {
 			case stmtContext:
-				return Outcome{}, contextError(err)
+				return Outcome{}, contextError(ctx, err)
 			case stmtRetry:
 				lastErr, wait = err, true
 				continue
@@ -395,7 +395,7 @@ func (e *Executor) ExecuteNext(ctx context.Context, lease Lease) (Outcome, error
 		case commitResultBusy:
 			return Outcome{}, fmt.Errorf("%w: %w", ErrBusy, err)
 		case commitResultContext:
-			return Outcome{}, contextError(err)
+			return Outcome{}, contextError(ctx, err)
 		default:
 			e.drop(lease.RoundID, en)
 			return Outcome{}, fmt.Errorf("%w: %w", ErrInternal, err)
@@ -483,7 +483,7 @@ func (e *Executor) resolveConflict(ctx context.Context, lease Lease, en *entry, 
 	case err != nil:
 		switch classifyStatementError(ctx, err) {
 		case stmtContext:
-			return Outcome{}, stepDone, contextError(err)
+			return Outcome{}, stepDone, contextError(ctx, err)
 		case stmtBusy:
 			return Outcome{}, stepDone, fmt.Errorf("%w: %w", ErrBusy, err)
 		case stmtRetry:
@@ -528,10 +528,18 @@ const conflictSQL = `SELECT h.processed_sequence, h.fencing_token, r.hash
 	LEFT JOIN orvex.chain_records r ON r.round_id = h.round_id AND r.sequence = $2
 	WHERE h.round_id = $1`
 
-// contextError wraps a context error so that errors.Is(err, ctx.Err())
-// holds.
-func contextError(err error) error {
-	return fmt.Errorf("execution: %w", err)
+// contextError returns the error of a call whose ctx ended (E-15): it wraps
+// ctx.Err(), so errors.Is(err, ctx.Err()) holds even when the driver's error
+// does not wrap it (a 57014 PgError, a closed connection), and it keeps the
+// driver's error reachable through errors.Is and errors.As.
+func contextError(ctx context.Context, err error) error {
+	ctxErr := ctx.Err()
+	switch {
+	case ctxErr == nil, errors.Is(err, ctxErr):
+		return fmt.Errorf("execution: %w", err)
+	default:
+		return fmt.Errorf("execution: %w: %w", ctxErr, err)
+	}
 }
 
 // resolveAccounts maps every posting side to an account ID (§5.5). It

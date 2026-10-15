@@ -3,16 +3,19 @@ package execution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/juano-morello/orvex/internal/buildinfo"
 	"github.com/juano-morello/orvex/internal/game"
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
+	"github.com/juano-morello/orvex/internal/persistence/postgres"
 )
 
 // forbiddenDB fails the test on any call.
@@ -159,4 +162,80 @@ func TestExecuteNextValidation(t *testing.T) {
 		t.Errorf("CreateRound nil round id: err = %v, want ErrInvalidRound", err)
 	}
 	x.Forget(round)
+}
+
+// beginErrDB fails every BeginTx with err and any other call with a test
+// error.
+type beginErrDB struct {
+	t      *testing.T
+	err    error
+	begins int
+}
+
+func (d *beginErrDB) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	d.begins++
+	return nil, d.err
+}
+
+func (d *beginErrDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	d.t.Error("Query called")
+	return nil, errors.New("unexpected")
+}
+
+func (d *beginErrDB) QueryRow(context.Context, string, ...any) pgx.Row {
+	d.t.Error("QueryRow called")
+	return nil
+}
+
+// TestContextErrorWrapsCtxErr: when ctx has ended and the driver reports a
+// PgError that does not wrap the context error (57014, query canceled),
+// ExecuteNext and CreateRound still return an error wrapping ctx.Err(), keep
+// the driver's error reachable, and ExecuteNext keeps the round's entry
+// (E-15).
+func TestContextErrorWrapsCtxErr(t *testing.T) {
+	canceled := &pgconn.PgError{Code: "57014", Message: "canceling statement due to user request"}
+	db := &beginErrDB{t: t, err: canceled}
+	cfg := DefaultConfig()
+	cfg.EngineBuild = "golden"
+	x, err := New(db, registry(t), cfg, CrashV1Policy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	round := [16]byte{0x0e, 1}
+
+	_, err = x.ExecuteNext(ctx, Lease{RoundID: round})
+	if !errors.Is(err, context.Canceled) || postgres.SQLState(err) != "57014" {
+		t.Errorf("ExecuteNext = %v; want an error wrapping context.Canceled and the 57014 PgError", err)
+	}
+	for _, s := range []error{ErrInternal, ErrUnavailable, ErrBusy, ErrCorrupt, ErrFenced} {
+		if errors.Is(err, s) {
+			t.Errorf("ExecuteNext error matches %v", s)
+		}
+	}
+	x.mu.Lock()
+	en := x.entries[round]
+	x.mu.Unlock()
+	if en == nil || en.dropped.Load() || en.halt != nil {
+		t.Errorf("ExecuteNext dropped or halted the entry after a context error")
+	}
+	if db.begins != 1 {
+		t.Errorf("%d BeginTx calls, want 1 (no retry once ctx ended)", db.begins)
+	}
+
+	var seed [32]byte
+	seed[0] = 0xab
+	_, err = x.CreateRound(ctx, NewRound{RoundID: round, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber,
+		Config:             v1.Config{RoundID: round, Seed: seed, MinBetCredits: 1, MaxBetCredits: 100, MaxBets: 10},
+		CreatedAtUnixMicro: 1_760_000_000_000_000})
+	if !errors.Is(err, context.Canceled) || postgres.SQLState(err) != "57014" {
+		t.Errorf("CreateRound = %v; want an error wrapping context.Canceled and the 57014 PgError", err)
+	}
+
+	// With ctx alive, contextError adds nothing.
+	live := contextError(context.Background(), fmt.Errorf("x: %w", context.Canceled))
+	if !errors.Is(live, context.Canceled) {
+		t.Errorf("contextError lost the wrapped cause: %v", live)
+	}
 }

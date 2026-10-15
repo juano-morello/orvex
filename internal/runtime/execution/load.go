@@ -200,7 +200,7 @@ var errSnapshotMismatch = errors.New("execution: replayed state hash differs fro
 func loadDBError(ctx context.Context, err error) error {
 	switch classifyStatementError(ctx, err) {
 	case stmtContext:
-		return contextError(err)
+		return contextError(ctx, err)
 	case stmtRetry:
 		return fmt.Errorf("%w: cold load: %w", errTransient, err)
 	case stmtBusy:

@@ -162,7 +162,6 @@ func TestConflictingPerRoundCommits(t *testing.T) {
 	}
 	wantTotals := totalsSnapshot(t, refPool)
 	wantEffects := effects(t, refPool, conflictRoundID)
-	wantEffects.accounts = ""
 
 	for _, variant := range []struct {
 		name   string
@@ -209,7 +208,6 @@ func requireConflictInvariants(t *testing.T, pool *pgxpool.Pool, outs [2][]execu
 	wantTotals map[string]account, wantEffects effectSet) {
 	t.Helper()
 	got := effects(t, pool, conflictRoundID)
-	got.accounts = ""
 	requireEffects(t, got, wantEffects)
 	gotTotals := totalsSnapshot(t, pool)
 	if !reflect.DeepEqual(gotTotals, wantTotals) {
