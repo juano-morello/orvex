@@ -143,7 +143,7 @@ func TestMigrateUpDownClean(t *testing.T) {
 		t.Fatal("fingerprint unchanged by migrating up")
 	}
 	reverted := down(t, pool, ms, 0)
-	if want := []int{6, 5, 4, 3, 2, 1}; !equalInts(versions(reverted), want) {
+	if want := []int{7, 6, 5, 4, 3, 2, 1}; !equalInts(versions(reverted), want) {
 		t.Errorf("reverted %v, want %v", versions(reverted), want)
 	}
 	if f2 := fingerprint(t, pool); f2 != f0 {
@@ -380,15 +380,16 @@ func TestMigrateDownRefusesAuditData(t *testing.T) {
 	records := count(t, pool, "SELECT count(*) FROM orvex.chain_records")
 	snapshots := count(t, pool, "SELECT count(*) FROM orvex.round_snapshots")
 
+	// 0007 refuses first: round_admission_heads holds the loaded round's head.
 	reverted, err := postgres.MigrateDown(ctx, pool, ms, 0)
-	if got := versions(reverted); !equalInts(got, []int{6, 5}) {
-		t.Errorf("reverted %v, want [6 5]", got)
+	if got := versions(reverted); len(got) != 0 {
+		t.Errorf("reverted %v, want nothing (0007 refuses)", got)
 	}
 	if code := postgres.SQLState(err); code != postgres.CodeDownRefused {
 		t.Fatalf("err = %v, want SQLSTATE %s", err, postgres.CodeDownRefused)
 	}
-	if v := schemaVersion(t, pool); v != 4 {
-		t.Errorf("version = %d, want 4", v)
+	if v := schemaVersion(t, pool); v != 7 {
+		t.Errorf("version = %d, want 7", v)
 	}
 	if n := count(t, pool, "SELECT count(*) FROM orvex.chain_records"); n != records {
 		t.Errorf("chain records = %d, want %d", n, records)
@@ -396,8 +397,37 @@ func TestMigrateDownRefusesAuditData(t *testing.T) {
 	if n := count(t, pool, "SELECT count(*) FROM orvex.round_snapshots"); n != snapshots {
 		t.Errorf("snapshots = %d, want %d", n, snapshots)
 	}
-	if got := versions(up(t, pool, ms, len(ms))); !equalInts(got, []int{5, 6}) {
-		t.Errorf("re-up applied %v, want [5 6]", got)
+	if got := versions(up(t, pool, ms, len(ms))); len(got) != 0 {
+		t.Errorf("re-up applied %v, want nothing", got)
+	}
+}
+
+// TestFingerprintStableAcrossColumnDropAndReAdd: re-adding dropped columns
+// gives them new attnums; the fingerprint numbers live columns by position,
+// so a down and re-up of a column migration fingerprints as before.
+func TestFingerprintStableAcrossColumnDropAndReAdd(t *testing.T) {
+	t.Parallel()
+	pool := pgtest.Pool(t, pgtest.EmptyDatabase(t))
+	ms := load(t, fstest.MapFS{
+		"0001_base.up.sql":      {Data: []byte("CREATE TABLE public.fp_a (x int);\n")},
+		"0001_base.down.sql":    {Data: []byte("DROP TABLE public.fp_a;\n")},
+		"0002_columns.up.sql":   {Data: []byte("ALTER TABLE public.fp_a ADD COLUMN y int, ADD COLUMN z text;\n")},
+		"0002_columns.down.sql": {Data: []byte("ALTER TABLE public.fp_a DROP COLUMN y, DROP COLUMN z;\n")},
+	})
+	up(t, pool, ms, 1)
+	f1 := fingerprint(t, pool)
+	up(t, pool, ms, 2)
+	f2 := fingerprint(t, pool)
+	if f2 == f1 {
+		t.Fatal("fingerprint unchanged by adding columns")
+	}
+	down(t, pool, ms, 1)
+	if fp := fingerprint(t, pool); fp != f1 {
+		t.Errorf("fingerprint after dropping the columns differs:\n--- want\n%s\n--- got\n%s", f1, fp)
+	}
+	up(t, pool, ms, 2)
+	if fp := fingerprint(t, pool); fp != f2 {
+		t.Errorf("fingerprint after re-adding the columns differs:\n--- want\n%s\n--- got\n%s", f2, fp)
 	}
 }
 

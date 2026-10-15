@@ -34,7 +34,7 @@ var fingerprintQueries = []string{
 	 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f', 'c') AND ` + fmt.Sprintf(schemaFilter, "n.nspname"),
 	// Columns.
 	`SELECT 'column ' || n.nspname || '.' || c.relname || '.' || a.attname
-	        || ' #' || a.attnum::text
+	        || ' #' || (row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum))::text
 	        || ' type=' || format_type(a.atttypid, a.atttypmod)
 	        || ' notnull=' || a.attnotnull::text
 	        || ' default=' || coalesce(pg_get_expr(d.adbin, d.adrelid), '')
@@ -102,13 +102,14 @@ var fingerprintQueries = []string{
 }
 
 // Fingerprint returns a sorted, line-per-object description of every schema,
-// relation, column (type, nullability, default, generated, identity),
-// constraint (pg_get_constraintdef, deferrability), index (pg_get_indexdef),
-// non-internal trigger (pg_get_triggerdef), function (md5 of
-// pg_get_functiondef), view (md5 of pg_get_viewdef), user type and comment
-// outside pg_catalog, information_schema, pg_toast, the temporary schemas
-// and the excluded schemas. Two catalogs with equal fingerprints hold the
-// same schema objects.
+// relation, column (position among live columns, type, nullability,
+// default, generated, identity), constraint (pg_get_constraintdef,
+// deferrability), index (pg_get_indexdef), non-internal trigger
+// (pg_get_triggerdef), function (md5 of pg_get_functiondef), view (md5 of
+// pg_get_viewdef), user type and comment outside pg_catalog,
+// information_schema, pg_toast, the temporary schemas and the excluded
+// schemas. Two catalogs with equal fingerprints hold the same schema
+// objects.
 func Fingerprint(ctx context.Context, db Querier, exclude ...string) (string, error) {
 	if exclude == nil {
 		exclude = []string{}

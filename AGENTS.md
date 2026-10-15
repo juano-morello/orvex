@@ -51,4 +51,4 @@ If a change conflicts with, or needs to deviate from, an ADR, say so explicitly 
 - `make golden-check`: regenerate the Crash v1 golden vectors and the audit golden histories with the independent Python oracles (Python 3.11+, standard library only) and fail if they differ from the committed files. Never regenerate vectors or fixtures from Go output.
 - `make clean`: remove `bin/`.
 
-Run `make test` and `make lint` before handing off work. When you change `migrations/` or `internal/persistence/`, also run `make test-integration`.
+Run `make test` and `make lint` before handing off work. When you change `migrations/`, `internal/persistence/` or `internal/runtime/`, also run `make test-integration`.
