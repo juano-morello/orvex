@@ -114,6 +114,9 @@ type Report struct {
 	Head       chain.Hash
 	// Checkpoints are the verified checkpoints; empty in ModeChain.
 	Checkpoints []Checkpoint
+	// State is the replayed state after the last record in ModeReplay and
+	// ModeVerify; nil in ModeChain. Callers must not mutate it.
+	State any
 }
 
 func fail(stage Stage, seq int64, err error) *Failure {
@@ -459,6 +462,7 @@ func replayHistory(h *history, rep Report, opt Options) (Report, error) {
 	cps := h.header.checkpoints
 	next := 0
 	visit := func(seq uint64, s any) error {
+		rep.State = s
 		if next >= len(cps) || cps[next].Sequence != seq {
 			return nil
 		}

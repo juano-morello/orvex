@@ -506,6 +506,42 @@ func TestChainModeNeedsNoRegistry(t *testing.T) {
 	wantOutcome(t, err, 3, "rules", "0")
 }
 
+// TestReportState checks Report.State: the replayed state after the last
+// record in ModeReplay and ModeVerify, nil in ModeChain (LBT-19 X-7).
+func TestReportState(t *testing.T) {
+	cases := []struct {
+		file string
+		mode verification.Mode
+		want v1.Phase
+	}{
+		{"worked-example.jsonl", verification.ModeReplay, v1.PhaseSettled},
+		{"worked-example.jsonl", verification.ModeVerify, v1.PhaseSettled},
+		{"in-progress.jsonl", verification.ModeReplay, v1.PhaseRunning},
+	}
+	for _, tc := range cases {
+		data := readGolden(t, tc.file)
+		rep, err := verification.Verify(bytes.NewReader(data), verification.Options{Mode: tc.mode, Registry: registry(t)})
+		if err != nil {
+			t.Fatalf("%s mode %d: %v", tc.file, tc.mode, err)
+		}
+		s, ok := rep.State.(v1.State)
+		if !ok {
+			t.Fatalf("%s mode %d: State is %T; want v1.State", tc.file, tc.mode, rep.State)
+		}
+		if s.Phase != tc.want {
+			t.Errorf("%s mode %d: phase %v; want %v", tc.file, tc.mode, s.Phase, tc.want)
+		}
+	}
+	data := readGolden(t, "worked-example.jsonl")
+	rep, err := verification.Verify(bytes.NewReader(data), verification.Options{Mode: verification.ModeChain})
+	if err != nil {
+		t.Fatalf("chain mode: %v", err)
+	}
+	if rep.State != nil {
+		t.Errorf("chain mode State = %T; want nil", rep.State)
+	}
+}
+
 // failingReader returns data, then err.
 type failingReader struct {
 	data []byte

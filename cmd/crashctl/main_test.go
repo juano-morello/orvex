@@ -39,6 +39,7 @@ func TestRun(t *testing.T) {
 		{name: "unknown flag", args: []string{"-bogus"}, wantCode: 2, stderrAny: true},
 		{name: "help", args: []string{"-h"}, wantCode: 0, stderrAny: true},
 		{name: "usage lists migrate", args: nil, wantCode: 2, wantStderr: "crashctl migrate up [-to N]"},
+		{name: "usage lists export", args: nil, wantCode: 2, wantStderr: "crashctl audit export [-unsettled] [-format NAME] ROUND_ID FILE"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

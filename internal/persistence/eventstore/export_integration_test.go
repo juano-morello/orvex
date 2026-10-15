@@ -118,6 +118,9 @@ func TestExportGoldenHistories(t *testing.T) {
 				t.Errorf("export = {round %x, records %d, head %s}, want {%x, %d, %s}",
 					exp.RoundID, exp.Records, exp.Head, l.RoundID, h.Records, h.Head)
 			}
+			if exp.RoundRecords != h.Records {
+				t.Errorf("export round records = %d, want %d", exp.RoundRecords, h.Records)
+			}
 			if len(exp.Checkpoints) != len(h.Checkpoints) {
 				t.Fatalf("export has %d checkpoints, want %d", len(exp.Checkpoints), len(h.Checkpoints))
 			}
@@ -144,6 +147,9 @@ func TestExportStopsAtLatestSnapshot(t *testing.T) {
 	}
 	if exp.Records != 10 || exp.Head != l.Hashes[9] {
 		t.Errorf("export = {records %d, head %s}, want {10, %s}", exp.Records, exp.Head, l.Hashes[9])
+	}
+	if exp.RoundRecords != 23 {
+		t.Errorf("export round records = %d, want 23", exp.RoundRecords)
 	}
 	if len(exp.Checkpoints) != 2 || exp.Checkpoints[0].Sequence != 0 || exp.Checkpoints[1].Sequence != 9 {
 		t.Errorf("checkpoints = %+v, want sequences 0 and 9", exp.Checkpoints)
