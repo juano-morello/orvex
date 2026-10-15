@@ -361,8 +361,8 @@ func TestByteMutations(t *testing.T) {
 			}
 			return l
 		}, 1, "state-replay", "9"},
-		{"B11-format-v2", func(l [][]byte) [][]byte {
-			l[0] = replaceOnce(t, l[0], `"format":"orvex/audit-history/v1"`, `"format":"orvex/audit-history/v2"`)
+		{"B11-format-v3", func(l [][]byte) [][]byte {
+			l[0] = replaceOnce(t, l[0], `"format":"orvex/audit-history/v1"`, `"format":"orvex/audit-history/v3"`)
 			return l
 		}, 3, "format", "header"},
 		{"B12-space-after-colon", func(l [][]byte) [][]byte {

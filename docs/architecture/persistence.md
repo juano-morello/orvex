@@ -477,3 +477,42 @@ if absent and the genesis outbox message. `23505` on `rounds_pkey` with equal ge
 `round_admission_heads`, `round_execution_heads`, `chain_records`, `domain_events`, `round_snapshots`,
 `ledger_accounts`, `ledger_transactions`, `ledger_postings`, `ledger_hold_releases`, `outbox_messages`;
 `UPDATE` on `round_execution_heads` and `ledger_accounts` (through the ledger triggers).
+
+## 14. Audit export v2 (LBT-18)
+
+`eventstore.ExportHistoryV2` writes a round as an `orvex/audit-history/v2` file, the input of the
+verifier's ledger stage. The normative design is [the LBT-18 spec](../specs/ac81f88f_audit-ledger-stage.md)
+(decisions L-1 to L-14), built per [the implementation plan](../specs/f4d371a8_audit-ledger-implementation.md).
+`ExportHistory` is unchanged and keeps writing format v1 with the same bytes.
+
+### What it reads
+
+In the same `SnapshotReadTxOptions` transaction as v1, it reads the secret config, the snapshots, the end
+`S` (the newest snapshot) and the head exactly as `ExportHistory` does, then the round's ledger rows with
+`sequence <= S` (spec §5.4, §8):
+
+| v2 field | Source (round `R`, sequence `j <= S`) |
+|---|---|
+| header `accounts` | `ledger_accounts` rows referenced by the rows below: `account_id`, `kind`, `player_id` (player), `name` and `round_id` (system; NULL is the nil UUID) |
+| line `j` `holds` | `ledger_holds` with `(round_id, sequence) = (R, j)`: `account_id`, `amount` |
+| line `j` `releases` | `ledger_hold_releases` with `(round_id, sequence) = (R, j)`: `account_id` |
+| line `j` `transactions` | `ledger_transactions` with `(round_id, sequence) = (R, j)`: `transaction_id`, `kind` |
+| `postings` | `ledger_postings` of each transaction: `posting_index`, `debit_account_id`, `credit_account_id`, `amount`, `event_sequence` (NULL is `"0"`) |
+
+Only accounts that a hold, release or posting of the file references are exported. Rows are sorted in Go
+(`bytes.Compare` on the 16-byte IDs; postings by `posting_index`), never by SQL order. The file is the v2
+header, records `0..S` verbatim and one ledger line per record `0..S`.
+
+### What it omits (L-2)
+
+`created_at` columns (wall clock), the account totals `debits_posted`, `credits_posted`, `held` and
+`floor_enforced` (cross-round facts), and `ledger_postings.round_id` (a posting belongs to its
+transaction's round). A NULL `event_sequence` is exported as `"0"`.
+
+### Failures
+
+The exporter copies rows faithfully: it never filters, repairs or recomputes them, so degenerate rows
+reach the verifier, which rejects them. A row it cannot encode is `ErrCorrupt`: an account kind other than
+`player` or `system`, a player without a non-empty `player_id`, a system account without `name`, a
+negative `posting_index` or `event_sequence`, a string `canonjson` rejects, or a referenced account that is
+missing. `ErrRoundNotFound` and `ErrNoCheckpoint` are returned as for v1, before anything is written.

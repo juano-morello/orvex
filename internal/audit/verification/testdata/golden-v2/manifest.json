@@ -1,0 +1,665 @@
+{
+ "format": "orvex/audit-history/v2",
+ "histories": [
+  {
+   "accepted": 8,
+   "accounts": 8,
+   "base": "worked-example.jsonl",
+   "checkpoints": [
+    {
+     "sequence": 0,
+     "stateHash": "1c98ea460213ad0d5900a92fbf37cc3078fa9e822d2065a65037b667734de7e7"
+    },
+    {
+     "sequence": 9,
+     "stateHash": "bbf9bc3861a0bdcfccf201b185f4f08a9da2c8c61a53142a5caf13b1edd9f90f"
+    },
+    {
+     "sequence": 22,
+     "stateHash": "ba0cff56c3e9473736d3ef45dfc2d9cd4d4cf0f31ea6f600af9ada84125bb02a"
+    }
+   ],
+   "commands": 22,
+   "events": 9,
+   "file": "worked-example.jsonl",
+   "head": "7cf8cc4b1807099cdd1f16cbc0c790f1a877f30b696ebc0de751997d73ac3da7",
+   "holds": 7,
+   "name": "worked-example",
+   "postings": 6,
+   "records": 23,
+   "rejected": 14,
+   "releases": 7,
+   "transactions": 6
+  },
+  {
+   "accepted": 4,
+   "accounts": 3,
+   "base": "instant-crash.jsonl",
+   "checkpoints": [
+    {
+     "sequence": 5,
+     "stateHash": "e2279a511cb001a65fd7d4d5ae02cddd0e16ad69fe3ca5b84771fc7f94b51b1c"
+    }
+   ],
+   "commands": 5,
+   "events": 5,
+   "file": "instant-crash.jsonl",
+   "head": "feea2c86497a5af3450c768129b71626619ae594c5f933b41ca7613e1a6d64da",
+   "holds": 1,
+   "name": "instant-crash",
+   "postings": 2,
+   "records": 6,
+   "rejected": 1,
+   "releases": 1,
+   "transactions": 2
+  },
+  {
+   "accepted": 3,
+   "accounts": 0,
+   "base": "empty-round.jsonl",
+   "checkpoints": [
+    {
+     "sequence": 3,
+     "stateHash": "5c721dac63311a77641622be880591c77d2997aaa8296f7f7ffbbd20065d0ef8"
+    }
+   ],
+   "commands": 3,
+   "events": 3,
+   "file": "empty-round.jsonl",
+   "head": "700d572f193400c59c64b24e3989d8a4477b9791a689ecfdfc0e47de35229bd6",
+   "holds": 0,
+   "name": "empty-round",
+   "postings": 0,
+   "records": 4,
+   "rejected": 0,
+   "releases": 0,
+   "transactions": 0
+  },
+  {
+   "accepted": 3,
+   "accounts": 2,
+   "base": "in-progress.jsonl",
+   "checkpoints": [
+    {
+     "sequence": 0,
+     "stateHash": "9eafd3962055c7ef130563c7d46870628fc38a8b85e4070816540edec91dde09"
+    },
+    {
+     "sequence": 3,
+     "stateHash": "559fa7527d33184bbc9fe6842a1c1c6fb26620e77f62f52101a06a2972c57e28"
+    }
+   ],
+   "commands": 3,
+   "events": 3,
+   "file": "in-progress.jsonl",
+   "head": "f041d95d5bb917ce0f0d51d30c47738c1b97932bebd26ac7f117f98a279c46f6",
+   "holds": 1,
+   "name": "in-progress",
+   "postings": 2,
+   "records": 4,
+   "rejected": 0,
+   "releases": 1,
+   "transactions": 2
+  }
+ ],
+ "tamper": [
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "12",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 12 posting amount 134 -> 135",
+   "file": "tamper/posting-amount-edited.jsonl",
+   "name": "posting-amount-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "12",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 12 posting creditAccountId alice -> bob",
+   "file": "tamper/posting-account-edited.jsonl",
+   "name": "posting-account-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "17",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 17 transactions -> []",
+   "file": "tamper/posting-missing.jsonl",
+   "name": "posting-missing"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "21",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 21 transaction gains posting 1: round account -> house, amount 250, eventSequence 8",
+   "file": "tamper/posting-extra.jsonl",
+   "name": "posting-extra"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "1",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 1 posting creditAccountId -> alice (= debit)",
+   "file": "tamper/unbalanced-self-transfer.jsonl",
+   "name": "unbalanced-self-transfer"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "2",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 2 posting amount -> 0",
+   "file": "tamper/unbalanced-zero-amount.jsonl",
+   "name": "unbalanced-zero-amount"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "3",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 3 posting debit and credit swapped, amount -> -1000000000",
+   "file": "tamper/unbalanced-negative-amount.jsonl",
+   "name": "unbalanced-negative-amount"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "12",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 12 gains a second crash_cash_out transaction with the same posting (event 5); transactions sorted",
+   "file": "tamper/event-posted-twice.jsonl",
+   "name": "event-posted-twice"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "17",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 17 posting eventSequence 6 -> 5",
+   "file": "tamper/posting-event-edited.jsonl",
+   "name": "posting-event-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "1",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 1 transactionId -> transaction 2's",
+   "file": "tamper/transaction-id-edited.jsonl",
+   "name": "transaction-id-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "12",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 12 kind crash_cash_out -> crash_bet",
+   "file": "tamper/transaction-kind-edited.jsonl",
+   "name": "transaction-kind-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "4",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 4 releases -> []",
+   "file": "tamper/hold-unreleased.jsonl",
+   "name": "hold-unreleased"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "1",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 1 hold amount 100 -> 99",
+   "file": "tamper/hold-amount-edited.jsonl",
+   "name": "hold-amount-edited"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "5",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 5 releases -> [dave]",
+   "file": "tamper/release-without-hold.jsonl",
+   "name": "release-without-hold"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "1",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "header: alice's account player -> mallory",
+   "file": "tamper/player-account-renamed.jsonl",
+   "name": "player-account-renamed"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "22",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "header: frank's account removed",
+   "file": "tamper/account-missing.jsonl",
+   "name": "account-missing"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "header",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "header: the house account name -> faucet",
+   "file": "tamper/house-account-renamed.jsonl",
+   "name": "house-account-renamed"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "header",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "header: the round account roundId -> ...8f00-000000000009",
+   "file": "tamper/round-account-other-round.jsonl",
+   "name": "round-account-other-round"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "header",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "header gains player account ...8fa0-000000000007 of grace",
+   "file": "tamper/unreferenced-account.jsonl",
+   "name": "unreferenced-account"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "0",
+     "stage": "ledger"
+    },
+    {
+     "args": [],
+     "command": "replay",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 0 holds -> [alice 100], releases -> [alice]",
+   "file": "tamper/genesis-ledger-rows.jsonl",
+   "name": "genesis-ledger-rows"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "22",
+     "stage": "format"
+    },
+    {
+     "args": [],
+     "command": "chain",
+     "exit": 1,
+     "sequence": "22",
+     "stage": "format"
+    }
+   ],
+   "description": "ledger line 22 deleted",
+   "file": "tamper/ledger-line-missing.jsonl",
+   "name": "ledger-line-missing"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "4",
+     "stage": "format"
+    },
+    {
+     "args": [],
+     "command": "chain",
+     "exit": 1,
+     "sequence": "4",
+     "stage": "format"
+    }
+   ],
+   "description": "ledger lines 4 and 5 swapped",
+   "file": "tamper/ledger-lines-swapped.jsonl",
+   "name": "ledger-lines-swapped"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "1",
+     "stage": "format"
+    },
+    {
+     "args": [],
+     "command": "chain",
+     "exit": 1,
+     "sequence": "1",
+     "stage": "format"
+    }
+   ],
+   "description": "ledger line 1 gains \"note\":\"x\"",
+   "file": "tamper/ledger-unknown-key.jsonl",
+   "name": "ledger-unknown-key"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 1,
+     "sequence": "header",
+     "stage": "format"
+    },
+    {
+     "args": [],
+     "command": "chain",
+     "exit": 1,
+     "sequence": "header",
+     "stage": "format"
+    }
+   ],
+   "description": "header: first two accounts swapped",
+   "file": "tamper/accounts-unsorted.jsonl",
+   "name": "accounts-unsorted"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "header: dave's account player -> dan (dave only holds, at 7); limitation L-5",
+   "file": "tamper/hold-only-account-renamed.jsonl",
+   "name": "hold-only-account-renamed"
+  },
+  {
+   "base": "worked-example",
+   "checks": [
+    {
+     "args": [],
+     "command": "verify",
+     "exit": 0,
+     "sequence": null,
+     "stage": null
+    }
+   ],
+   "description": "line 4 holds and releases -> [] (alice stays referenced); limitation L-5",
+   "file": "tamper/unconsumed-hold-removed.jsonl",
+   "name": "unconsumed-hold-removed"
+  }
+ ]
+}

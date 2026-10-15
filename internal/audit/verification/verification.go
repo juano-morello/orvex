@@ -1,8 +1,12 @@
-// Package verification reads an exported audit history (format
-// orvex/audit-history/v1) and verifies it in fixed stages: format, chain,
-// rules, decode (with fairness), then decision and state replay with
-// checkpoint state hashes (ADR-001, ADR-006; decisions A-11, A-13, A-14 and
-// section 6 of docs/specs/8bebb70f_canonical-codec-audit-cli.md).
+// Package verification reads an exported audit history (formats
+// orvex/audit-history/v1 and orvex/audit-history/v2) and verifies it in
+// fixed stages: format, chain, rules, decode (with fairness), then decision
+// and state replay with checkpoint state hashes (ADR-001, ADR-006;
+// decisions A-11, A-13, A-14 and section 6 of
+// docs/specs/8bebb70f_canonical-codec-audit-cli.md). For a v2 history,
+// ModeVerify adds the ledger stage after state replay: it recomputes every
+// ledger posting from the chained events and compares it with the exported
+// ledger rows (LBT-18, docs/specs/ac81f88f_audit-ledger-stage.md).
 //
 // The first failure stops verification and is reported as a *Failure
 // naming its stage and the record sequence (or the header). Unknown
@@ -20,10 +24,15 @@ import (
 	"github.com/juano-morello/orvex/internal/audit/replay"
 	"github.com/juano-morello/orvex/internal/canonjson"
 	"github.com/juano-morello/orvex/internal/game"
+	"github.com/juano-morello/orvex/internal/ledger"
 )
 
-// Format is the history file format this package reads (header "format").
+// Format is the history file format v1 (header "format").
 const Format = "orvex/audit-history/v1"
+
+// FormatV2 is history file format v2: format v1 plus a header account table
+// and one ledger line per record (LBT-18 L-1).
+const FormatV2 = "orvex/audit-history/v2"
 
 // MaxLineBytes is the longest line, without its terminating '\n' (A-11).
 const MaxLineBytes = 64 << 20
@@ -52,6 +61,9 @@ type Options struct {
 	// ExpectHead, if set, must equal the history's head: a value held
 	// elsewhere, so that a fully rehashed forgery is detected (ADR-001).
 	ExpectHead *chain.Hash
+	// LedgerRules holds the posting rules ModeVerify uses for v2 histories,
+	// at most one per (game, rules version). v1 histories ignore it.
+	LedgerRules []ledger.Rule
 }
 
 // Stage names a verification stage. The names are stable: they appear in
@@ -67,6 +79,7 @@ const (
 	StageFairness       Stage = "fairness"
 	StageDecisionReplay Stage = "decision-replay"
 	StageStateReplay    Stage = "state-replay"
+	StageLedger         Stage = "ledger"
 )
 
 // Failure is a verification outcome other than success: the history is
@@ -114,6 +127,14 @@ type Report struct {
 	Head       chain.Hash
 	// Checkpoints are the verified checkpoints; empty in ModeChain.
 	Checkpoints []Checkpoint
+	// Ledger is nil unless the ledger stage ran.
+	Ledger *LedgerReport
+}
+
+// LedgerReport counts the ledger rows of a v2 history that passed the
+// ledger stage.
+type LedgerReport struct {
+	Accounts, Transactions, Postings, Holds, Releases int
 }
 
 func fail(stage Stage, seq int64, err error) *Failure {
@@ -126,16 +147,20 @@ func unsupported(stage Stage, seq int64, err error) *Failure {
 
 // header is the parsed history header.
 type header struct {
+	format       string
 	checkpoints  []Checkpoint
 	configSecret []byte
 	head         chain.Hash
+	accounts     []account // v2 only
 }
 
-// history is the parsed file: the header and every record with its line.
+// history is the parsed file: the header and every record with its line,
+// and for v2 every ledger line.
 type history struct {
 	header  header
 	lines   [][]byte
 	records []any // chain.Genesis at 0, chain.Command after
+	ledger  []ledgerLine
 }
 
 // Verify reads one history from r and runs the checks of opt.Mode. It
@@ -150,6 +175,9 @@ func Verify(r io.Reader, opt Options) (Report, error) {
 		}
 	default:
 		return Report{}, fmt.Errorf("verification: unknown mode %d", opt.Mode)
+	}
+	if err := checkLedgerRules(opt.LedgerRules); err != nil {
+		return Report{}, err
 	}
 
 	h, err := read(r)
@@ -214,8 +242,12 @@ func readLine(br *bufio.Reader) ([]byte, lineStatus, error) {
 func read(r io.Reader) (*history, error) {
 	br := bufio.NewReader(r)
 	h := &history{}
+	inLedger := false // v2: a ledger line has been read
 	for n := 0; ; n++ {
 		pos := int64(n) - 1 // HeaderSequence for the first line
+		if inLedger {
+			pos = int64(len(h.ledger)) // a ledger line's position is its j
+		}
 		line, status, err := readLine(br)
 		if err != nil {
 			return nil, err
@@ -227,6 +259,9 @@ func read(r io.Reader) (*history, error) {
 			}
 			if n == 1 {
 				return nil, fail(StageFormat, 0, errors.New("verification: no genesis record"))
+			}
+			if len(h.ledger) < len(h.records) && h.header.format == FormatV2 {
+				return nil, fail(StageFormat, int64(len(h.ledger)), errors.New("verification: missing ledger line"))
 			}
 			return h, nil
 		case lineTooLong:
@@ -242,6 +277,12 @@ func read(r io.Reader) (*history, error) {
 			h.header = hd
 			continue
 		}
+		if h.header.format == FormatV2 {
+			if ferr := h.readV2Line(line, pos, &inLedger); ferr != nil {
+				return nil, ferr
+			}
+			continue
+		}
 		rec, err := chain.Decode(line)
 		if err != nil {
 			if pos == 0 && errors.Is(err, chain.ErrUnsupportedChain) {
@@ -252,6 +293,45 @@ func read(r io.Reader) (*history, error) {
 		h.lines = append(h.lines, line)
 		h.records = append(h.records, rec)
 	}
+}
+
+// readV2Line reads one line after a v2 header (LBT-18 section 6.1 step 3):
+// record lines until the first ledger line, then ledger lines only.
+func (h *history) readV2Line(line []byte, pos int64, inLedger *bool) *Failure {
+	o, err := canonjson.Unmarshal(line)
+	if err != nil {
+		return fail(StageFormat, pos, err)
+	}
+	isLedger := o["kind"] == canonjson.String(ledgerKind)
+	if !*inLedger && !isLedger {
+		rec, err := chain.Decode(line)
+		if err != nil {
+			if pos == 0 && errors.Is(err, chain.ErrUnsupportedChain) {
+				return unsupported(StageFormat, 0, err)
+			}
+			return fail(StageFormat, pos, err)
+		}
+		h.lines = append(h.lines, line)
+		h.records = append(h.records, rec)
+		return nil
+	}
+	*inLedger = true
+	j := len(h.ledger)
+	if !isLedger {
+		return fail(StageFormat, int64(j), errors.New("verification: record line after the ledger section"))
+	}
+	ll, seq, err := parseLedgerLine(o)
+	if err != nil {
+		return fail(StageFormat, int64(j), err)
+	}
+	if seq != uint64(j) {
+		return fail(StageFormat, int64(j), fmt.Errorf("verification: ledger line sequence %d at position %d", seq, j))
+	}
+	if j == len(h.records) {
+		return fail(StageFormat, int64(j), errors.New("verification: ledger line without a record"))
+	}
+	h.ledger = append(h.ledger, ll)
+	return nil
 }
 
 func parseHeader(line []byte) (header, *Failure) {
@@ -267,13 +347,17 @@ func parseHeader(line []byte) (header, *Failure) {
 	if err != nil {
 		return header{}, fail(StageFormat, HeaderSequence, fmt.Errorf("verification: header format: %w", err))
 	}
-	if format != Format {
+	if format != Format && format != FormatV2 {
 		return header{}, unsupported(StageFormat, HeaderSequence, errors.New("verification: unknown history format"))
 	}
-	if _, err := canonjson.Fields(o, "checkpoints", "configSecret", "format", "head"); err != nil {
+	keys := []string{"checkpoints", "configSecret", "format", "head"}
+	if format == FormatV2 {
+		keys = append(keys, "accounts")
+	}
+	if _, err := canonjson.Fields(o, keys...); err != nil {
 		return header{}, fail(StageFormat, HeaderSequence, fmt.Errorf("verification: header: %w", err))
 	}
-	var hd header
+	hd := header{format: format}
 	head, err := canonjson.ParseHex(o["head"], len(hd.head))
 	if err != nil {
 		return header{}, fail(StageFormat, HeaderSequence, fmt.Errorf("verification: header head: %w", err))
@@ -299,6 +383,11 @@ func parseHeader(line []byte) (header, *Failure) {
 			return header{}, fail(StageFormat, HeaderSequence, fmt.Errorf("verification: header checkpoint %d: %w", i, err))
 		}
 		hd.checkpoints = append(hd.checkpoints, cp)
+	}
+	if format == FormatV2 {
+		if hd.accounts, err = parseAccounts(o["accounts"]); err != nil {
+			return header{}, fail(StageFormat, HeaderSequence, fmt.Errorf("verification: header accounts: %w", err))
+		}
 	}
 	return hd, nil
 }
@@ -326,7 +415,7 @@ func parseCheckpoint(v canonjson.Value) (Checkpoint, error) {
 // ---------------------------------------------------------------- chain
 
 func checkChain(h *history, expect *chain.Hash) (Report, error) {
-	rep := Report{Format: Format, Chain: chain.Version, Records: len(h.records)}
+	rep := Report{Format: h.header.format, Chain: chain.Version, Records: len(h.records)}
 	var roundID [16]byte
 	seen := map[[16]byte]bool{}
 	nextEvent := uint64(1)
@@ -424,6 +513,13 @@ func replayHistory(h *history, rep Report, opt Options) (Report, error) {
 			d.Game, d.RulesVersion, d.SchemaVersion, d.StateVersion, g.SchemaVersion, g.StateVersion))
 	}
 	rep.Descriptor = d
+	withLedger := opt.Mode == ModeVerify && h.header.format == FormatV2
+	var rule ledger.Rule
+	if withLedger {
+		if rule, err = selectLedgerRule(opt.LedgerRules, d); err != nil {
+			return Report{}, unsupported(StageRules, 0, err)
+		}
+	}
 
 	cfg, err := a.DecodeConfig(g.RoundID, g.Config, h.header.configSecret)
 	if err != nil {
@@ -495,6 +591,13 @@ func replayHistory(h *history, rep Report, opt Options) (Report, error) {
 	if next != len(cps) {
 		// Unreachable: the chain stage checked every checkpoint sequence.
 		return Report{}, fail(StageStateReplay, HeaderSequence, errors.New("verification: checkpoint not reached"))
+	}
+	if withLedger {
+		lr, err := checkLedger(h, records, rule)
+		if err != nil {
+			return Report{}, err
+		}
+		rep.Ledger = lr
 	}
 	return rep, nil
 }

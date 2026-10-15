@@ -6,6 +6,9 @@
 // chain record bytes copied verbatim, never re-encoded from columns, with a
 // header built from engine-written snapshot rows and the round's secret
 // config.
+//
+// ExportHistoryV2 writes format v2: the same file plus the round's ledger
+// rows (LBT-18, docs/specs/ac81f88f_audit-ledger-stage.md).
 package eventstore
 
 import (
