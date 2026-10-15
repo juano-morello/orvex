@@ -38,6 +38,7 @@ func TestRun(t *testing.T) {
 		{name: "positional", args: []string{"extra"}, wantCode: 2, wantStderr: "unexpected arguments"},
 		{name: "unknown flag", args: []string{"-bogus"}, wantCode: 2, stderrAny: true},
 		{name: "help", args: []string{"-h"}, wantCode: 0, stderrAny: true},
+		{name: "usage lists migrate", args: nil, wantCode: 2, wantStderr: "crashctl migrate up [-to N]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

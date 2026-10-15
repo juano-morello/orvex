@@ -1,7 +1,9 @@
-// Command crashctl is the Orvex replay/audit CLI (ADR-007). It verifies
-// exported audit histories: crashctl audit verify|replay|chain (ADR-001,
-// ADR-006; decision A-16 and section 7 of
-// docs/specs/8bebb70f_canonical-codec-audit-cli.md).
+// Command crashctl is the Orvex replay/audit and operations CLI (ADR-007).
+// It verifies exported audit histories: crashctl audit verify|replay|chain
+// (ADR-001, ADR-006; decision A-16 and section 7 of
+// docs/specs/8bebb70f_canonical-codec-audit-cli.md), and migrates the
+// PostgreSQL schema: crashctl migrate up|down|status (ADR-005; decision P-6
+// of docs/specs/17380a6e_postgresql-schema-migrations.md).
 package main
 
 import (
@@ -26,7 +28,11 @@ const usage = `usage: crashctl [-version]
        crashctl audit verify [-expect-head HEX] FILE
        crashctl audit replay [-expect-head HEX] FILE
        crashctl audit chain  [-expect-head HEX] FILE
+       crashctl migrate up [-to N]
+       crashctl migrate down -to N
+       crashctl migrate status
 FILE "-" reads standard input.
+ORVEX_DATABASE_URL names the database for migrate (a PostgreSQL URL or key=value connection string).
 `
 
 // Exit codes (spec section 7).
@@ -67,6 +73,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return exitUsage
 	case !*showVersion && fs.Arg(0) == "audit":
 		return runAudit(fs.Args()[1:], stdin, stdout, stderr)
+	case !*showVersion && fs.Arg(0) == "migrate":
+		return runMigrate(fs.Args()[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "%s: unexpected arguments: %v\n", name, fs.Args())
 		return exitUsage
