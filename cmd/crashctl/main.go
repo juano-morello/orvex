@@ -5,7 +5,9 @@
 // history from PostgreSQL: crashctl audit export (LBT-19,
 // docs/specs/73dbe98d_audit-export-cli.md), and migrates the PostgreSQL
 // schema: crashctl migrate up|down|status (ADR-005; decision P-6 of
-// docs/specs/17380a6e_postgresql-schema-migrations.md).
+// docs/specs/17380a6e_postgresql-schema-migrations.md). It reads history
+// formats v1 and v2; for v2, audit verify adds the ledger stage (LBT-18,
+// docs/specs/ac81f88f_audit-ledger-stage.md).
 package main
 
 import (
@@ -22,6 +24,7 @@ import (
 	"github.com/juano-morello/orvex/internal/canonjson"
 	"github.com/juano-morello/orvex/internal/game"
 	crashv1 "github.com/juano-morello/orvex/internal/game/crash/v1"
+	"github.com/juano-morello/orvex/internal/ledger"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
@@ -161,6 +164,9 @@ func runAudit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return exitFailed
 		}
 		opt.Registry = reg
+		if mode == verification.ModeVerify {
+			opt.LedgerRules = []ledger.Rule{ledger.CrashV1()}
+		}
 	}
 
 	rep, err := verification.Verify(in, opt)
@@ -217,6 +223,10 @@ func report(rep verification.Report, mode verification.Mode) []byte {
 	}
 	for _, cp := range rep.Checkpoints {
 		_, _ = fmt.Fprintf(&b, "state-replay ok sequence %d state %s\n", cp.Sequence, cp.StateHash)
+	}
+	if l := rep.Ledger; l != nil {
+		_, _ = fmt.Fprintf(&b, "ledger ok accounts %d transactions %d postings %d holds %d releases %d\n",
+			l.Accounts, l.Transactions, l.Postings, l.Holds, l.Releases)
 	}
 	b.WriteString("ok\n")
 	return b.Bytes()

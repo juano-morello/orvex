@@ -331,3 +331,164 @@ func TestAuditIO(t *testing.T) {
 		t.Errorf("failing stdin: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
+
+const goldenV2Dir = "../../internal/audit/verification/testdata/golden-v2"
+
+// manifestV2 is the part of the golden-v2 manifest.json these tests use.
+type manifestV2 struct {
+	Histories []struct {
+		Name         string `json:"name"`
+		File         string `json:"file"`
+		Records      int    `json:"records"`
+		Head         string `json:"head"`
+		Accounts     int    `json:"accounts"`
+		Transactions int    `json:"transactions"`
+		Postings     int    `json:"postings"`
+		Holds        int    `json:"holds"`
+		Releases     int    `json:"releases"`
+		Checkpoints  []struct {
+			Sequence  uint64 `json:"sequence"`
+			StateHash string `json:"stateHash"`
+		} `json:"checkpoints"`
+	} `json:"histories"`
+	Tamper []struct {
+		Name   string `json:"name"`
+		File   string `json:"file"`
+		Checks []struct {
+			Command  string   `json:"command"`
+			Args     []string `json:"args"`
+			Exit     int      `json:"exit"`
+			Stage    *string  `json:"stage"`
+			Sequence *string  `json:"sequence"`
+		} `json:"checks"`
+	} `json:"tamper"`
+}
+
+func loadManifestV2(t *testing.T) manifestV2 {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(goldenV2Dir, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m manifestV2
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Histories) != 4 || len(m.Tamper) != 26 {
+		t.Fatalf("golden-v2 manifest has %d histories and %d tamper cases", len(m.Histories), len(m.Tamper))
+	}
+	return m
+}
+
+func TestAuditGoldenV2(t *testing.T) {
+	m := loadManifestV2(t)
+	for _, h := range m.Histories {
+		path := filepath.Join(goldenV2Dir, h.File)
+		wantLedger := "ledger ok accounts " + strconv.Itoa(h.Accounts) + " transactions " + strconv.Itoa(h.Transactions) +
+			" postings " + strconv.Itoa(h.Postings) + " holds " + strconv.Itoa(h.Holds) + " releases " + strconv.Itoa(h.Releases)
+		for _, sub := range []string{"verify", "replay", "chain"} {
+			t.Run(h.Name+"/"+sub, func(t *testing.T) {
+				code, stdout, stderr := runAuditCmd(t, nil, sub, path)
+				if code != 0 || stderr != "" {
+					t.Fatalf("exit %d, stderr %q", code, stderr)
+				}
+				lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+				if lines[0] != "verifier "+buildinfo.String(name) || lines[len(lines)-1] != "ok" {
+					t.Errorf("stdout = %q", stdout)
+				}
+				if !strings.Contains(stdout, "\nformat orvex/audit-history/v2 chain orvex/audit/v1\n") {
+					t.Errorf("stdout lacks the v2 format line:\n%s", stdout)
+				}
+				wantChain := "chain ok records " + strconv.Itoa(h.Records) + " head " + h.Head
+				if !strings.Contains(stdout, "\n"+wantChain+"\n") {
+					t.Errorf("stdout lacks %q:\n%s", wantChain, stdout)
+				}
+				if got := strings.Contains(stdout, "\nledger "); got != (sub == "verify") {
+					t.Errorf("ledger line present = %v for %s", got, sub)
+				}
+				if sub == "verify" && lines[len(lines)-2] != wantLedger {
+					t.Errorf("ledger line = %q; want %q", lines[len(lines)-2], wantLedger)
+				}
+			})
+		}
+	}
+
+	// The full verify report of the worked example v2 (LBT-18 section 7).
+	h := m.Histories[0]
+	code, stdout, _ := runAuditCmd(t, nil, "verify", filepath.Join(goldenV2Dir, h.File))
+	want := "verifier " + buildinfo.String(name) + "\n" +
+		"format orvex/audit-history/v2 chain orvex/audit/v1\n" +
+		"round 0190f3a8-7b3c-7d4e-8f00-000000000001\n" +
+		"rules crash 1 schema 1 state 1\n" +
+		"chain ok records 23 head " + h.Head + "\n" +
+		"fairness ok\n" +
+		"decision-replay ok commands 22 accepted 8 rejected 14 events 9\n"
+	for _, cp := range h.Checkpoints {
+		want += "state-replay ok sequence " + strconv.FormatUint(cp.Sequence, 10) + " state " + cp.StateHash + "\n"
+	}
+	want += "ledger ok accounts 8 transactions 6 postings 6 holds 7 releases 7\n"
+	want += "ok\n"
+	if code != 0 || stdout != want {
+		t.Errorf("verify worked-example v2: exit %d, stdout\n%s\nwant\n%s", code, stdout, want)
+	}
+}
+
+// TestAuditFailuresV2 walks every golden-v2 manifest tamper check through
+// the CLI.
+func TestAuditFailuresV2(t *testing.T) {
+	m := loadManifestV2(t)
+	for _, tc := range m.Tamper {
+		path := filepath.Join(goldenV2Dir, tc.File)
+		for _, c := range tc.Checks {
+			t.Run(tc.Name+"/"+c.Command+strings.Join(c.Args, ""), func(t *testing.T) {
+				args := append(append([]string{c.Command}, c.Args...), path)
+				code, stdout, stderr := runAuditCmd(t, nil, args...)
+				if code != c.Exit {
+					t.Fatalf("exit %d, want %d; stderr %q", code, c.Exit, stderr)
+				}
+				if c.Exit == 0 {
+					if !strings.HasSuffix(stdout, "\nok\n") || stderr != "" {
+						t.Fatalf("stdout %q, stderr %q", stdout, stderr)
+					}
+					return
+				}
+				verdict := "failed"
+				if c.Exit == 3 {
+					verdict = "unsupported"
+				}
+				where := "header"
+				if *c.Sequence != "header" {
+					where = "sequence " + *c.Sequence
+				}
+				want := "crashctl: audit " + c.Command + ": " + *c.Stage + " " + verdict + " at " + where + ": "
+				if stdout != "" || !strings.HasPrefix(stderr, want) || strings.Count(stderr, "\n") != 1 {
+					t.Fatalf("stdout %q, stderr %q; want one stderr line starting %q", stdout, stderr, want)
+				}
+			})
+		}
+	}
+
+	// T1 by name (LBT-18 section 7).
+	code, stdout, stderr := runAuditCmd(t, nil, "verify", filepath.Join(goldenV2Dir, "tamper/posting-amount-edited.jsonl"))
+	if code != 1 || stdout != "" || !strings.HasPrefix(stderr, "crashctl: audit verify: ledger failed at sequence 12: ") {
+		t.Errorf("T1: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+
+	// M1 through a temp file: an unknown format fails closed.
+	data, err := os.ReadFile(filepath.Join(goldenV2Dir, "worked-example.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, v3 := []byte(`"format":"orvex/audit-history/v2"`), []byte(`"format":"orvex/audit-history/v3"`)
+	if bytes.Count(data, old) != 1 {
+		t.Fatal("v2 format not found once")
+	}
+	m1 := filepath.Join(t.TempDir(), "m1.jsonl")
+	if err := os.WriteFile(m1, bytes.Replace(data, old, v3, 1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = runAuditCmd(t, nil, "verify", m1)
+	if code != 3 || stdout != "" || !strings.HasPrefix(stderr, "crashctl: audit verify: format unsupported at header: ") {
+		t.Errorf("M1: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+}
