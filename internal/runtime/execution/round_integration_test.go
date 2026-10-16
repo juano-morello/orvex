@@ -13,6 +13,7 @@ import (
 	"github.com/juano-morello/orvex/internal/audit/chain"
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
@@ -23,9 +24,9 @@ func TestCreateRound(t *testing.T) {
 	for _, name := range []string{"worked-example", "instant-crash", "empty-round", "in-progress"} {
 		t.Run(name, func(t *testing.T) {
 			_, pool := newDB(t)
-			x := newExecutor(t, pool, nil, nil)
-			header, lines := readGolden(t, name)
-			g, cfg := goldenConfig(t, header, lines[0])
+			x := roundtest.NewExecutor(t, pool, nil, nil)
+			header, lines := roundtest.ReadGolden(t, goldenPath(name))
+			g, cfg := roundtest.GoldenConfig(t, header, lines[0])
 			created, err := x.CreateRound(ctx, execution.NewRound{
 				RoundID: g.RoundID, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber, Config: cfg, CreatedAtUnixMicro: g.CreatedAtUnixMicro,
 			})
@@ -163,7 +164,7 @@ func tableCounts(t *testing.T, pool *pgxpool.Pool) [9]int64 {
 
 func TestCreateRoundIdempotent(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := newRoundID()
 	r := execution.NewRound{RoundID: round, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber,
 		Config: roundConfig(round, testSeed, 1_000_000_000, 100), CreatedAtUnixMicro: 1_760_000_000_000_000}
@@ -180,7 +181,7 @@ func TestCreateRoundIdempotent(t *testing.T) {
 		t.Errorf("row counts changed by a duplicate: %v -> %v", counts, got)
 	}
 	// Another executor (no cache) resolves the duplicate the same way.
-	if again, err := newExecutor(t, pool, nil, nil).CreateRound(ctx, r); err != nil || !again.Duplicate {
+	if again, err := roundtest.NewExecutor(t, pool, nil, nil).CreateRound(ctx, r); err != nil || !again.Duplicate {
 		t.Errorf("CreateRound from another executor = %+v, %v", again, err)
 	}
 	// A second round reuses the house account.
@@ -196,7 +197,7 @@ func TestCreateRoundIdempotent(t *testing.T) {
 
 func TestCreateRoundConflict(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := newRoundID()
 	createRound(t, x, round, testSeed, 1_000_000_000, 100)
 	counts := tableCounts(t, pool)

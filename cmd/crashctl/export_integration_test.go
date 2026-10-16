@@ -21,6 +21,7 @@ import (
 	"github.com/juano-morello/orvex/internal/canonjson"
 	"github.com/juano-morello/orvex/internal/persistence/eventstore"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 )
 
 // Integration tests of crashctl audit export (LBT-19 spec section 10 step
@@ -64,10 +65,10 @@ func exportDatabase(t *testing.T) (string, *pgxpool.Pool) {
 }
 
 // drained seeds the golden round in file and executes every admission.
-func drained(t *testing.T, pool *pgxpool.Pool, file string) goldenRound {
+func drained(t *testing.T, pool *pgxpool.Pool, file string) roundtest.Golden {
 	t.Helper()
 	g := seedGolden(t, pool, file)
-	if _, err := g.exec.Drain(context.Background(), g.lease(), 100); err != nil {
+	if _, err := g.Executor.Drain(context.Background(), g.Lease(), 100); err != nil {
 		t.Fatalf("Drain(%s): %v", file, err)
 	}
 	return g
@@ -139,32 +140,32 @@ func TestExportExecutedRounds(t *testing.T) {
 		t.Run(strings.TrimSuffix(r.file, ".jsonl"), func(t *testing.T) {
 			_, pool := exportDatabase(t)
 			g := drained(t, pool, r.file)
-			if got := g.hash(r.s).String(); got != r.head {
+			if got := g.Hash(r.s).String(); got != r.head {
 				t.Fatalf("golden record %d link hash = %s, spec section 8 says %s", r.s, got, r.head)
 			}
-			if got := g.hash(r.n).String(); got != r.manifestHead || len(g.lines) != r.n+1 {
-				t.Fatalf("golden has %d records, head %s; spec section 8 says %d, %s", len(g.lines), got, r.n+1, r.manifestHead)
+			if got := g.Hash(r.n).String(); got != r.manifestHead || len(g.Lines) != r.n+1 {
+				t.Fatalf("golden has %d records, head %s; spec section 8 says %d, %s", len(g.Lines), got, r.n+1, r.manifestHead)
 			}
 			dir := t.TempDir()
 			path := filepath.Join(dir, "round.jsonl")
-			code, stdout, stderr := exportCmd(t, g.uuid(), path)
+			code, stdout, stderr := exportCmd(t, g.UUID(), path)
 			verdict := settledYes
 			if !r.settled {
 				if code != exitNotSettled || stdout != "" {
 					t.Fatalf("exit %d, stdout %q; want %d and empty", code, stdout, exitNotSettled)
 				}
-				if want := notSettledMessage(g.uuid(), r.s, r.n); stderr != want {
+				if want := notSettledMessage(g.UUID(), r.s, r.n); stderr != want {
 					t.Errorf("stderr = %q, want %q", stderr, want)
 				}
 				requireNoFile(t, path)
 				verdict = settledNo
 				path = filepath.Join(dir, "unsettled.jsonl")
-				code, stdout, stderr = exportCmd(t, "-unsettled", g.uuid(), path)
+				code, stdout, stderr = exportCmd(t, "-unsettled", g.UUID(), path)
 			}
 			if code != exitOK || stderr != "" {
 				t.Fatalf("exit %d, stderr %q; want 0 and empty", code, stderr)
 			}
-			if want := wantExportReport(g.uuid(), r.s, r.n, r.head, verdict); stdout != want {
+			if want := wantExportReport(g.UUID(), r.s, r.n, r.head, verdict); stdout != want {
 				t.Errorf("report =\n%s\nwant\n%s", stdout, want)
 			}
 
@@ -183,11 +184,11 @@ func TestExportExecutedRounds(t *testing.T) {
 			if got := headerCheckpoints(t, lines[0]); fmt.Sprint(got) != fmt.Sprint(r.snapshots) {
 				t.Errorf("header checkpoints = %v, want %v", got, r.snapshots)
 			}
-			if got, want := bytes.Join(lines[1:], []byte("\n")), bytes.Join(g.lines[:r.s+1], []byte("\n")); !bytes.Equal(got, want) {
+			if got, want := bytes.Join(lines[1:], []byte("\n")), bytes.Join(g.Lines[:r.s+1], []byte("\n")); !bytes.Equal(got, want) {
 				t.Errorf("records differ from golden records 0..%d", r.s)
 			}
 			var direct bytes.Buffer
-			if _, err := eventstore.ExportHistory(context.Background(), pool, g.roundID, &direct); err != nil {
+			if _, err := eventstore.ExportHistory(context.Background(), pool, g.RoundID, &direct); err != nil {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(file, direct.Bytes()) {
@@ -218,7 +219,7 @@ func TestExportFollowsSnapshots(t *testing.T) {
 		21: "3959ed4ca0f2651071b0a325ffae6f5951d132e2e922ca8669974a0031d7fd40",
 		22: "7cf8cc4b1807099cdd1f16cbc0c790f1a877f30b696ebc0de751997d73ac3da7",
 	} {
-		if got := g.hash(seq).String(); got != want {
+		if got := g.Hash(seq).String(); got != want {
 			t.Fatalf("golden worked-example record %d link hash = %s, spec section 8 says %s", seq, got, want)
 		}
 	}
@@ -226,7 +227,7 @@ func TestExportFollowsSnapshots(t *testing.T) {
 	s := 0
 	for k := 0; k <= 22; k++ {
 		if k > 0 {
-			out, err := g.exec.ExecuteNext(context.Background(), g.lease())
+			out, err := g.Executor.ExecuteNext(context.Background(), g.Lease())
 			if err != nil || !out.Executed || out.Sequence != uint64(k) {
 				t.Fatalf("ExecuteNext: %+v, %v; want sequence %d executed", out, err, k)
 			}
@@ -238,14 +239,14 @@ func TestExportFollowsSnapshots(t *testing.T) {
 		}
 
 		path := filepath.Join(dir, fmt.Sprintf("k%02d.jsonl", k))
-		code, stdout, stderr := exportCmd(t, g.uuid(), path)
+		code, stdout, stderr := exportCmd(t, g.UUID(), path)
 		if k < 21 {
-			if code != exitNotSettled || stdout != "" || stderr != notSettledMessage(g.uuid(), s, k) {
+			if code != exitNotSettled || stdout != "" || stderr != notSettledMessage(g.UUID(), s, k) {
 				t.Errorf("k=%d: exit %d, stdout %q, stderr %q; want %d naming sequence %d of %d", k, code, stdout, stderr,
 					exitNotSettled, s, k)
 			}
 			requireNoFile(t, path)
-		} else if code != exitOK || stdout != wantExportReport(g.uuid(), s, k, g.hash(s).String(), settledYes) {
+		} else if code != exitOK || stdout != wantExportReport(g.UUID(), s, k, g.Hash(s).String(), settledYes) {
 			t.Errorf("k=%d: exit %d, stdout %q, stderr %q; want 0 and the settled report", k, code, stdout, stderr)
 		}
 
@@ -254,17 +255,17 @@ func TestExportFollowsSnapshots(t *testing.T) {
 		if k >= 21 {
 			verdict = settledYes
 		}
-		code, stdout, stderr = exportCmd(t, "-unsettled", g.uuid(), upath)
+		code, stdout, stderr = exportCmd(t, "-unsettled", g.UUID(), upath)
 		if code != exitOK || stderr != "" {
 			t.Fatalf("k=%d -unsettled: exit %d, stderr %q", k, code, stderr)
 		}
-		if want := wantExportReport(g.uuid(), s, k, g.hash(s).String(), verdict); stdout != want {
+		if want := wantExportReport(g.UUID(), s, k, g.Hash(s).String(), verdict); stdout != want {
 			t.Errorf("k=%d -unsettled: report =\n%s\nwant\n%s", k, stdout, want)
 		}
 		if hasNote := strings.Contains(stdout, "note: "); hasNote != (s < k) {
 			t.Errorf("k=%d: note present %v, want %v", k, hasNote, s < k)
 		}
-		verifyFile(t, upath, s+1, g.hash(s).String())
+		verifyFile(t, upath, s+1, g.Hash(s).String())
 	}
 }
 
@@ -273,33 +274,33 @@ func TestExportStdout(t *testing.T) {
 		_, pool := exportDatabase(t)
 		g := drained(t, pool, "worked-example.jsonl")
 		path := filepath.Join(t.TempDir(), "round.jsonl")
-		if code, _, stderr := exportCmd(t, g.uuid(), path); code != exitOK {
+		if code, _, stderr := exportCmd(t, g.UUID(), path); code != exitOK {
 			t.Fatalf("path export: exit %d, stderr %q", code, stderr)
 		}
 		file, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		code, stdout, stderr := exportCmd(t, g.uuid(), "-")
+		code, stdout, stderr := exportCmd(t, g.UUID(), "-")
 		if code != exitOK {
 			t.Fatalf("exit %d, stderr %q", code, stderr)
 		}
 		if stdout != string(file) {
 			t.Error("stdout differs from the path export")
 		}
-		if want := wantExportReport(g.uuid(), 21, 22, g.hash(21).String(), settledYes); stderr != want {
+		if want := wantExportReport(g.UUID(), 21, 22, g.Hash(21).String(), settledYes); stderr != want {
 			t.Errorf("stderr =\n%s\nwant\n%s", stderr, want)
 		}
-		code, vout, verr := runAuditCmd(t, strings.NewReader(stdout), "verify", "-expect-head", g.hash(21).String(), "-")
-		if code != exitOK || !strings.Contains(vout, "chain ok records 22 head "+g.hash(21).String()) {
+		code, vout, verr := runAuditCmd(t, strings.NewReader(stdout), "verify", "-expect-head", g.Hash(21).String(), "-")
+		if code != exitOK || !strings.Contains(vout, "chain ok records 22 head "+g.Hash(21).String()) {
 			t.Errorf("audit verify -: exit %d, stdout %q, stderr %q", code, vout, verr)
 		}
 	})
 	t.Run("not settled", func(t *testing.T) {
 		_, pool := exportDatabase(t)
 		g := drained(t, pool, "in-progress.jsonl")
-		code, stdout, stderr := exportCmd(t, g.uuid(), "-")
-		if code != exitNotSettled || stdout != "" || stderr != notSettledMessage(g.uuid(), 2, 3) {
+		code, stdout, stderr := exportCmd(t, g.UUID(), "-")
+		if code != exitNotSettled || stdout != "" || stderr != notSettledMessage(g.UUID(), 2, 3) {
 			t.Errorf("exit %d, stdout %q, stderr %q; want %d, nothing on stdout", code, stdout, stderr, exitNotSettled)
 		}
 	})
@@ -421,7 +422,7 @@ func TestExportDatabaseErrors(t *testing.T) {
 		}
 		t.Setenv(databaseURLEnv, restrictedRole(t, dsn, grants))
 		path := filepath.Join(t.TempDir(), "round.jsonl")
-		code, stdout, stderr := exportCmd(t, g.uuid(), path)
+		code, stdout, stderr := exportCmd(t, g.UUID(), path)
 		if code != exitIO || stdout != "" || !strings.Contains(stderr, "42501") {
 			t.Errorf("exit %d, stdout %q, stderr %q; want %d with 42501", code, stdout, stderr, exitIO)
 		}
@@ -440,14 +441,14 @@ func TestExportMinimalGrants(t *testing.T) {
 	t.Setenv(databaseURLEnv, roleDSN)
 
 	path := filepath.Join(t.TempDir(), "round.jsonl")
-	code, stdout, stderr := exportCmd(t, g.uuid(), path)
+	code, stdout, stderr := exportCmd(t, g.UUID(), path)
 	if code != exitOK || stderr != "" {
 		t.Fatalf("exit %d, stderr %q; want 0", code, stderr)
 	}
-	if want := wantExportReport(g.uuid(), 21, 22, g.hash(21).String(), settledYes); stdout != want {
+	if want := wantExportReport(g.UUID(), 21, 22, g.Hash(21).String(), settledYes); stdout != want {
 		t.Errorf("report =\n%s\nwant\n%s", stdout, want)
 	}
-	verifyFile(t, path, 22, g.hash(21).String())
+	verifyFile(t, path, 22, g.Hash(21).String())
 
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, roleDSN)
@@ -475,7 +476,7 @@ func TestExportOutputFailures(t *testing.T) {
 
 	t.Run("stdout", func(t *testing.T) {
 		var stderr bytes.Buffer
-		code := run([]string{"audit", "export", g.uuid(), "-"}, strings.NewReader(""), multilineFailingWriter{}, &stderr)
+		code := run([]string{"audit", "export", g.UUID(), "-"}, strings.NewReader(""), multilineFailingWriter{}, &stderr)
 		if code != exitIO {
 			t.Errorf("exit %d, want %d", code, exitIO)
 		}
@@ -487,7 +488,7 @@ func TestExportOutputFailures(t *testing.T) {
 	t.Run("report", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "round.jsonl")
 		var stderr bytes.Buffer
-		code := run([]string{"audit", "export", g.uuid(), path}, strings.NewReader(""), multilineFailingWriter{}, &stderr)
+		code := run([]string{"audit", "export", g.UUID(), path}, strings.NewReader(""), multilineFailingWriter{}, &stderr)
 		if code != exitIO {
 			t.Errorf("exit %d, want %d", code, exitIO)
 		}

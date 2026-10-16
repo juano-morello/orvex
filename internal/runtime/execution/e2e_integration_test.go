@@ -9,6 +9,7 @@ import (
 
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/admission"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
@@ -33,7 +34,7 @@ func mustDrain(t *testing.T, x *execution.Executor, round [16]byte, n int) {
 
 func TestAdmitAndExecuteRound(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	s := newSequencer(t, pool)
 	round := newRoundID()
 	cfg := createRound(t, x, round, seedWithDeadline(t, round, 500*time.Millisecond, 2*time.Second), 1_000_000_000, 100)
@@ -42,8 +43,8 @@ func TestAdmitAndExecuteRound(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := initial.CrashDeadlineOffsetMicros
-	fundPlayer(t, pool, "alice", 100)
-	fundPlayer(t, pool, "bob", 200)
+	roundtest.FundPlayer(t, pool, "alice", 100)
+	roundtest.FundPlayer(t, pool, "bob", 200)
 
 	mustAdmit(t, s, request(round, cmdID(1), placeBet("alice", 100)))
 	mustAdmit(t, s, request(round, cmdID(2), placeBet("bob", 200)))

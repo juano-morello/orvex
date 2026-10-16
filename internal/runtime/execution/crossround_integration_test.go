@@ -13,6 +13,7 @@ import (
 
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/admission"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
@@ -20,7 +21,7 @@ import (
 // newSequencer returns an LBT-11 sequencer with DefaultConfig over db.
 func newSequencer(t *testing.T, db admission.DB) *admission.Sequencer {
 	t.Helper()
-	s, err := admission.New(db, crashRegistry(t), admission.DefaultConfig(), admission.CrashV1Policy())
+	s, err := admission.New(db, roundtest.Registry(t), admission.DefaultConfig(), admission.CrashV1Policy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,9 +56,9 @@ func isInsufficient(err error) bool {
 
 func TestCrossRoundBalanceProtection(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	s := newSequencer(t, pool)
-	fundPlayer(t, pool, "alice", 1000)
+	roundtest.FundPlayer(t, pool, "alice", 1000)
 	rounds := make([][16]byte, 20)
 	for i := range rounds {
 		rounds[i] = newRoundID()
@@ -171,9 +172,9 @@ func TestCrossRoundAdmissionWaitsForExecution(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			_, pool := newDB(t)
 			fdb := &faultDB{pool: pool}
-			x := newExecutor(t, fdb, nil, nil)
+			x := roundtest.NewExecutor(t, fdb, nil, nil)
 			s := newSequencer(t, pool)
-			fundPlayer(t, pool, "alice", 200)
+			roundtest.FundPlayer(t, pool, "alice", 200)
 			r1, r2 := newRoundID(), newRoundID()
 			createRound(t, x, r1, testSeed, c.maxBet, 100)
 			createRound(t, x, r2, testSeed, 1_000_000_000, 100)
