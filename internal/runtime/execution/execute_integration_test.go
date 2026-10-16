@@ -149,7 +149,7 @@ func requireGoldenLedger(t *testing.T, pool *pgxpool.Pool, gr roundtest.Golden, 
 		if err := rows.Scan(&id, &seq, &kind); err != nil {
 			t.Fatal(err)
 		}
-		if id != ledger.TransactionID(gr.RoundID, uint64(seq)) {
+		if id != ledger.TransactionID(gr.RoundID, uint64(seq)) { //nolint:gosec // G115: seq is a ledger_transactions.sequence of this test round (>= 1)
 			t.Errorf("ledger transaction of record %d has a non-deterministic ID", seq)
 		}
 		kinds[seq] = kind
@@ -349,7 +349,7 @@ func TestExecuteSnapshots(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		hashes[int64(c.Sequence)] = mustStateHash(t, s)
+		hashes[int64(c.Sequence)] = mustStateHash(t, s) //nolint:gosec // G115: c.Sequence is a golden history sequence (< 100)
 	}
 	rows, err := pool.Query(ctx, `SELECT sequence, state_hash, state IS NULL, engine_build FROM orvex.round_snapshots WHERE round_id = $1 ORDER BY sequence`, gr.RoundID)
 	if err != nil {

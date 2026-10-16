@@ -53,7 +53,7 @@ func (e *Executor) load(ctx context.Context, en *entry, lease Lease) error {
 	}
 
 	// 2. Rules.
-	r, ok := e.rules[rulesKey{game: game.ID(gameID), rules: game.RulesVersion(rulesV)}]
+	r, ok := e.rules[rulesKey{game: game.ID(gameID), rules: game.RulesVersion(rulesV)}] //nolint:gosec // G115: rounds_versions_check holds rules_version in [1, 4294967295]
 	if !ok {
 		return fmt.Errorf("%w: %q %d", ErrUnknownRules, gameID, rulesV)
 	}
@@ -107,7 +107,7 @@ func (e *Executor) load(ctx context.Context, en *entry, lease Lease) error {
 			rows.Close()
 			return loadDBError(ctx, err)
 		}
-		snapshots[uint64(seq)] = h
+		snapshots[uint64(seq)] = h //nolint:gosec // G115: round_snapshots_sequence_check holds sequence >= 0
 	}
 	if err := rows.Err(); err != nil {
 		return loadDBError(ctx, err)
@@ -221,7 +221,7 @@ const admissionSQL = `SELECT a.command_id, a.effective_time_unix_micro, a.comman
 // readAdmission reads admission k of the round (E-4); ok is false when it
 // does not exist yet.
 func (e *Executor) readAdmission(ctx context.Context, roundID [16]byte, k uint64) (admissionRow, bool, error) {
-	rows, err := e.db.Query(ctx, admissionSQL, roundID, int64(k))
+	rows, err := e.db.Query(ctx, admissionSQL, roundID, int64(k)) //nolint:gosec // G115: k is an admission sequence, a bigint admissions.sequence value
 	if err != nil {
 		return admissionRow{}, false, err
 	}

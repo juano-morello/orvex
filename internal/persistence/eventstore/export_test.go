@@ -21,7 +21,7 @@ var goldenFiles = []string{"worked-example.jsonl", "instant-crash.jsonl", "empty
 func TestEncodeHeaderMatchesGolden(t *testing.T) {
 	for _, name := range goldenFiles {
 		t.Run(name, func(t *testing.T) {
-			b, err := os.ReadFile(filepath.Join(goldenDir, name))
+			b, err := os.ReadFile(filepath.Join(goldenDir, name)) //nolint:gosec // G304: fixed golden fixture under testdata
 			if err != nil {
 				t.Fatal(err)
 			}

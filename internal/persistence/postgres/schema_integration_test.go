@@ -155,7 +155,7 @@ func uuidText(id [16]byte) string { return string(canonjson.UUID(id)) }
 func commandIDFor(roundID [16]byte, k uint64) [16]byte {
 	id := roundID
 	id[8] = 0xee
-	id[12], id[13] = byte(k>>8), byte(k)
+	id[12], id[13] = byte(k>>8), byte(k) //nolint:gosec // G115: deliberate truncation to the low 16 bits of a test sequence
 	return id
 }
 
@@ -202,7 +202,7 @@ func rejectedRecord(roundID [16]byte, k uint64, prev chain.Hash) rec {
 		prevHash:    prev,
 		command:     placeBet,
 		commandID:   commandIDFor(roundID, k),
-		effective:   baseTimeUnixMicro + int64(k),
+		effective:   baseTimeUnixMicro + int64(k), //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		engineBuild: "test",
 		status:      "rejected",
 		reason:      "round_settled",
@@ -223,7 +223,7 @@ func admissionOf(r rec) admission {
 
 func insertAdmission(db execer, a admission) error {
 	return exec(db, `INSERT INTO orvex.admissions (round_id, sequence, command_id, effective_time_unix_micro, command)
-		VALUES ($1, $2, $3, $4, $5)`, a.roundID, int64(a.sequence), a.commandID, a.effective, []byte(a.command))
+		VALUES ($1, $2, $3, $4, $5)`, a.roundID, int64(a.sequence), a.commandID, a.effective, []byte(a.command)) //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 }
 
 type recordRow struct {
@@ -239,7 +239,7 @@ type recordRow struct {
 
 // rowOf returns the row whose columns agree with r's bytes.
 func rowOf(r rec, token int64) recordRow {
-	row := recordRow{roundID: r.roundID, sequence: int64(r.sequence), prevHash: r.prevHash, record: r.bytes(), status: new(r.status), token: token}
+	row := recordRow{roundID: r.roundID, sequence: int64(r.sequence), prevHash: r.prevHash, record: r.bytes(), status: new(r.status), token: token} //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 	if r.status != "accepted" {
 		row.reason = new(r.reason)
 	}
@@ -258,10 +258,10 @@ func insertRecord(db execer, r recordRow) error {
 }
 
 func advanceHeads(db execer, roundID [16]byte, k uint64) error {
-	if err := exec(db, `UPDATE orvex.round_admission_heads SET admitted_sequence = $2 WHERE round_id = $1`, roundID, int64(k)); err != nil {
+	if err := exec(db, `UPDATE orvex.round_admission_heads SET admitted_sequence = $2 WHERE round_id = $1`, roundID, int64(k)); err != nil { //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		return err
 	}
-	return exec(db, `UPDATE orvex.round_execution_heads SET processed_sequence = $2 WHERE round_id = $1`, roundID, int64(k))
+	return exec(db, `UPDATE orvex.round_execution_heads SET processed_sequence = $2 WHERE round_id = $1`, roundID, int64(k)) //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 }
 
 // insertRejected inserts admission k and the well-formed rejected record k
@@ -447,7 +447,7 @@ func TestAdmissionsCommandIDGloballyUnique(t *testing.T) {
 	pool := migrated(t)
 	wx := loadGolden(t, pool, "worked-example")
 	ic := loadGolden(t, pool, "instant-crash")
-	a := admissionOf(rejectedRecord(ic.RoundID, uint64(ic.Records), chain.Hash{}))
+	a := admissionOf(rejectedRecord(ic.RoundID, uint64(ic.Records), chain.Hash{})) //nolint:gosec // G115: ic.Records is a golden history's record count (< 100)
 	a.commandID = wx.CommandIDs[0]
 	requireCode(t, insertAdmission(pool, a), codeUniqueViolation, "admissions_command_id_key")
 	a.commandID = [16]byte{}

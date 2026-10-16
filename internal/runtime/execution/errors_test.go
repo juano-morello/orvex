@@ -23,7 +23,7 @@ func TestFailClosedError(t *testing.T) {
 	}
 	for _, s := range []error{ErrInvalidConfig, ErrInvalidRequest, ErrInvalidRound, ErrUnknownRules, ErrRoundNotFound,
 		ErrRoundExists, ErrFenced, ErrFailClosed, ErrCorrupt, ErrBusy, ErrUnavailable, ErrInternal} {
-		if errors.Is(err, s) && s != ErrFailClosed {
+		if errors.Is(err, s) && s != ErrFailClosed { //nolint:errorlint // s and ErrFailClosed are table sentinels compared by identity to skip the one err must match
 			t.Errorf("a FailClosedError matches %v", s)
 		}
 	}

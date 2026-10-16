@@ -153,7 +153,7 @@ func decodeVectors(data []byte, dst any) error {
 
 func loadVectors(t testing.TB, name string, dst any) {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", "golden", name))
+	data, err := os.ReadFile(filepath.Join("testdata", "golden", name)) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func moduleRootFile(t *testing.T, name string) []byte {
 	}
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			data, err := os.ReadFile(filepath.Join(dir, name))
+			data, err := os.ReadFile(filepath.Join(dir, name)) //nolint:gosec // G304: fixed repository file at the module root
 			if err != nil {
 				t.Fatal(err)
 			}

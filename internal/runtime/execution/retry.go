@@ -160,9 +160,9 @@ func decideConflict(h headView, k uint64, hash [32]byte, token int64) conflictDe
 		return conflictCorrupt
 	case h.token != token:
 		return conflictFenced
-	case h.processed >= int64(k) && h.recordHash != nil && string(h.recordHash) == string(hash[:]):
+	case h.processed >= int64(k) && h.recordHash != nil && string(h.recordHash) == string(hash[:]): //nolint:gosec // G115: k = processed_sequence + 1, a bigint round sequence
 		return conflictAdopt
-	case h.processed == int64(k)-1:
+	case h.processed == int64(k)-1: //nolint:gosec // G115: k = processed_sequence + 1, a bigint round sequence
 		return conflictRetry
 	default:
 		return conflictReload
@@ -194,7 +194,7 @@ func backoff(attempt int) time.Duration {
 	if limit <= 0 {
 		return 0
 	}
-	return rand.N(limit + 1)
+	return rand.N(limit + 1) //nolint:gosec // G404: backoff jitter needs no unpredictability; crypto/rand adds nothing
 }
 
 // sleepCtx waits d or until ctx ends, returning ctx.Err() in that case.

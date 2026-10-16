@@ -109,7 +109,7 @@ func LoadMigrations(fsys fs.FS) ([]Migration, error) {
 			return nil, fmt.Errorf("%w: %s: %w", ErrMigrationFiles, file, err)
 		}
 		if err := checkContent(body); err != nil {
-			return nil, fmt.Errorf("%w: %s: %s", ErrMigrationFiles, file, err)
+			return nil, fmt.Errorf("%w: %s: %w", ErrMigrationFiles, file, err)
 		}
 		mig, ok := byVersion[version]
 		if !ok {

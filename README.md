@@ -35,6 +35,9 @@ Prerequisites: Go 1.26, golangci-lint v2.14.0, Python 3.11 or newer (standard li
 - `make test-integration`: run the unit tests plus the PostgreSQL integration tests (Testcontainers, pinned PostgreSQL 18 image); fails without a Docker daemon. On hosts without cgo: `make test-integration GOTESTFLAGS=`
 - `make lint`: run golangci-lint
 - `make golden-check`: regenerate the Crash v1 golden vectors and the audit golden histories with their independent Python oracles and compare them with the committed files
+- `make fuzz`: fuzz every Go fuzz target for `FUZZTIME` each (default `30s`), one target per `go test` run; `make fuzz-list` lists them, `make fuzz-one FUZZ_PKG=internal/canonjson FUZZ_TARGET=FuzzUnmarshal` runs one and `make fuzz-guard-check` checks that `fuzz-one` refuses unknown names
+- `make test-repeat`: the specs' repeated PostgreSQL runs (`make test-repeat-admission`, `make test-repeat-execution`, `make test-repeat-export`); needs a Docker daemon
+- CI: `.github/workflows/ci.yml` on every push and pull request; `.github/workflows/nightly.yml` nightly and on demand (every fuzz target and the repeat runs)
 - `make clean`: remove build output
 - `crashctl migrate up [-to N]`, `crashctl migrate down -to N`, `crashctl migrate status`: apply, revert or list schema migrations on the database named by `ORVEX_DATABASE_URL`
 - `crashctl audit export [-unsettled] ROUND_ID FILE`: write a settled round's audit history file from the database named by `ORVEX_DATABASE_URL`

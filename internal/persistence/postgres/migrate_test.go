@@ -121,6 +121,25 @@ func TestLoadMigrations(t *testing.T) {
 	}
 }
 
+// TestLoadMigrationsWrapsContentError keeps the content error in the chain
+// next to ErrMigrationFiles, with the message unchanged.
+func TestLoadMigrationsWrapsContentError(t *testing.T) {
+	_, err := LoadMigrations(with(validSet(), map[string]*fstest.MapFile{"0002_second.up.sql": file("")}))
+	if !errors.Is(err, ErrMigrationFiles) {
+		t.Fatalf("LoadMigrations(empty file) = %v; want ErrMigrationFiles", err)
+	}
+	if want := "postgres: invalid migration files: 0002_second.up.sql: empty file"; err.Error() != want {
+		t.Errorf("LoadMigrations(empty file) = %q; want %q", err, want)
+	}
+	var multi interface{ Unwrap() []error }
+	if !errors.As(err, &multi) {
+		t.Fatalf("LoadMigrations(empty file) = %v; want a multi-wrapped error", err)
+	}
+	if causes := multi.Unwrap(); len(causes) != 2 || causes[1].Error() != "empty file" {
+		t.Errorf("LoadMigrations(empty file) wraps %v; want [ErrMigrationFiles, empty file]", causes)
+	}
+}
+
 func (m Migration) fileName(dir string) string {
 	return fmt.Sprintf("%04d_%s.%s.sql", m.Version, m.Name, dir)
 }
@@ -163,7 +182,7 @@ func TestEmbeddedMigrations(t *testing.T) {
 
 func TestMigrationLockKey(t *testing.T) {
 	sum := sha256.Sum256([]byte("orvex/migrate"))
-	if want := int64(binary.BigEndian.Uint64(sum[:8])); MigrationLockKey != want {
+	if want := int64(binary.BigEndian.Uint64(sum[:8])); MigrationLockKey != want { //nolint:gosec // G115: deliberate two's-complement reinterpretation, the MigrationLockKey derivation
 		t.Errorf("MigrationLockKey = %d, want %d", MigrationLockKey, want)
 	}
 }

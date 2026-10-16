@@ -46,7 +46,7 @@ const (
 	vecBetLost      = `{"betCredits":"250","player":"bob","type":"BetLost"}`
 	vecRoundSettled = `{"betCount":"3","seed":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","settledAtUnixMicro":"1760000010000000","totalBetCredits":"1000000350","totalPayoutCredits":"1757600134","type":"RoundSettled"}`
 	vecConfig       = `{"commitment":"630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd","maxBetCredits":"1000000000","maxBets":"3","minBetCredits":"1"}`
-	vecConfigSecret = `{"seed":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}`
+	vecConfigSecret = `{"seed":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"}` //nolint:gosec // G101: public seed of the spec's codec test vector, not a credential
 	vecBet          = `{"betCredits":"100","cashOutMultiplierScaled":"13498","cashOutTick":"500","cashedOutAtUnixMicro":"1760000005000000","payoutCredits":"134","placedAtUnixMicro":"1759999980000000","player":"alice","status":"cashed_out"}`
 	vecResult       = `{"reason":"duplicate_bet","status":"rejected"}`
 	vecP3Hex        = "7b22617574686f72697479223a22706c61796572222c2262657443726564697473223a2231303030303030303030222c22706c61796572223a227a6fc3ab205c22e298835c225c5c5c7530303031f09f9880222c2274797065223a22506c616365426574227d"

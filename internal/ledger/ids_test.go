@@ -41,7 +41,7 @@ func TestTransactionID(t *testing.T) {
 }
 
 func TestIDsAreUUIDv8(t *testing.T) {
-	r := rand.New(rand.NewPCG(1, 2))
+	r := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // G404: a seeded PCG keeps the test inputs reproducible; no secret is derived
 	check := func(what string, id [16]byte) {
 		t.Helper()
 		if id[6]>>4 != 8 || id[8]>>6 != 2 {

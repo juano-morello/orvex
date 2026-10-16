@@ -66,7 +66,7 @@ func readLedger(ctx context.Context, tx pgx.Tx, roundID [16]byte, last uint64) (
 		transactions: map[int64][]transactionRow{},
 	}
 	refs := map[[16]byte]bool{}
-	bound := int64(last)
+	bound := int64(last) //nolint:gosec // G115: last is the newest snapshot sequence, a bigint checked >= 0 by readExportBase
 
 	rows, err := tx.Query(ctx, `SELECT sequence, account_id, amount FROM orvex.ledger_holds
 		WHERE round_id = $1 AND sequence <= $2`, roundID, bound)

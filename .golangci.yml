@@ -6,6 +6,9 @@ run:
 
 linters:
   default: standard
+  enable:
+    - errorlint
+    - gosec
 
 formatters:
   enable:

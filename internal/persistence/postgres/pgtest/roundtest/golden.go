@@ -43,7 +43,7 @@ func (g Golden) UUID() string { return string(canonjson.UUID(g.RoundID)) }
 // its record lines 0..N.
 func ReadGolden(t testing.TB, path string) (canonjson.Object, [][]byte) {
 	t.Helper()
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // G304: test support; callers pass a golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -57,7 +57,7 @@ var idCounter atomic.Uint64
 func cmdID(n int) [16]byte {
 	var id [16]byte
 	id[0], id[6] = 0x0c, 0x70
-	binary.BigEndian.PutUint64(id[8:], uint64(n))
+	binary.BigEndian.PutUint64(id[8:], uint64(n)) //nolint:gosec // G115: n is a non-negative test command number
 	return id
 }
 
