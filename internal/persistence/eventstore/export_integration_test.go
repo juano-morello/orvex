@@ -64,7 +64,7 @@ func loadManifest(t *testing.T) manifest {
 
 func readGolden(t *testing.T, file string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(goldenDir, file))
+	b, err := os.ReadFile(filepath.Join(goldenDir, file)) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func loadManifestV2(t *testing.T) manifestV2 {
 
 func readGoldenV2(t *testing.T, file string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(goldenV2Dir, file))
+	b, err := os.ReadFile(filepath.Join(goldenV2Dir, file)) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}

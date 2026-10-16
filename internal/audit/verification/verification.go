@@ -491,11 +491,11 @@ func checkChain(h *history, expect *chain.Hash) (Report, error) {
 	}
 	cps := h.header.checkpoints
 	for i, cp := range cps {
-		if cp.Sequence > uint64(last) || (i > 0 && cp.Sequence <= cps[i-1].Sequence) {
+		if cp.Sequence > uint64(last) || (i > 0 && cp.Sequence <= cps[i-1].Sequence) { //nolint:gosec // G115: last = len(h.records)-1 >= 0
 			return Report{}, fail(StageChain, HeaderSequence, errors.New("verification: checkpoint sequences must strictly increase within the chain"))
 		}
 	}
-	if cps[len(cps)-1].Sequence != uint64(last) {
+	if cps[len(cps)-1].Sequence != uint64(last) { //nolint:gosec // G115: last = len(h.records)-1 >= 0
 		return Report{}, fail(StageChain, HeaderSequence, errors.New("verification: the last checkpoint must be at the last record"))
 	}
 	return rep, nil
@@ -564,14 +564,14 @@ func replayHistory(h *history, rep Report, opt Options) (Report, error) {
 		}
 		b, err := a.EncodeState(s)
 		if err != nil {
-			return fail(StageStateReplay, int64(seq), fmt.Errorf("verification: encode state: %w", err))
+			return fail(StageStateReplay, int64(seq), fmt.Errorf("verification: encode state: %w", err)) //nolint:gosec // G115: the chain stage checked seq == its record index < len(h.records)
 		}
 		got, err := chain.StateHash(d.Game, d.StateVersion, b)
 		if err != nil {
-			return fail(StageStateReplay, int64(seq), err)
+			return fail(StageStateReplay, int64(seq), err) //nolint:gosec // G115: the chain stage checked seq == its record index < len(h.records)
 		}
 		if got != cps[next].StateHash {
-			return fail(StageStateReplay, int64(seq), errors.New("verification: state hash differs from the checkpoint"))
+			return fail(StageStateReplay, int64(seq), errors.New("verification: state hash differs from the checkpoint")) //nolint:gosec // G115: the chain stage checked seq == its record index < len(h.records)
 		}
 		rep.Checkpoints = append(rep.Checkpoints, Checkpoint{Sequence: seq, StateHash: got})
 		next++
@@ -588,7 +588,7 @@ func replayHistory(h *history, rep Report, opt Options) (Report, error) {
 			if m.Decision {
 				stage = StageDecisionReplay
 			}
-			return Report{}, fail(stage, int64(m.Sequence), m.Err)
+			return Report{}, fail(stage, int64(m.Sequence), m.Err) //nolint:gosec // G115: m.Sequence is a record sequence the chain stage checked against its index < len(h.records)
 		}
 		return Report{}, err
 	}

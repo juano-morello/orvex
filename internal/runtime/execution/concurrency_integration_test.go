@@ -246,7 +246,7 @@ func requireConflictInvariants(t *testing.T, pool *pgxpool.Pool, outs [2][]execu
 			t.Fatal(err)
 		}
 		build := r.(chain.Command).EngineBuild
-		if who, ok := committed[uint64(seq)]; ok && builds[who] != build {
+		if who, ok := committed[uint64(seq)]; ok && builds[who] != build { //nolint:gosec // G115: seq is chain_records.sequence (CHECK >= 0)
 			t.Errorf("record %d carries build %q, its committer is %q", seq, build, builds[who])
 		}
 		if build != builds[0] && build != builds[1] {

@@ -28,7 +28,7 @@ var ctx = context.Background()
 
 func readGolden(t *testing.T, name string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(goldenDir, name+".jsonl"))
+	b, err := os.ReadFile(filepath.Join(goldenDir, name+".jsonl")) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func equalInts(a, b []int) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if a[i] != b[i] { //nolint:gosec // G602: len(a) == len(b) is checked above
 			return false
 		}
 	}

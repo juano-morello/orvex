@@ -62,7 +62,7 @@ func (e *Executor) commit(ctx context.Context, lease Lease, en *entry, tr *trans
 		}
 	}()
 
-	k := int64(tr.sequence)
+	k := int64(tr.sequence) //nolint:gosec // G115: tr.sequence = processed_sequence + 1, a bigint round sequence
 	tag, err := tx.Exec(ctx, casSQL, lease.RoundID, k-1, k, lease.FencingToken)
 	if err != nil {
 		return statementResult(ctx, err), err
@@ -92,7 +92,7 @@ func (e *Executor) commit(ctx context.Context, lease Lease, en *entry, tr *trans
 		idx, amounts, events := make([]int32, n), make([]int64, n), make([]int64, n)
 		debits, credits := make([][16]byte, n), make([][16]byte, n)
 		for i, p := range tr.postings {
-			idx[i], amounts[i], events[i] = int32(i), p.Amount, int64(p.EventSequence)
+			idx[i], amounts[i], events[i] = int32(i), p.Amount, int64(p.EventSequence) //nolint:gosec // G115: event sequences are bigint domain_events.event_sequence values
 			debits[i], credits[i] = accounts[i][0], accounts[i][1]
 		}
 		b.Queue(insertPostingsSQL, txID, lease.RoundID, idx, uuids(debits), uuids(credits), amounts, events)

@@ -117,7 +117,7 @@ func ExportHistory(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Wr
 
 	var headBytes []byte
 	err = tx.QueryRow(ctx, `SELECT hash FROM orvex.chain_records WHERE round_id = $1 AND sequence = $2`,
-		roundID, int64(last)).Scan(&headBytes)
+		roundID, int64(last)).Scan(&headBytes) //nolint:gosec // G115: last is a snapshot sequence scanned from bigint and checked >= 0 above
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return Export{}, fmt.Errorf("%w: no chain record at snapshot %d", ErrCorrupt, last)
@@ -137,7 +137,7 @@ func ExportHistory(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Wr
 		return Export{}, fmt.Errorf("eventstore: read record count: %w", err)
 	case newest == nil:
 		return Export{}, fmt.Errorf("%w: round has no chain records", ErrCorrupt)
-	case *newest < int64(last):
+	case *newest < int64(last): //nolint:gosec // G115: last is a snapshot sequence scanned from bigint and checked >= 0 above
 		return Export{}, fmt.Errorf("%w: newest record %d before snapshot %d", ErrCorrupt, *newest, last)
 	}
 
@@ -151,7 +151,7 @@ func ExportHistory(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Wr
 	}
 
 	rows, err = tx.Query(ctx, `SELECT sequence, record FROM orvex.chain_records
-		WHERE round_id = $1 AND sequence <= $2 ORDER BY sequence`, roundID, int64(last))
+		WHERE round_id = $1 AND sequence <= $2 ORDER BY sequence`, roundID, int64(last)) //nolint:gosec // G115: last is a snapshot sequence scanned from bigint and checked >= 0 above
 	if err != nil {
 		return Export{}, fmt.Errorf("eventstore: read records: %w", err)
 	}

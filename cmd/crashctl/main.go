@@ -148,7 +148,7 @@ func runAudit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	in := stdin
 	if path := fs.Arg(0); path != "-" {
-		f, err := os.Open(path)
+		f, err := os.Open(path) //nolint:gosec // G304: FILE is the operator's own input path; audit verify, replay and chain only read it
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "%s%v\n", prefix, err)
 			return exitIO

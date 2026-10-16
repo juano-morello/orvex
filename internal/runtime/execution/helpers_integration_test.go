@@ -88,7 +88,7 @@ var idCounter atomic.Uint64
 func cmdID(n int) [16]byte {
 	var id [16]byte
 	id[0], id[6] = 0x0c, 0x70
-	binary.BigEndian.PutUint64(id[8:], uint64(n))
+	binary.BigEndian.PutUint64(id[8:], uint64(n)) //nolint:gosec // G115: n is a non-negative test command number
 	return id
 }
 
@@ -269,7 +269,7 @@ func seedAdmission(t *testing.T, db *pgxpool.Pool, roundID, commandID [16]byte, 
 		}
 		mustExec(t, tx, `UPDATE orvex.round_admission_heads SET admitted_sequence = $2 WHERE round_id = $1`, roundID, seq)
 	})
-	return uint64(seq)
+	return uint64(seq) //nolint:gosec // G115: seq is admitted_sequence (CHECK >= 0) + 1
 }
 
 // seed seeds cmd with its S-10 hold.
@@ -305,7 +305,7 @@ type goldenRound struct {
 
 func readGolden(t *testing.T, name string) (canonjson.Object, [][]byte) {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(goldenDir, name+".jsonl"))
+	b, err := os.ReadFile(filepath.Join(goldenDir, name+".jsonl")) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}

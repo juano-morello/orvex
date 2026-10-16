@@ -139,7 +139,7 @@ func TestAdmitHoldsCredits(t *testing.T) {
 	var amount int64
 	if err := e.obs.QueryRow(ctx, `SELECT h.amount FROM orvex.ledger_holds h
 		JOIN orvex.ledger_accounts la ON la.account_id = h.account_id
-		WHERE h.round_id = $1 AND h.sequence = $2 AND la.player_id = 'alice'`, round, int64(a.Sequence)).Scan(&amount); err != nil || amount != 60 {
+		WHERE h.round_id = $1 AND h.sequence = $2 AND la.player_id = 'alice'`, round, int64(a.Sequence)).Scan(&amount); err != nil || amount != 60 { //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		t.Errorf("hold of admission %d = %d (%v), want 60 on alice's account", a.Sequence, amount, err)
 	}
 
@@ -211,11 +211,11 @@ func appendRecord(t *testing.T, e env, a admission.Admission, prev chain.Hash, r
 	}
 	inTx(t, e.pool, func(tx pgx.Tx) {
 		mustExec(t, tx, `UPDATE orvex.round_execution_heads SET processed_sequence = $2 WHERE round_id = $1`,
-			a.RoundID, int64(a.Sequence))
+			a.RoundID, int64(a.Sequence)) //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		mustExec(t, tx, `INSERT INTO orvex.chain_records
 			(round_id, sequence, prev_hash, hash, record, result_status, result_reason, fencing_token)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, 0)`,
-			a.RoundID, int64(a.Sequence), prev[:], hash[:], record, status, reason)
+			a.RoundID, int64(a.Sequence), prev[:], hash[:], record, status, reason) //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 	})
 	return hash
 }

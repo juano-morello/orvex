@@ -12,10 +12,10 @@ import (
 // b1 selecting player and amount, and b2 the clock advance, in units of 1 µs,
 // or 100 ms when fast is set.
 func fuzzOp(kind int, fast bool, b1, b2 byte) []byte {
-	b0 := byte(kind)
+	b0 := byte(kind) //nolint:gosec // G115: callers pass op kinds 0 to 5
 	if fast {
 		// 128 % 6 == 2, so 128 + ((kind+4) % 6) has kind kind.
-		b0 = 128 + byte((kind+4)%6)
+		b0 = 128 + byte((kind+4)%6) //nolint:gosec // G115: (kind+4)%6 is in [0, 5]
 	}
 	return []byte{b0, b1, b2}
 }

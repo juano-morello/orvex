@@ -15,7 +15,7 @@ import (
 
 // unreachableDSN names a port nothing listens on, so a run that gets past
 // argument checking exits 4 rather than 2.
-const unreachableDSN = "postgres://u:p@127.0.0.1:1/db?connect_timeout=2"
+const unreachableDSN = "postgres://u:p@127.0.0.1:1/db?connect_timeout=2" //nolint:gosec // G101: dummy credentials for a port nothing listens on, not a secret
 
 func runMigrateCmd(args ...string) (int, string, string) {
 	var stdout, stderr bytes.Buffer

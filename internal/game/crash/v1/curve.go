@@ -29,7 +29,7 @@ func MultiplierAtTick(n int64) (int64, error) {
 	}
 	m, err := f.Int64()
 	if err != nil {
-		return 0, fmt.Errorf("%w: tick %d: %v", ErrArithmetic, n, err)
+		return 0, fmt.Errorf("%w: tick %d: %v", ErrArithmetic, n, err) //nolint:errorlint // frozen D-4 math file: f.Int64 cannot fail for n in [0, MaxTick]; ErrArithmetic is still wrapped
 	}
 	if m < Scale {
 		return 0, fmt.Errorf("%w: tick %d: multiplier %d below scale", ErrArithmetic, n, m)

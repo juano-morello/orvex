@@ -170,7 +170,7 @@ func TestExportFileExists(t *testing.T) {
 			}
 		})
 	}
-	if b, err := os.ReadFile(existing); err != nil || string(b) != "keep me\n" {
+	if b, err := os.ReadFile(existing); err != nil || string(b) != "keep me\n" { //nolint:gosec // G304: path is a file this test created under t.TempDir()
 		t.Errorf("existing file = %q, %v; want it unchanged", b, err)
 	}
 	requireNoFile(t, target)
@@ -301,7 +301,7 @@ func TestExportExitCodes(t *testing.T) {
 // readGoldenFile returns a golden history file.
 func readGoldenFile(t *testing.T, file string) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(goldenDir, file))
+	b, err := os.ReadFile(filepath.Join(goldenDir, file)) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}

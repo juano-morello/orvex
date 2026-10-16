@@ -137,7 +137,7 @@ func seedAdmission(t *testing.T, db *pgxpool.Pool, roundID, commandID [16]byte, 
 		}
 		execOrFatal(t, tx, `UPDATE orvex.round_admission_heads SET admitted_sequence = $2 WHERE round_id = $1`, roundID, seq)
 	})
-	return uint64(seq)
+	return uint64(seq) //nolint:gosec // G115: seq is admitted_sequence (CHECK >= 0) + 1
 }
 
 // seedGolden creates the golden round in file with LBT-12's executor

@@ -141,7 +141,7 @@ func TestGateReleasesEntries(t *testing.T) {
 	errs := make(chan error, 100)
 	for i := range 100 {
 		wg.Go(func() {
-			release, err := g.acquire(context.Background(), round(byte(i%10)))
+			release, err := g.acquire(context.Background(), round(byte(i%10))) //nolint:gosec // G115: i%10 is in [0, 9]
 			if err != nil {
 				errs <- err
 				return

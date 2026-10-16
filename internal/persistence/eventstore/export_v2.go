@@ -61,7 +61,7 @@ func ExportHistoryV2(ctx context.Context, db TxBeginner, roundID [16]byte, w io.
 	if err := bw.Flush(); err != nil {
 		return Export{}, fmt.Errorf("eventstore: write: %w", err)
 	}
-	return Export{RoundID: roundID, Records: int(n), Head: head, Checkpoints: cps}, nil
+	return Export{RoundID: roundID, Records: int(n), Head: head, Checkpoints: cps}, nil //nolint:gosec // G115: n is one round's record count (last + 1), as in ExportHistory's int(n)
 }
 
 // readExportBase reads the round's secret config, its snapshots as
@@ -112,7 +112,7 @@ func readExportBase(ctx context.Context, tx pgx.Tx, roundID [16]byte) ([]byte, [
 
 	var headBytes []byte
 	err = tx.QueryRow(ctx, `SELECT hash FROM orvex.chain_records WHERE round_id = $1 AND sequence = $2`,
-		roundID, int64(last)).Scan(&headBytes)
+		roundID, int64(last)).Scan(&headBytes) //nolint:gosec // G115: last is a snapshot sequence scanned from bigint and checked >= 0 above
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return nil, nil, none, fmt.Errorf("%w: no chain record at snapshot %d", ErrCorrupt, last)
@@ -131,7 +131,7 @@ func readExportBase(ctx context.Context, tx pgx.Tx, roundID [16]byte) ([]byte, [
 // count.
 func writeRecords(ctx context.Context, tx pgx.Tx, bw *bufio.Writer, roundID [16]byte, last uint64) (uint64, error) {
 	rows, err := tx.Query(ctx, `SELECT sequence, record FROM orvex.chain_records
-		WHERE round_id = $1 AND sequence <= $2 ORDER BY sequence`, roundID, int64(last))
+		WHERE round_id = $1 AND sequence <= $2 ORDER BY sequence`, roundID, int64(last)) //nolint:gosec // G115: last is the newest snapshot sequence, a bigint checked >= 0 by readExportBase
 	if err != nil {
 		return 0, fmt.Errorf("eventstore: read records: %w", err)
 	}

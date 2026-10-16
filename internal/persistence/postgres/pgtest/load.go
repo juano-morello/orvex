@@ -104,7 +104,7 @@ func LoadHistory(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []u
 		exec("admission", `INSERT INTO orvex.admissions
 			(round_id, sequence, command_id, effective_time_unix_micro, command)
 			VALUES ($1, $2, $3, $4, $5)`,
-			c.RoundID, int64(c.Sequence), c.CommandID, c.EffectiveTimeUnixMicro, c.Payload)
+			c.RoundID, int64(c.Sequence), c.CommandID, c.EffectiveTimeUnixMicro, c.Payload) //nolint:gosec // G115: a golden history sequence (< 100); a wrapped value would fail the column CHECK
 	}
 	if lg != nil {
 		lg.loadHolds(t, tx, g.RoundID)
@@ -141,7 +141,7 @@ func LoadHistory(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []u
 				t.Fatalf("pgtest: event %d type: %v", e.Sequence, err)
 			}
 			exec("domain event", `INSERT INTO orvex.domain_events (round_id, event_sequence, sequence, event_type)
-				VALUES ($1, $2, $3, $4)`, c.RoundID, int64(e.Sequence), int64(c.Sequence), typ)
+				VALUES ($1, $2, $3, $4)`, c.RoundID, int64(e.Sequence), int64(c.Sequence), typ) //nolint:gosec // G115: a golden history sequence (< 100); a wrapped value would fail the column CHECK
 		}
 	}
 	if lg != nil {
@@ -150,7 +150,7 @@ func LoadHistory(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []u
 
 	for _, cp := range selected {
 		exec("snapshot", `INSERT INTO orvex.round_snapshots (round_id, sequence, state_hash, state, engine_build)
-			VALUES ($1, $2, $3, NULL, 'golden')`, g.RoundID, int64(cp.sequence), cp.stateHash)
+			VALUES ($1, $2, $3, NULL, 'golden')`, g.RoundID, int64(cp.sequence), cp.stateHash) //nolint:gosec // G115: a golden history sequence (< 100); a wrapped value would fail the column CHECK
 	}
 
 	if err := tx.Commit(ctx); err != nil {
