@@ -2,7 +2,7 @@
 
 Source: https://linear.app/lbtworks/document/adr-004-multiplayer-crash-game-specification-b93b4142286c
 
-Status: Accepted (implementation constants pending)
+Status: Accepted (implementation constants frozen for crash/v1, 2026-10-16; see Amendment)
 
 ## Decision
 
@@ -23,3 +23,7 @@ Freeze exponential coefficient, time quantum, multiplier scale, apd context, rou
 ## Exclusions
 
 No real-money flows, KYC, regulatory certification, jackpots, multi-currency or cross-region active-active.
+
+## Amendment (2026-10-16)
+
+The open implementation parameters listed above are frozen for rules version `crash/v1` by the approved math specification `docs/specs/e96d124d_crash-v1-math-spec.md` (decisions D-1 to D-14, approved 2026-10-14). They are implemented in `internal/game/crash/v1/params.go` and checked against independent golden vectors in `internal/game/crash/v1/testdata/golden/`. Once `crash/v1` ships they are immutable; any change requires a new rules version. Tracked in LBT-22.
