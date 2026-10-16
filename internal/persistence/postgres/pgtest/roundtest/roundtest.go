@@ -27,6 +27,7 @@ import (
 	"github.com/juano-morello/orvex/internal/game"
 	crashv1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
 	"github.com/juano-morello/orvex/internal/runtime/admission"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
@@ -44,12 +45,14 @@ func Registry(t testing.TB) *game.Registry {
 	return reg
 }
 
-// NewExecutor returns an executor over db with EngineBuild "golden" unless
-// mutate changes it; reg nil means crash/v1 only.
+// NewExecutor returns an executor over db with EngineBuild "golden" and the
+// fixed test keyring pgtest.Keyring() (LBT-21 K-8) unless mutate changes
+// them; reg nil means crash/v1 only.
 func NewExecutor(t testing.TB, db execution.DB, mutate func(*execution.Config), reg *game.Registry) *execution.Executor {
 	t.Helper()
 	cfg := execution.DefaultConfig()
 	cfg.EngineBuild = engineBuild
+	cfg.Keyring = pgtest.Keyring()
 	if mutate != nil {
 		mutate(&cfg)
 	}

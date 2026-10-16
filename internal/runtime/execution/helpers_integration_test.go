@@ -523,14 +523,22 @@ func waitDBClock(t *testing.T, db *pgxpool.Pool, at int64) {
 	}
 }
 
-// exportHistory exports the round and returns the file.
+// exportHistory exports the round through the privileged path (LBT-21
+// K-9), so unsettled rounds export too; a settled round's reveal still
+// wins. It returns the file.
 func exportHistory(t *testing.T, db *pgxpool.Pool, roundID [16]byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if _, err := eventstore.ExportHistory(ctx, db, roundID, &buf); err != nil {
+	if _, err := eventstore.ExportHistory(ctx, db, roundID, &buf, privilegedExport()); err != nil {
 		t.Fatalf("ExportHistory: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// privilegedExport is the export options of the privileged path: the
+// sealed secret opened with the pgtest keyring when there is no reveal.
+func privilegedExport() eventstore.Options {
+	return eventstore.Options{Unrevealed: true, Keyring: pgtest.Keyring()}
 }
 
 // loadHistory loads a history with pgtest.LoadHistory (token 0, every

@@ -31,6 +31,14 @@
 //     round_pool account and genesis outbox message in one transaction, and
 //     stores the policy's secret close offset that orvex.admit_command
 //     reads (LBT-12 engineer addendum).
+//   - CreateRound stores the secret config sealed with Config.Keyring
+//     (AES-256-GCM, LBT-21 K-8; internal/persistence/sealing), never in
+//     plaintext.
+//   - The cold load reads the round's reveal, else the legacy plaintext,
+//     else opens the sealed form with Config.Keyring; a form it cannot open
+//     is ErrCorrupt. The record that first makes the round final writes the
+//     reveal (round_secret_reveals) as the last statement of its
+//     Transaction B (LBT-21 K-6).
 //
 // Errors wrap exactly one sentinel or a context error (E-15). Transient
 // failures are retried up to Config.MaxAttempts times with full-jitter

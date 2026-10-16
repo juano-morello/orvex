@@ -40,7 +40,7 @@ Prerequisites: Go 1.26, golangci-lint v2.14.0, Python 3.11 or newer (standard li
 - CI: `.github/workflows/ci.yml` on every push and pull request; `.github/workflows/nightly.yml` nightly and on demand (every fuzz target and the repeat runs)
 - `make clean`: remove build output
 - `crashctl migrate up [-to N]`, `crashctl migrate down -to N`, `crashctl migrate status`: apply, revert or list schema migrations on the database named by `ORVEX_DATABASE_URL`
-- `crashctl audit export [-unsettled] ROUND_ID FILE`: write a settled round's audit history file from the database named by `ORVEX_DATABASE_URL`
+- `crashctl audit export [-unsettled] ROUND_ID FILE`: write a settled round's audit history file from the database named by `ORVEX_DATABASE_URL`; for a round whose secret config is not yet revealed, `-unsettled` needs the privileged path: `SELECT` on `orvex.round_secrets` and the keyring named by `ORVEX_SECRET_KEYRING_FILE`
 
 Local PostgreSQL:
 
@@ -54,7 +54,7 @@ See [AGENTS.md](AGENTS.md) for contributor and agent guidance and [docs/adr/](do
 
 `make audit ROUND_ID=<uuid>` builds `crashctl`, exports the round from the database named by `ORVEX_DATABASE_URL` with `crashctl audit export` into a new private temporary directory (the file has mode 0600), verifies it with `crashctl audit verify -expect-head` set to the head the export printed, and removes the directory.
 
-- `AUDIT_FORMAT=NAME` passes `-format NAME`. `AUDIT_UNSETTLED=1` passes `-unsettled`: it audits a round that is not settled at its newest snapshot, and the temporary file then holds the round's unrevealed secret config.
-- A missing `ROUND_ID` or `ORVEX_DATABASE_URL`, or an `AUDIT_UNSETTLED` other than `1`, stops before the build with an `audit:` message. A failed step prints `audit: crashctl audit export failed with exit code N` (or `verify`); make reports `Error N` and exits 2. `N` is `crashctl`'s code: 1 failed, 2 usage, 3 unsupported, 4 I/O or database, 5 round not found, 6 round not settled.
+- `AUDIT_FORMAT=NAME` passes `-format NAME`. `AUDIT_UNSETTLED=1` passes `-unsettled`: it audits a round that is not settled at its newest snapshot, and the temporary file then holds the round's unrevealed secret config. For a round whose secret config is not revealed, it needs the privileged path (LBT-21): a role with the `orvex_secret_reader` grants in `ORVEX_DATABASE_URL` and the keyring named by `ORVEX_SECRET_KEYRING_FILE`, set in the environment or on the command line (`make audit ROUND_ID=<uuid> AUDIT_UNSETTLED=1 ORVEX_SECRET_KEYRING_FILE=<path>`).
+- A missing `ROUND_ID` or `ORVEX_DATABASE_URL`, or an `AUDIT_UNSETTLED` other than `1`, stops before the build with an `audit:` message. A failed step prints `audit: crashctl audit export failed with exit code N` (or `verify`); make reports `Error N` and exits 2. `N` is `crashctl`'s code: 1 failed, 2 usage or a keyring problem, 3 unsupported, 4 I/O or database, 5 round not found, 6 round not settled or its secret config not revealed.
 - The expected head comes from the same database as the file, so the run checks the export end to end but is not an independent anchor (ADR-001). Keep the printed head elsewhere to anchor it.
 - Local Compose database: `ORVEX_DATABASE_URL='postgres://orvex:orvex@127.0.0.1:55432/orvex?sslmode=disable' make audit ROUND_ID=<uuid>`.

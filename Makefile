@@ -84,7 +84,12 @@ golden-check:
 # the file with mode 0600), then verify the file with crashctl audit verify
 # -expect-head set to the head the export printed. The directory is removed
 # on every exit. AUDIT_FORMAT=NAME passes -format NAME and AUDIT_UNSETTLED=1
-# passes -unsettled. ROUND_ID and ORVEX_DATABASE_URL are checked before the
+# passes -unsettled; for a round whose secret config is not revealed,
+# -unsettled needs the privileged path (LBT-21 K-10, K-13): the
+# orvex_secret_reader grants for the role in ORVEX_DATABASE_URL and the
+# keyring named by ORVEX_SECRET_KEYRING_FILE, which crashctl reads from the
+# environment (make passes it through, from the environment or the command
+# line). ROUND_ID and ORVEX_DATABASE_URL are checked before the
 # build. A failed crashctl step exits with crashctl's code, which make reports
 # as "Error N"; make itself then exits 2, as for any failed recipe. The
 # Makefile never expands ORVEX_DATABASE_URL: crashctl reads it from the

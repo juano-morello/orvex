@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 )
 
 // forbiddenDB fails the test on any call.
@@ -55,6 +57,29 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+// testKeyring is the in-package tests' keyring. They must not import
+// pgtest, which imports this package.
+func testKeyring(t *testing.T) *sealing.Keyring {
+	t.Helper()
+	k, err := sealing.NewKeyring("test", map[string][]byte{"test": bytes.Repeat([]byte{7}, sealing.KeySize)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+// TestNewRequiresKeyring: Config.Keyring is required (LBT-21 K-8).
+func TestNewRequiresKeyring(t *testing.T) {
+	base := Config{EngineBuild: "golden", LockTimeout: 3 * time.Second, IdleInTransactionTimeout: time.Second, MaxAttempts: 3}
+	if _, err := New(forbiddenDB{t}, registry(t), base, CrashV1Policy()); !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("nil Keyring: err = %v, want ErrInvalidConfig", err)
+	}
+	base.Keyring = testKeyring(t)
+	if _, err := New(forbiddenDB{t}, registry(t), base, CrashV1Policy()); err != nil {
+		t.Errorf("with a keyring: %v", err)
+	}
+}
+
 // policyWith is the crash/v1 policy with another descriptor or rule.
 type policyWith struct {
 	Policy
@@ -75,13 +100,13 @@ func (r ruleWith) Descriptor() game.Descriptor { return r.d }
 func TestNewValidation(t *testing.T) {
 	db := forbiddenDB{t}
 	reg := registry(t)
-	base := Config{EngineBuild: "golden", LockTimeout: 3 * time.Second, IdleInTransactionTimeout: time.Second, MaxAttempts: 3}
+	base := Config{EngineBuild: "golden", LockTimeout: 3 * time.Second, IdleInTransactionTimeout: time.Second, MaxAttempts: 3, Keyring: testKeyring(t)}
 	if _, err := New(db, reg, base, CrashV1Policy()); err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
 	edges := []Config{
-		{EngineBuild: "golden", LockTimeout: 60 * time.Second, IdleInTransactionTimeout: 50 * time.Millisecond, MaxAttempts: 1},
-		{EngineBuild: strings.Repeat("x", 128), LockTimeout: 60 * time.Second, IdleInTransactionTimeout: 60*time.Second - time.Millisecond, MaxAttempts: 10},
+		{EngineBuild: "golden", LockTimeout: 60 * time.Second, IdleInTransactionTimeout: 50 * time.Millisecond, MaxAttempts: 1, Keyring: base.Keyring},
+		{EngineBuild: strings.Repeat("x", 128), LockTimeout: 60 * time.Second, IdleInTransactionTimeout: 60*time.Second - time.Millisecond, MaxAttempts: 10, Keyring: base.Keyring},
 	}
 	for _, c := range edges {
 		if _, err := New(db, reg, c, CrashV1Policy()); err != nil {
@@ -139,7 +164,9 @@ func TestNewValidation(t *testing.T) {
 }
 
 func TestExecuteNextValidation(t *testing.T) {
-	x, err := New(forbiddenDB{t}, registry(t), DefaultConfig(), CrashV1Policy())
+	cfg := DefaultConfig()
+	cfg.Keyring = testKeyring(t)
+	x, err := New(forbiddenDB{t}, registry(t), cfg, CrashV1Policy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,6 +224,7 @@ func TestContextErrorWrapsCtxErr(t *testing.T) {
 	db := &beginErrDB{t: t, err: canceled}
 	cfg := DefaultConfig()
 	cfg.EngineBuild = "golden"
+	cfg.Keyring = testKeyring(t)
 	x, err := New(db, registry(t), cfg, CrashV1Policy())
 	if err != nil {
 		t.Fatal(err)

@@ -350,6 +350,73 @@ func TestCrashAfterCommit(t *testing.T) {
 			t.Errorf("%d records at 1", n)
 		}
 	})
+	t.Run("settle record adopted", func(t *testing.T) {
+		// The ambiguous COMMIT is the one of the record that finalizes the
+		// round: the adopted record carries its reveal, exactly once
+		// (LBT-21 K-8).
+		_, pool := newDB(t)
+		fdb := &faultDB{pool: pool}
+		x := roundtest.NewExecutor(t, fdb, nil, nil)
+		gr := roundtest.SeedGolden(t, pool, x, goldenPath("worked-example"), 0)
+		if n, err := x.Drain(ctx, lease(gr.RoundID), 20); err != nil || n != 20 {
+			t.Fatalf("Drain = %d, %v; want 20", n, err)
+		}
+		var once sync.Once
+		fdb.set(func(f *faultDB) {
+			f.afterCommit = func(pgx.Tx) error {
+				var err error
+				once.Do(func() { err = io.ErrUnexpectedEOF })
+				return err
+			}
+		})
+		out, err := x.ExecuteNext(ctx, lease(gr.RoundID))
+		if err != nil || !out.Adopted || out.Sequence != 21 || !out.Final {
+			t.Fatalf("ExecuteNext = %+v, %v; want Adopted, final, sequence 21", out, err)
+		}
+		if n := count(t, pool, `SELECT count(*) FROM orvex.round_secret_reveals WHERE round_id = $1 AND sequence = 21`, gr.RoundID); n != 1 {
+			t.Errorf("%d reveals at 21, want 1", n)
+		}
+	})
+}
+
+// TestRevealAtomicWithSettleRecord: the reveal commits or rolls back with
+// the record that finalizes the round (LBT-21 K-6, ADR-006 failure test).
+func TestRevealAtomicWithSettleRecord(t *testing.T) {
+	_, pool := newDB(t)
+	installFaults(t, pool)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
+	gr := roundtest.SeedGolden(t, pool, x, goldenPath("worked-example"), 0)
+	if n, err := x.Drain(ctx, lease(gr.RoundID), 20); err != nil || n != 20 {
+		t.Fatalf("Drain = %d, %v; want 20", n, err)
+	}
+	before := effects(t, pool, gr.RoundID)
+	revealCount := func() int64 {
+		return count(t, pool, `SELECT count(*) FROM orvex.round_secret_reveals WHERE round_id = $1`, gr.RoundID)
+	}
+	for _, f := range []struct{ table, constraint string }{
+		{"round_secret_reveals", "round_secret_reveals_config_secret_check"},
+		{"ledger_postings", "ledger_accounts_floor_check"},
+	} {
+		t.Run(f.table, func(t *testing.T) {
+			enableFault(t, pool, f.table, "23514", f.constraint, 1_000_000)
+			_, err := x.ExecuteNext(ctx, lease(gr.RoundID))
+			if !errors.Is(err, execution.ErrInternal) || postgres.SQLState(err) != "23514" {
+				t.Fatalf("ExecuteNext = %v, want ErrInternal wrapping 23514", err)
+			}
+			requireEffects(t, effects(t, pool, gr.RoundID), before)
+			if n := revealCount(); n != 0 {
+				t.Errorf("%d reveals after the failed settle record, want 0", n)
+			}
+			disableFaults(t, pool)
+		})
+	}
+	out, err := x.ExecuteNext(ctx, lease(gr.RoundID))
+	if err != nil || out.Sequence != 21 || !out.Final {
+		t.Fatalf("ExecuteNext after the faults = %+v, %v; want final record 21", out, err)
+	}
+	if n := revealCount(); n != 1 {
+		t.Errorf("%d reveals after record 21, want 1", n)
+	}
 }
 
 func TestDuplicatePayoutImpossible(t *testing.T) {

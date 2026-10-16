@@ -24,6 +24,7 @@ import (
 	"github.com/juano-morello/orvex/internal/ledger"
 	"github.com/juano-morello/orvex/internal/persistence/eventstore"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 )
 
 func TestMain(m *testing.M) { os.Exit(pgtest.Run(m)) }
@@ -109,7 +110,16 @@ func TestExportGoldenHistories(t *testing.T) {
 			l := pgtest.LoadHistory(t, pool, golden, nil)
 
 			var out bytes.Buffer
-			exp, err := eventstore.ExportHistory(ctx, pool, l.RoundID, &out)
+			opts := eventstore.Options{}
+			if !l.Revealed {
+				// An unsettled round has no reveal: the default export
+				// refuses before writing, the privileged path exports it.
+				if _, err := eventstore.ExportHistory(ctx, pool, l.RoundID, &out, opts); !errors.Is(err, eventstore.ErrNotRevealed) || out.Len() != 0 {
+					t.Fatalf("ExportHistory without a reveal: err %v, %d bytes; want ErrNotRevealed and none", err, out.Len())
+				}
+				opts = privileged()
+			}
+			exp, err := eventstore.ExportHistory(ctx, pool, l.RoundID, &out, opts)
 			if err != nil {
 				t.Fatalf("ExportHistory: %v", err)
 			}
@@ -147,7 +157,7 @@ func TestExportStopsAtLatestSnapshot(t *testing.T) {
 	l := pgtest.LoadHistory(t, pool, golden, []uint64{0, 9})
 
 	var out bytes.Buffer
-	exp, err := eventstore.ExportHistory(ctx, pool, l.RoundID, &out)
+	exp, err := eventstore.ExportHistory(ctx, pool, l.RoundID, &out, eventstore.Options{})
 	if err != nil {
 		t.Fatalf("ExportHistory: %v", err)
 	}
@@ -184,14 +194,14 @@ func TestExportRoundNotFound(t *testing.T) {
 	pgtest.LoadHistory(t, pool, readGolden(t, "worked-example.jsonl"), nil)
 	var out bytes.Buffer
 	unknown := [16]byte{0x01, 0x90, 0xf3, 0xa8, 15: 0x99}
-	if _, err := eventstore.ExportHistory(ctx, pool, unknown, &out); !errors.Is(err, eventstore.ErrRoundNotFound) {
+	if _, err := eventstore.ExportHistory(ctx, pool, unknown, &out, eventstore.Options{}); !errors.Is(err, eventstore.ErrRoundNotFound) {
 		t.Errorf("err = %v, want ErrRoundNotFound", err)
 	}
 	if out.Len() != 0 {
 		t.Errorf("wrote %d bytes, want none", out.Len())
 	}
 	var outV2 bytes.Buffer
-	if _, err := eventstore.ExportHistoryV2(ctx, pool, unknown, &outV2); !errors.Is(err, eventstore.ErrRoundNotFound) {
+	if _, err := eventstore.ExportHistoryV2(ctx, pool, unknown, &outV2, eventstore.Options{}); !errors.Is(err, eventstore.ErrRoundNotFound) {
 		t.Errorf("ExportHistoryV2: err = %v, want ErrRoundNotFound", err)
 	}
 	if outV2.Len() != 0 {
@@ -204,14 +214,14 @@ func TestExportNoCheckpoint(t *testing.T) {
 	pool := pgtest.Pool(t, pgtest.MigratedDatabase(t))
 	l := pgtest.LoadHistory(t, pool, readGolden(t, "worked-example.jsonl"), []uint64{})
 	var out bytes.Buffer
-	if _, err := eventstore.ExportHistory(ctx, pool, l.RoundID, &out); !errors.Is(err, eventstore.ErrNoCheckpoint) {
+	if _, err := eventstore.ExportHistory(ctx, pool, l.RoundID, &out, eventstore.Options{}); !errors.Is(err, eventstore.ErrNoCheckpoint) {
 		t.Errorf("err = %v, want ErrNoCheckpoint", err)
 	}
 	if out.Len() != 0 {
 		t.Errorf("wrote %d bytes, want none", out.Len())
 	}
 	var outV2 bytes.Buffer
-	if _, err := eventstore.ExportHistoryV2(ctx, pool, l.RoundID, &outV2); !errors.Is(err, eventstore.ErrNoCheckpoint) {
+	if _, err := eventstore.ExportHistoryV2(ctx, pool, l.RoundID, &outV2, eventstore.Options{}); !errors.Is(err, eventstore.ErrNoCheckpoint) {
 		t.Errorf("ExportHistoryV2: err = %v, want ErrNoCheckpoint", err)
 	}
 	if outV2.Len() != 0 {
@@ -280,10 +290,10 @@ func verifyV2(t *testing.T, history []byte) (verification.Report, error) {
 	})
 }
 
-func exportV2(t *testing.T, pool *pgxpool.Pool, roundID [16]byte) ([]byte, eventstore.Export) {
+func exportV2(t *testing.T, pool *pgxpool.Pool, roundID [16]byte, opts eventstore.Options) ([]byte, eventstore.Export) {
 	t.Helper()
 	var out bytes.Buffer
-	exp, err := eventstore.ExportHistoryV2(ctx, pool, roundID, &out)
+	exp, err := eventstore.ExportHistoryV2(ctx, pool, roundID, &out, opts)
 	if err != nil {
 		t.Fatalf("ExportHistoryV2: %v", err)
 	}
@@ -300,7 +310,15 @@ func TestExportV2GoldenHistories(t *testing.T) {
 			golden := readGoldenV2(t, h.File)
 			l := pgtest.LoadHistory(t, pool, golden, nil)
 
-			out, exp := exportV2(t, pool, l.RoundID)
+			opts := eventstore.Options{}
+			if !l.Revealed {
+				var none bytes.Buffer
+				if _, err := eventstore.ExportHistoryV2(ctx, pool, l.RoundID, &none, opts); !errors.Is(err, eventstore.ErrNotRevealed) || none.Len() != 0 {
+					t.Fatalf("ExportHistoryV2 without a reveal: err %v, %d bytes; want ErrNotRevealed and none", err, none.Len())
+				}
+				opts = privileged()
+			}
+			out, exp := exportV2(t, pool, l.RoundID, opts)
 			if !bytes.Equal(out, golden) {
 				t.Errorf("export differs from golden-v2/%s:\n%s", h.File, out)
 			}
@@ -339,7 +357,11 @@ func TestExportV1UnchangedWithLedgerRows(t *testing.T) {
 			pool := pgtest.Pool(t, pgtest.MigratedDatabase(t))
 			l := pgtest.LoadHistory(t, pool, readGoldenV2(t, h.File), nil)
 			var out bytes.Buffer
-			if _, err := eventstore.ExportHistory(ctx, pool, l.RoundID, &out); err != nil {
+			opts := eventstore.Options{}
+			if !l.Revealed {
+				opts = privileged()
+			}
+			if _, err := eventstore.ExportHistory(ctx, pool, l.RoundID, &out, opts); err != nil {
 				t.Fatalf("ExportHistory: %v", err)
 			}
 			if !bytes.Equal(out.Bytes(), readGolden(t, h.Base)) {
@@ -355,7 +377,7 @@ func TestExportV2StopsAtLatestSnapshot(t *testing.T) {
 	golden := readGoldenV2(t, "worked-example.jsonl")
 	l := pgtest.LoadHistory(t, pool, golden, []uint64{0, 9})
 
-	out, exp := exportV2(t, pool, l.RoundID)
+	out, exp := exportV2(t, pool, l.RoundID, eventstore.Options{})
 	if exp.Records != 10 || exp.Head != l.Hashes[9] {
 		t.Errorf("export = {records %d, head %s}, want {10, %s}", exp.Records, exp.Head, l.Hashes[9])
 	}
@@ -420,7 +442,7 @@ func TestExportV2SharedAccounts(t *testing.T) {
 		loaded = append(loaded, pgtest.LoadHistory(t, pool, readGoldenV2(t, f), nil).RoundID)
 	}
 	for i, f := range files {
-		out, _ := exportV2(t, pool, loaded[i])
+		out, _ := exportV2(t, pool, loaded[i], eventstore.Options{})
 		if !bytes.Equal(out, readGoldenV2(t, f)) {
 			t.Errorf("export of %s differs from its golden:\n%s", f, out)
 		}
@@ -433,7 +455,7 @@ func TestExportV2WithoutLedgerRowsFailsVerification(t *testing.T) {
 	t.Parallel()
 	pool := pgtest.Pool(t, pgtest.MigratedDatabase(t))
 	l := pgtest.LoadHistory(t, pool, readGolden(t, "worked-example.jsonl"), nil)
-	out, _ := exportV2(t, pool, l.RoundID)
+	out, _ := exportV2(t, pool, l.RoundID, eventstore.Options{})
 	lines := bytes.SplitAfter(out, []byte("\n"))
 	if len(lines) != 48 {
 		t.Fatalf("export has %d lines, want 47", len(lines)-1)
@@ -452,4 +474,96 @@ func TestExportV2WithoutLedgerRowsFailsVerification(t *testing.T) {
 	if !errors.As(err, &f) || f.Stage != verification.StageLedger || f.Sequence != 1 || f.Unsupported {
 		t.Errorf("verify = %v, want a ledger failure at sequence 1", err)
 	}
+}
+
+// privileged is the privileged path's export options: round_secrets and the
+// pgtest keyring (LBT-21 K-9, K-10).
+func privileged() eventstore.Options {
+	return eventstore.Options{Unrevealed: true, Keyring: pgtest.Keyring()}
+}
+
+// TestExportSecretSources covers LBT-21 K-9's secret sources: the reveal
+// wins, the privileged path reads legacy plaintext as is and opens a sealed
+// row only with the right key, and each failure writes nothing.
+func TestExportSecretSources(t *testing.T) {
+	t.Parallel()
+	otherKey := bytes.Repeat([]byte{0x5a}, sealing.KeySize)
+	sameIDOtherKey, err := sealing.NewKeyring(pgtest.KeyID, map[string][]byte{pgtest.KeyID: otherKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutTestKey, err := sealing.NewKeyring("other", map[string][]byte{"other": otherKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pool := pgtest.Pool(t, pgtest.MigratedDatabase(t))
+	worked := readGolden(t, "worked-example.jsonl")
+	settled := pgtest.LoadHistory(t, pool, worked, nil)
+	inProgress := readGolden(t, "in-progress.jsonl")
+	open := pgtest.LoadHistory(t, pool, inProgress, nil)
+
+	export := func(roundID [16]byte, opts eventstore.Options) ([]byte, error) {
+		t.Helper()
+		var out bytes.Buffer
+		_, err := eventstore.ExportHistory(ctx, pool, roundID, &out, opts)
+		if err != nil && out.Len() != 0 {
+			t.Errorf("export failed with %v after writing %d bytes", err, out.Len())
+		}
+		return out.Bytes(), err
+	}
+
+	t.Run("the reveal wins", func(t *testing.T) {
+		out, err := export(settled.RoundID, eventstore.Options{Unrevealed: true})
+		if err != nil || !bytes.Equal(out, worked) {
+			t.Errorf("export = %v; want the golden bytes without a keyring", err)
+		}
+	})
+	t.Run("sealed without a keyring", func(t *testing.T) {
+		if _, err := export(open.RoundID, eventstore.Options{Unrevealed: true}); !errors.Is(err, eventstore.ErrKeyringRequired) {
+			t.Errorf("err = %v, want ErrKeyringRequired", err)
+		}
+	})
+	t.Run("another key under the same id", func(t *testing.T) {
+		_, err := export(open.RoundID, eventstore.Options{Unrevealed: true, Keyring: sameIDOtherKey})
+		if !errors.Is(err, eventstore.ErrCorrupt) || !errors.Is(err, sealing.ErrOpen) {
+			t.Errorf("err = %v, want ErrCorrupt and sealing.ErrOpen", err)
+		}
+	})
+	t.Run("a keyring without the key id", func(t *testing.T) {
+		_, err := export(open.RoundID, eventstore.Options{Unrevealed: true, Keyring: withoutTestKey})
+		if !errors.Is(err, eventstore.ErrCorrupt) || !errors.Is(err, sealing.ErrUnknownKey) {
+			t.Errorf("err = %v, want ErrCorrupt and sealing.ErrUnknownKey", err)
+		}
+	})
+	t.Run("the privileged path", func(t *testing.T) {
+		out, err := export(open.RoundID, privileged())
+		if err != nil || !bytes.Equal(out, inProgress) {
+			t.Errorf("export = %v; want the golden bytes", err)
+		}
+	})
+	t.Run("no round_secrets row", func(t *testing.T) {
+		pgtest.ReplicaExec(t, pool, `DELETE FROM orvex.round_secrets WHERE round_id = $1`, open.RoundID)
+		if _, err := export(open.RoundID, privileged()); !errors.Is(err, eventstore.ErrCorrupt) {
+			t.Errorf("err = %v, want ErrCorrupt", err)
+		}
+		if _, err := export(open.RoundID, eventstore.Options{}); !errors.Is(err, eventstore.ErrNotRevealed) {
+			t.Errorf("default export: err = %v, want ErrNotRevealed", err)
+		}
+	})
+
+	t.Run("legacy plaintext", func(t *testing.T) {
+		dsn := pgtest.EmptyDatabase(t)
+		pgtest.MigrateUpTo(t, dsn, 9)
+		legacyPool := pgtest.Pool(t, dsn)
+		l := pgtest.LoadLegacyHistory(t, legacyPool, inProgress, nil)
+		pgtest.MigrateUpTo(t, dsn, 10)
+		var out bytes.Buffer
+		if _, err := eventstore.ExportHistory(ctx, legacyPool, l.RoundID, &out, eventstore.Options{}); !errors.Is(err, eventstore.ErrNotRevealed) || out.Len() != 0 {
+			t.Errorf("default export: err = %v, %d bytes; want ErrNotRevealed and none", err, out.Len())
+		}
+		if _, err := eventstore.ExportHistory(ctx, legacyPool, l.RoundID, &out, eventstore.Options{Unrevealed: true}); err != nil || !bytes.Equal(out.Bytes(), inProgress) {
+			t.Errorf("privileged export without a keyring: %v; want the golden bytes", err)
+		}
+	})
 }

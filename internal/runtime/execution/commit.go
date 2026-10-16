@@ -11,7 +11,9 @@ import (
 )
 
 // Transaction B's statements (§5.6). The compare-and-set runs alone; the
-// inserts run in one pipelined batch in this order.
+// inserts run in one pipelined batch in this order. The reveal insert is
+// the last statement, queued only on the record that first makes the round
+// final (LBT-21 K-6), so it commits or rolls back with the record.
 const (
 	casSQL = `UPDATE orvex.round_execution_heads SET processed_sequence = $3
 		WHERE round_id = $1 AND processed_sequence = $2 AND fencing_token = $4`
@@ -33,6 +35,8 @@ const (
 		VALUES ($1, $2, 0, $3, $4)`
 	insertSnapshotSQL = `INSERT INTO orvex.round_snapshots (round_id, sequence, state_hash, state, engine_build)
 		VALUES ($1, $2, $3, NULL, $4)`
+	insertRevealSQL = `INSERT INTO orvex.round_secret_reveals (round_id, sequence, config_secret)
+		VALUES ($1, $2, $3)`
 )
 
 // commitResult is how one Transaction B ended (§5.7).
@@ -100,6 +104,9 @@ func (e *Executor) commit(ctx context.Context, lease Lease, en *entry, tr *trans
 	b.Queue(insertOutboxSQL, lease.RoundID, k, OutboxTopicRecord, tr.record)
 	if tr.checkpoint {
 		b.Queue(insertSnapshotSQL, lease.RoundID, k, tr.stateHash[:], e.cfg.EngineBuild)
+	}
+	if tr.reveal {
+		b.Queue(insertRevealSQL, lease.RoundID, k, en.secret)
 	}
 
 	br := tx.SendBatch(ctx, b)

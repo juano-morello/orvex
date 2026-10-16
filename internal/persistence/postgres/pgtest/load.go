@@ -11,9 +11,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juano-morello/orvex/internal/audit/chain"
+	"github.com/juano-morello/orvex/internal/audit/replay"
 	"github.com/juano-morello/orvex/internal/audit/verification"
 	"github.com/juano-morello/orvex/internal/canonjson"
+	"github.com/juano-morello/orvex/internal/game"
+	crashv1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
+	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
 // Loaded describes a history inserted by LoadHistory.
@@ -26,6 +30,12 @@ type Loaded struct {
 	CommandIDs [][16]byte
 	// Hashes holds the link hash of record k at index k.
 	Hashes []chain.Hash
+	// Secret is the history's canonical secret config bytes.
+	Secret []byte
+	// Revealed reports whether a round_secret_reveals row was written, at
+	// RevealSequence.
+	Revealed       bool
+	RevealSequence uint64
 }
 
 type checkpoint struct {
@@ -35,16 +45,32 @@ type checkpoint struct {
 
 // LoadHistory inserts an LBT-9 history file, format v1 or v2, into a
 // migrated database exactly as round creation, admission and execution
-// would (spec section 7.3), in one READ COMMITTED transaction. For a v2
-// file it also inserts the ledger rows (LBT-18 L-14): the header's accounts
-// (reusing an existing row of identical identity), a funding grant from the
-// global system account "faucet" of each player account's total holds, the
-// holds after the admissions, and per record its releases, transactions and
-// postings. checkpoints selects which of the header's checkpoints become
-// snapshot rows: nil selects all, an empty slice none; a sequence missing
-// from the header fails the test. Any error, including one at commit, fails
-// the test.
+// would (spec section 7.3), in one READ COMMITTED transaction. The secret
+// config is stored sealed with Keyring() (LBT-21 K-5). The reveal is
+// written at the first record whose replayed crash/v1 state is final
+// (K-6); a history of another rules version, or one that fails to replay,
+// gets none. For a v2 file it also inserts the ledger rows (LBT-18 L-14):
+// the header's accounts (reusing an existing row of identical identity), a
+// funding grant from the global system account "faucet" of each player
+// account's total holds, the holds after the admissions, and per record its
+// releases, transactions and postings. checkpoints selects which of the
+// header's checkpoints become snapshot rows: nil selects all, an empty
+// slice none; a sequence missing from the header fails the test. Any error,
+// including one at commit, fails the test.
 func LoadHistory(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []uint64) Loaded {
+	t.Helper()
+	return load(t, db, history, checkpoints, false)
+}
+
+// LoadLegacyHistory is LoadHistory for a database at schema 9, before
+// migration 0010 (LBT-21): it stores the plaintext config_secret and writes
+// no reveal.
+func LoadLegacyHistory(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []uint64) Loaded {
+	t.Helper()
+	return load(t, db, history, checkpoints, true)
+}
+
+func load(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []uint64, legacy bool) Loaded {
 	t.Helper()
 	lines := bytes.Split(bytes.TrimSuffix(history, []byte("\n")), []byte("\n"))
 	if len(lines) < 2 {
@@ -64,7 +90,7 @@ func LoadHistory(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []u
 		t.Fatal("pgtest: record 0 is not a genesis record")
 	}
 	n := int64(len(records) - 1)
-	out := Loaded{RoundID: g.RoundID, Records: len(records)}
+	out := Loaded{RoundID: g.RoundID, Records: len(records), Secret: secret}
 
 	ctx := context.Background()
 	tx, err := db.BeginTx(ctx, postgres.ExecutionTxOptions())
@@ -84,7 +110,15 @@ func LoadHistory(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []u
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		g.RoundID, string(g.Game), int64(g.RulesVersion), int64(g.SchemaVersion), int64(g.StateVersion),
 		chain.Version, g.CreatedAtUnixMicro)
-	exec("secret", `INSERT INTO orvex.round_secrets (round_id, config_secret) VALUES ($1, $2)`, g.RoundID, secret)
+	if legacy {
+		exec("secret", `INSERT INTO orvex.round_secrets (round_id, config_secret) VALUES ($1, $2)`, g.RoundID, secret)
+	} else {
+		s := Seal(t, g.RoundID, secret)
+		exec("secret", `INSERT INTO orvex.round_secrets
+			(round_id, secret_scheme, secret_key_id, secret_nonce, secret_ciphertext)
+			VALUES ($1, $2, $3, $4, $5)`,
+			g.RoundID, s.Scheme, s.KeyID, s.Nonce, s.Ciphertext)
+	}
 	exec("admission head", `INSERT INTO orvex.round_admission_heads (round_id, admitted_sequence) VALUES ($1, $2)`,
 		g.RoundID, n)
 	exec("execution head", `INSERT INTO orvex.round_execution_heads (round_id, processed_sequence, fencing_token)
@@ -130,6 +164,14 @@ func LoadHistory(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []u
 	}
 	out.Head = out.Hashes[len(out.Hashes)-1]
 
+	if !legacy {
+		if seq, ok := revealSequence(g, secret, cmds); ok {
+			exec("reveal", `INSERT INTO orvex.round_secret_reveals (round_id, sequence, config_secret)
+				VALUES ($1, $2, $3)`, g.RoundID, int64(seq), secret) //nolint:gosec // G115: a golden history sequence (< 100); a wrapped value would fail the column CHECK
+			out.Revealed, out.RevealSequence = true, seq
+		}
+	}
+
 	for _, c := range cmds {
 		for _, e := range c.Events {
 			o, err := canonjson.Unmarshal(e.Payload)
@@ -157,6 +199,63 @@ func LoadHistory(t testing.TB, db *pgxpool.Pool, history []byte, checkpoints []u
 		t.Fatalf("pgtest: load commit: %v", err)
 	}
 	return out
+}
+
+// revealSequence returns the first record r >= 1 whose replayed state is
+// final under execution.CrashV1Policy(), the record whose Transaction B
+// writes the reveal (LBT-21 K-6). It replays the whole history: a history
+// of another rules version, or one whose config or events fail to decode or
+// replay anywhere, before or after that record (a tamper fixture), has
+// none.
+func revealSequence(g chain.Genesis, secret []byte, cmds []chain.Command) (uint64, bool) {
+	p := execution.CrashV1Policy()
+	want := game.Descriptor{Game: g.Game, RulesVersion: g.RulesVersion, SchemaVersion: g.SchemaVersion, StateVersion: g.StateVersion}
+	if p.Descriptor() != want {
+		return 0, false
+	}
+	a := crashv1.Adapter()
+	cfg, err := a.DecodeConfig(g.RoundID, g.Config, secret)
+	if err != nil {
+		return 0, false
+	}
+	initial, err := a.InitialState(cfg)
+	if err != nil {
+		return 0, false
+	}
+	records := make([]replay.Record, 0, len(cmds))
+	for _, c := range cmds {
+		r := replay.Record{Sequence: c.Sequence, Input: c.Input(), Result: c.Result}
+		for _, e := range c.Events {
+			ev, err := a.DecodeEvent(e.Payload)
+			if err != nil {
+				return 0, false
+			}
+			r.Events = append(r.Events, ev)
+			r.EventBytes = append(r.EventBytes, e.Payload)
+		}
+		records = append(records, r)
+	}
+	var (
+		seq   uint64
+		found bool
+	)
+	err = replay.Run(a, initial, records, replay.StateOnly, func(s uint64, state any) error {
+		if s < 1 || found {
+			return nil
+		}
+		final, err := p.Final(state)
+		if err != nil {
+			return err
+		}
+		if final {
+			seq, found = s, true
+		}
+		return nil
+	})
+	if err != nil || !found {
+		return 0, false
+	}
+	return seq, true
 }
 
 func decode(t testing.TB, line []byte) any {

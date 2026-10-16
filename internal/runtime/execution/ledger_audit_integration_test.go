@@ -33,7 +33,7 @@ func readGoldenV2(t *testing.T, name string) [][]byte {
 func exportHistoryV2(t *testing.T, db *pgxpool.Pool, roundID [16]byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if _, err := eventstore.ExportHistoryV2(ctx, db, roundID, &buf); err != nil {
+	if _, err := eventstore.ExportHistoryV2(ctx, db, roundID, &buf, privilegedExport()); err != nil {
 		t.Fatalf("ExportHistoryV2: %v", err)
 	}
 	return buf.Bytes()
