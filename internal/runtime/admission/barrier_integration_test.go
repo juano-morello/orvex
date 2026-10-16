@@ -93,10 +93,10 @@ func TestWindowTransitions(t *testing.T) {
 					t.Fatalf("Admit: %v", err)
 				}
 				requireRow(t, e.obs, a)
-				if after.admitted != int64(a.Sequence) {
+				if after.admitted != int64(a.Sequence) { //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 					t.Errorf("admitted_sequence = %d, want %d", after.admitted, a.Sequence)
 				}
-				seq := int64(a.Sequence)
+				seq := int64(a.Sequence) //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 				wantStarted, wantClosed, wantSealed := before.started, before.closed, before.sealed
 				switch class {
 				case "start":
@@ -295,7 +295,7 @@ func TestClosureNotBeforeEqualityAdmits(t *testing.T) {
 		t.Errorf("close effective time = %d, want exactly T0 + D = %d", a.EffectiveTimeUnixMicro, x+d)
 	}
 	requireRow(t, e.obs, a)
-	if h := head(t, e.obs, round); h.state != "closed" || h.closed == nil || *h.closed != int64(a.Sequence) {
+	if h := head(t, e.obs, round); h.state != "closed" || h.closed == nil || *h.closed != int64(a.Sequence) { //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		t.Errorf("head = %+v, want closed at %d", h, a.Sequence)
 	}
 	mustAdmit(t, s, request(round, cmdID(5), settleRound))
@@ -380,13 +380,13 @@ func TestBarrierConcurrentCloseAndCashOuts(t *testing.T) {
 			requireRow(t, e.obs, a)
 		}
 	}
-	if n := count(t, e.obs, `SELECT count(*) FROM orvex.admissions WHERE round_id = $1 AND sequence > $2`, round, int64(c)); n != 0 {
+	if n := count(t, e.obs, `SELECT count(*) FROM orvex.admissions WHERE round_id = $1 AND sequence > $2`, round, int64(c)); n != 0 { //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		t.Errorf("%d admissions after the close", n)
 	}
-	if h := head(t, e.obs, round); h.admitted != int64(c) || h.state != "closed" {
+	if h := head(t, e.obs, round); h.admitted != int64(c) || h.state != "closed" { //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		t.Errorf("head = %+v, want admitted %d, closed", h, c)
 	}
-	requireGaplessMonotonic(t, e.obs, round, int(c))
+	requireGaplessMonotonic(t, e.obs, round, int(c)) //nolint:gosec // G115: c is a test round's close sequence, far below math.MaxInt
 
 	settled := mustAdmit(t, s, request(round, cmdID(3), settleRound))
 	if settled.Sequence != c+1 {
@@ -395,7 +395,7 @@ func TestBarrierConcurrentCloseAndCashOuts(t *testing.T) {
 	if h := head(t, e.obs, round); h.state != "sealed" {
 		t.Errorf("state = %s, want sealed", h.state)
 	}
-	if n := count(t, e.obs, `SELECT count(*) FROM orvex.admissions WHERE round_id = $1`, round); n != int64(c+1) {
+	if n := count(t, e.obs, `SELECT count(*) FROM orvex.admissions WHERE round_id = $1`, round); n != int64(c+1) { //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		t.Errorf("%d admissions, want %d", n, c+1)
 	}
 }
@@ -472,7 +472,7 @@ func TestAdmissionStreamDrivesCrashRound(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode %d: %v", r.sequence, err)
 		}
-		events, err := adapter.Decide(st, cmd, game.Input{Sequence: uint64(r.sequence), EffectiveTimeUnixMicro: r.effTime})
+		events, err := adapter.Decide(st, cmd, game.Input{Sequence: uint64(r.sequence), EffectiveTimeUnixMicro: r.effTime}) //nolint:gosec // G115: r.sequence is admissions.sequence (CHECK >= 1)
 		if err != nil {
 			code, ok := adapter.RejectionCode(err)
 			if !ok {

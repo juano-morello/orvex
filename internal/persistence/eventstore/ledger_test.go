@@ -86,14 +86,14 @@ func parseV2LedgerLine(t *testing.T, line []byte) (uint64, []holdRow, []releaseR
 	for _, v := range must(canonjson.List(o["holds"]))(t) {
 		ho := must(canonjson.Obj(v))(t)
 		holds = append(holds, holdRow{
-			sequence:  int64(seq),
+			sequence:  int64(seq), //nolint:gosec // G115: a sequence from a golden v2 fixture (< 100)
 			accountID: must(canonjson.ParseUUID(ho["accountId"]))(t),
 			amount:    must(canonjson.ParseInt(ho["amount"]))(t),
 		})
 	}
 	var releases []releaseRow
 	for _, v := range must(canonjson.List(o["releases"]))(t) {
-		releases = append(releases, releaseRow{sequence: int64(seq), accountID: must(canonjson.ParseUUID(v))(t)})
+		releases = append(releases, releaseRow{sequence: int64(seq), accountID: must(canonjson.ParseUUID(v))(t)}) //nolint:gosec // G115: a sequence from a golden v2 fixture (< 100)
 	}
 	var txs []transactionRow
 	for _, v := range must(canonjson.List(o["transactions"]))(t) {
@@ -101,17 +101,17 @@ func parseV2LedgerLine(t *testing.T, line []byte) (uint64, []holdRow, []releaseR
 		tr := transactionRow{
 			id:       must(canonjson.ParseUUID(to["transactionId"]))(t),
 			kind:     must(canonjson.Text(to["kind"]))(t),
-			sequence: int64(seq),
+			sequence: int64(seq), //nolint:gosec // G115: a sequence from a golden v2 fixture (< 100)
 		}
 		for _, pv := range must(canonjson.List(to["postings"]))(t) {
 			po := must(canonjson.Obj(pv))(t)
 			p := postingRow{
-				index:  int64(must(canonjson.ParseUint(po["postingIndex"]))(t)),
+				index:  int64(must(canonjson.ParseUint(po["postingIndex"]))(t)), //nolint:gosec // G115: a posting index from a golden v2 fixture (< 100)
 				debit:  must(canonjson.ParseUUID(po["debitAccountId"]))(t),
 				credit: must(canonjson.ParseUUID(po["creditAccountId"]))(t),
 				amount: must(canonjson.ParseInt(po["amount"]))(t),
 			}
-			if ev := int64(must(canonjson.ParseUint(po["eventSequence"]))(t)); ev != 0 {
+			if ev := int64(must(canonjson.ParseUint(po["eventSequence"]))(t)); ev != 0 { //nolint:gosec // G115: an event sequence from a golden v2 fixture (< 100)
 				p.eventSequence = &ev // "0" stands for a NULL event_sequence
 			}
 			tr.postings = append(tr.postings, p)
@@ -130,7 +130,7 @@ func parseV2LedgerLine(t *testing.T, line []byte) (uint64, []holdRow, []releaseR
 func TestEncodeLedgerMatchesGoldenV2(t *testing.T) {
 	for _, name := range v2Encodable {
 		t.Run(name, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join(goldenV2Dir, name))
+			data, err := os.ReadFile(filepath.Join(goldenV2Dir, name)) //nolint:gosec // G304: fixed golden fixture under testdata
 			if err != nil {
 				t.Fatal(err)
 			}

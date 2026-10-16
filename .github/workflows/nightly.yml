@@ -1,0 +1,103 @@
+name: Nightly
+
+# Extended verification (ADR-006 "Nightly/release: extended fuzz"): every Go
+# fuzz target with a bounded -fuzztime, each in its own job, and the repeat
+# runs the specs require (LBT-11 S-14, LBT-12 E-17, LBT-19). PR CI (ci.yml)
+# does not run these.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "go test -fuzztime for each fuzz target"
+        type: choice
+        options: ["1m", "5m", "15m"]
+        default: "5m"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GO_VERSION: "1.26.x"
+  FUZZTIME: ${{ inputs.fuzztime || '5m' }}
+
+jobs:
+  fuzz-targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # fuzz-one must refuse names outside the list (no Go needed: GO=true).
+      - run: make fuzz-guard-check
+      - id: list
+        run: |
+          targets="$(make -s fuzz-list | jq -R -s -c 'split("\n") | map(select(. != "") | split(":") | {pkg: .[0], fn: .[1], id: ((.[0] | gsub("/"; "-")) + "-" + .[1])})')"
+          echo "$targets"
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    needs: fuzz-targets
+    name: fuzz ${{ matrix.target.fn }} (${{ matrix.target.pkg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.fuzz-targets.outputs.targets) }}
+    env:
+      FUZZ_PKG: ${{ matrix.target.pkg }}
+      FUZZ_TARGET: ${{ matrix.target.fn }}
+      ARTIFACT: fuzz-crasher-${{ matrix.target.id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.mod
+      - name: Fuzz
+        run: make fuzz-one FUZZ_PKG="$FUZZ_PKG" FUZZ_TARGET="$FUZZ_TARGET" FUZZTIME="$FUZZTIME"
+      - name: Upload failing input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ matrix.target.pkg }}/testdata/fuzz/${{ matrix.target.fn }}/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Summarize the failure
+        if: failure()
+        run: |
+          {
+            echo "### ${FUZZ_TARGET} (${FUZZ_PKG}) failed"
+            echo ""
+            echo "If the fuzzer found a failing input, artifact \`${ARTIFACT}\` holds it."
+            echo "Copy it into \`${FUZZ_PKG}/testdata/fuzz/${FUZZ_TARGET}/\` and reproduce with"
+            echo "\`go test -run=${FUZZ_TARGET}/<file> ./${FUZZ_PKG}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  repeat:
+    name: repeat ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [admission, execution, export]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.mod
+      - run: make test-repeat-${{ matrix.suite }}

@@ -147,7 +147,7 @@ func backoff(attempt int) time.Duration {
 	if limit <= 0 {
 		return 0
 	}
-	return rand.N(limit + 1)
+	return rand.N(limit + 1) //nolint:gosec // G404: backoff jitter needs no unpredictability; crypto/rand adds nothing
 }
 
 // sleepCtx waits d or until ctx ends, returning ctx.Err() in that case.

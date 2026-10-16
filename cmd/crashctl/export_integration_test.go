@@ -176,7 +176,7 @@ func TestExportExecutedRounds(t *testing.T) {
 			if info.Mode().Perm() != 0o600 {
 				t.Errorf("file mode = %v, want 0600", info.Mode().Perm())
 			}
-			file, err := os.ReadFile(path)
+			file, err := os.ReadFile(path) //nolint:gosec // G304: path is a file this test created under t.TempDir()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -277,7 +277,7 @@ func TestExportStdout(t *testing.T) {
 		if code, _, stderr := exportCmd(t, g.UUID(), path); code != exitOK {
 			t.Fatalf("path export: exit %d, stderr %q", code, stderr)
 		}
-		file, err := os.ReadFile(path)
+		file, err := os.ReadFile(path) //nolint:gosec // G304: path is a file this test created under t.TempDir()
 		if err != nil {
 			t.Fatal(err)
 		}

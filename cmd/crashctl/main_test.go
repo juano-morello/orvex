@@ -258,7 +258,7 @@ func TestAuditFailures(t *testing.T) {
 	}
 	lines[13] = bytes.Replace(lines[13], old, []byte(`"payoutCredits":"135"`), 1)
 	b1 := filepath.Join(t.TempDir(), "b1.jsonl")
-	if err := os.WriteFile(b1, bytes.Join(lines, nil), 0o600); err != nil {
+	if err := os.WriteFile(b1, bytes.Join(lines, nil), 0o600); err != nil { //nolint:gosec // G703: path is under t.TempDir()
 		t.Fatal(err)
 	}
 	code, stdout, stderr := runAuditCmd(t, nil, "verify", b1)
@@ -316,7 +316,7 @@ func TestAuditIO(t *testing.T) {
 		t.Errorf("failing stdout: exit %d, want 4; stderr %q", code, stderrBuf.String())
 	}
 
-	data, err := os.ReadFile(golden)
+	data, err := os.ReadFile(golden) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestAuditFailuresV2(t *testing.T) {
 		t.Fatal("v2 format not found once")
 	}
 	m1 := filepath.Join(t.TempDir(), "m1.jsonl")
-	if err := os.WriteFile(m1, bytes.Replace(data, old, v3, 1), 0o600); err != nil {
+	if err := os.WriteFile(m1, bytes.Replace(data, old, v3, 1), 0o600); err != nil { //nolint:gosec // G703: path is under t.TempDir()
 		t.Fatal(err)
 	}
 	code, stdout, stderr = runAuditCmd(t, nil, "verify", m1)

@@ -170,7 +170,7 @@ func TestAdmitOutcomeUnknownWhenContextEnds(t *testing.T) {
 		t.Fatal("no admission row: the commit happened")
 	}
 	a := mustAdmit(t, s, req)
-	if !a.Duplicate || int64(a.Sequence) != r.sequence || a.EffectiveTimeUnixMicro != r.effTime {
+	if !a.Duplicate || int64(a.Sequence) != r.sequence || a.EffectiveTimeUnixMicro != r.effTime { //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		t.Errorf("resubmit = %+v, want the committed row (sequence %d) as duplicate", a, r.sequence)
 	}
 }

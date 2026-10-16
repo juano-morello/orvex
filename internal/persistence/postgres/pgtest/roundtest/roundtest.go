@@ -157,5 +157,5 @@ func SeedAdmission(t testing.TB, db *pgxpool.Pool, roundID, commandID [16]byte, 
 		}
 		mustExec(t, tx, `UPDATE orvex.round_admission_heads SET admitted_sequence = $2 WHERE round_id = $1`, roundID, seq)
 	})
-	return uint64(seq)
+	return uint64(seq) //nolint:gosec // G115: seq is admitted_sequence (CHECK >= 0) + 1
 }

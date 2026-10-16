@@ -80,6 +80,22 @@ func TestApdCheck(t *testing.T) {
 	}
 }
 
+// TestApdCheckWrapsCause keeps the apd error in the chain next to
+// ErrArithmetic, with the message unchanged.
+func TestApdCheckWrapsCause(t *testing.T) {
+	cause := errors.New("apd failure")
+	err := apdCheck("exp", 0, cause)
+	if !errors.Is(err, ErrArithmetic) {
+		t.Errorf("apdCheck(exp, 0, cause) = %v; want ErrArithmetic", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("apdCheck(exp, 0, cause) = %v; want the cause in the chain", err)
+	}
+	if want := "crash/v1: arithmetic failure: exp: apd failure"; err == nil || err.Error() != want {
+		t.Errorf("apdCheck(exp, 0, cause) = %v; want %q", err, want)
+	}
+}
+
 // TestNoIOImports keeps the package pure (ADR-003): no I/O, clock, randomness,
 // floats or mutable package state in any non-test file, covering the frozen
 // math files and the round lifecycle files (LBT-8) alike.

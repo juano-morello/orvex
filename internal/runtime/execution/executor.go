@@ -477,7 +477,7 @@ func (e *Executor) resolveConflict(ctx context.Context, lease Lease, en *entry, 
 	var h headView
 	var processed, token *int64
 	var hash []byte
-	err := e.db.QueryRow(ctx, conflictSQL, lease.RoundID, int64(k)).Scan(&processed, &token, &hash)
+	err := e.db.QueryRow(ctx, conflictSQL, lease.RoundID, int64(k)).Scan(&processed, &token, &hash) //nolint:gosec // G115: k = processed_sequence + 1, a bigint round sequence
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:

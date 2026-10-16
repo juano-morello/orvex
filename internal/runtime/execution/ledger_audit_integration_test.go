@@ -23,7 +23,7 @@ const goldenV2Dir = "../../audit/verification/testdata/golden-v2"
 // readGoldenV2 returns a golden v2 history's lines without their '\n'.
 func readGoldenV2(t *testing.T, name string) [][]byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(goldenV2Dir, name+".jsonl"))
+	b, err := os.ReadFile(filepath.Join(goldenV2Dir, name+".jsonl")) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -139,8 +139,8 @@ func New(db DB, reg *game.Registry, cfg Config, policies ...Policy) (*Sequencer,
 		cfg:    cfg,
 		rules:  rules,
 		gate:   newGate(cfg.MaxInFlightPerRound),
-		lockMs: int32(cfg.LockTimeout / time.Millisecond),
-		idleMs: int32(cfg.IdleInTransactionTimeout / time.Millisecond),
+		lockMs: int32(cfg.LockTimeout / time.Millisecond),              //nolint:gosec // G115: cfg.validate() bounds LockTimeout to at most 60s (60000 ms)
+		idleMs: int32(cfg.IdleInTransactionTimeout / time.Millisecond), //nolint:gosec // G115: cfg.validate() bounds IdleInTransactionTimeout to at most 60s (60000 ms)
 		sleep:  sleepCtx,
 	}, nil
 }

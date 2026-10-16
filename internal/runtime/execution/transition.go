@@ -128,7 +128,7 @@ func computeTransition(r rulesEntry, roundID [16]byte, st roundState, adm admiss
 		}
 		seq := first + uint64(j)
 		chained[j] = chain.Event{Sequence: seq, Payload: b}
-		tr.eventSeqs = append(tr.eventSeqs, int64(seq))
+		tr.eventSeqs = append(tr.eventSeqs, int64(seq)) //nolint:gosec // G115: seq is an event sequence stored in bigint domain_events.event_sequence
 		tr.eventTypes = append(tr.eventTypes, typ)
 	}
 

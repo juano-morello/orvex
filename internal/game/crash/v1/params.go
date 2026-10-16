@@ -85,7 +85,7 @@ func ArithmeticContext() apd.Context {
 // than Inexact or Rounded (D-4).
 func apdCheck(op string, c apd.Condition, err error) error {
 	if err != nil {
-		return fmt.Errorf("%w: %s: %v", ErrArithmetic, op, err)
+		return fmt.Errorf("%w: %s: %w", ErrArithmetic, op, err)
 	}
 	if c&^(apd.Inexact|apd.Rounded) != 0 {
 		return fmt.Errorf("%w: %s: unexpected condition %v", ErrArithmetic, op, c)

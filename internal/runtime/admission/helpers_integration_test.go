@@ -117,7 +117,7 @@ var idCounter atomic.Uint64
 func cmdID(n int) [16]byte {
 	var id [16]byte
 	id[0], id[6] = 0x0c, 0x70
-	binary.BigEndian.PutUint64(id[8:], uint64(n))
+	binary.BigEndian.PutUint64(id[8:], uint64(n)) //nolint:gosec // G115: n is a non-negative test command number
 	return id
 }
 
@@ -362,7 +362,7 @@ func seedAdmission(t *testing.T, db *pgxpool.Pool, roundID, commandID [16]byte, 
 			VALUES ($1, $2, $3, $4, $5)`, roundID, seq, commandID, effectiveTime, b)
 		mustExec(t, tx, `UPDATE orvex.round_admission_heads SET admitted_sequence = $2 WHERE round_id = $1`, roundID, seq)
 	})
-	return uint64(seq)
+	return uint64(seq) //nolint:gosec // G115: seq is admitted_sequence (CHECK >= 0) + 1
 }
 
 // headRow is a round's admission head.
@@ -415,7 +415,7 @@ func requireRow(t *testing.T, db *pgxpool.Pool, a admission.Admission) {
 		t.Errorf("no admission row for acknowledged command %x", a.CommandID)
 		return
 	}
-	if r.roundID != a.RoundID || r.sequence != int64(a.Sequence) || r.effTime != a.EffectiveTimeUnixMicro {
+	if r.roundID != a.RoundID || r.sequence != int64(a.Sequence) || r.effTime != a.EffectiveTimeUnixMicro { //nolint:gosec // G115: a test round's sequence, far below math.MaxInt64
 		t.Errorf("row = round %x seq %d time %d, Admission = %+v", r.roundID, r.sequence, r.effTime, a)
 	}
 }

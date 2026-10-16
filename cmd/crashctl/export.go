@@ -208,7 +208,7 @@ func checkOutputPath(path string, fail func(error, string) int) (int, bool) {
 // and closes it; on any failure after the open it removes FILE. On failure
 // it returns fail's code and false.
 func writeOutputFile(path string, data []byte, fail func(error, string) int) (int, bool) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: FILE is the operator's own output path; O_EXCL and 0o600 never overwrite or widen access
 	switch {
 	case errors.Is(err, fs.ErrExist):
 		return fail(errOutputExists, path+" exists; refusing to overwrite"), false

@@ -74,7 +74,7 @@ func loadManifest(t testing.TB) manifest {
 
 func readGolden(t testing.TB, name string) []byte {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(goldenDir, name))
+	data, err := os.ReadFile(filepath.Join(goldenDir, name)) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}

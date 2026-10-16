@@ -114,7 +114,7 @@ func TestAdmitConcurrentDuplicates(t *testing.T) {
 		if fresh != 1 {
 			t.Errorf("trial %d: %d admissions with Duplicate = false, want 1", k, fresh)
 		}
-		if results[0].Sequence != uint64(k) {
+		if results[0].Sequence != uint64(k) { //nolint:gosec // G115: k is a non-negative trial index
 			t.Errorf("trial %d: sequence %d, want %d: duplicates consumed sequences", k, results[0].Sequence, k)
 		}
 		if n := count(t, e.obs, `SELECT count(*) FROM orvex.admissions WHERE command_id = $1`, cmdID(k)); n != 1 {

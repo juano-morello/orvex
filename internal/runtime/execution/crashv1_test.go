@@ -25,7 +25,7 @@ type golden struct {
 
 func loadGolden(t *testing.T, name string) golden {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(goldenDir, name+".jsonl"))
+	b, err := os.ReadFile(filepath.Join(goldenDir, name+".jsonl")) //nolint:gosec // G304: fixed golden fixture under testdata
 	if err != nil {
 		t.Fatal(err)
 	}
