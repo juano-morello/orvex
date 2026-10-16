@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/juano-morello/orvex/internal/persistence/eventstore"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 )
 
 // Integration tests of crashctl audit export (LBT-19 spec section 10 step
@@ -96,6 +98,13 @@ func notSettledMessage(round string, s, n int) string {
 		"the file would disclose its unrevealed secret config; -unsettled exports it anyway\n", round, s, n)
 }
 
+// notRevealedMessage is the LBT-21 K-10 exit 6 line of a round with no
+// revealed secret config.
+func notRevealedMessage(round string) string {
+	return "crashctl: audit export: round " + round + " has no revealed secret config: it is not settled; " +
+		"-unsettled exports it through the privileged path\n"
+}
+
 // headerCheckpoints returns the checkpoint sequences of a history header.
 func headerCheckpoints(t *testing.T, headerLine []byte) []uint64 {
 	t.Helper()
@@ -154,12 +163,14 @@ func TestExportExecutedRounds(t *testing.T) {
 				if code != exitNotSettled || stdout != "" {
 					t.Fatalf("exit %d, stdout %q; want %d and empty", code, stdout, exitNotSettled)
 				}
-				if want := notSettledMessage(g.UUID(), r.s, r.n); stderr != want {
+				// No reveal: exit 6 before any replay (LBT-21 K-10).
+				if want := notRevealedMessage(g.UUID()); stderr != want {
 					t.Errorf("stderr = %q, want %q", stderr, want)
 				}
 				requireNoFile(t, path)
 				verdict = settledNo
 				path = filepath.Join(dir, "unsettled.jsonl")
+				t.Setenv(sealing.KeyringFileEnv, pgtest.KeyringFile(t))
 				code, stdout, stderr = exportCmd(t, "-unsettled", g.UUID(), path)
 			}
 			if code != exitOK || stderr != "" {
@@ -188,7 +199,11 @@ func TestExportExecutedRounds(t *testing.T) {
 				t.Errorf("records differ from golden records 0..%d", r.s)
 			}
 			var direct bytes.Buffer
-			if _, err := eventstore.ExportHistory(context.Background(), pool, g.RoundID, &direct); err != nil {
+			opts := eventstore.Options{}
+			if !r.settled {
+				opts = eventstore.Options{Unrevealed: true, Keyring: pgtest.Keyring()}
+			}
+			if _, err := eventstore.ExportHistory(context.Background(), pool, g.RoundID, &direct, opts); err != nil {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(file, direct.Bytes()) {
@@ -224,6 +239,7 @@ func TestExportFollowsSnapshots(t *testing.T) {
 		}
 	}
 	dir := t.TempDir()
+	t.Setenv(sealing.KeyringFileEnv, pgtest.KeyringFile(t))
 	s := 0
 	for k := 0; k <= 22; k++ {
 		if k > 0 {
@@ -241,9 +257,10 @@ func TestExportFollowsSnapshots(t *testing.T) {
 		path := filepath.Join(dir, fmt.Sprintf("k%02d.jsonl", k))
 		code, stdout, stderr := exportCmd(t, g.UUID(), path)
 		if k < 21 {
-			if code != exitNotSettled || stdout != "" || stderr != notSettledMessage(g.UUID(), s, k) {
-				t.Errorf("k=%d: exit %d, stdout %q, stderr %q; want %d naming sequence %d of %d", k, code, stdout, stderr,
-					exitNotSettled, s, k)
+			// Before the settling record writes the reveal (LBT-21 K-10).
+			if code != exitNotSettled || stdout != "" || stderr != notRevealedMessage(g.UUID()) {
+				t.Errorf("k=%d: exit %d, stdout %q, stderr %q; want %d, no revealed secret", k, code, stdout, stderr,
+					exitNotSettled)
 			}
 			requireNoFile(t, path)
 		} else if code != exitOK || stdout != wantExportReport(g.UUID(), s, k, g.Hash(s).String(), settledYes) {
@@ -300,8 +317,22 @@ func TestExportStdout(t *testing.T) {
 		_, pool := exportDatabase(t)
 		g := drained(t, pool, "in-progress.jsonl")
 		code, stdout, stderr := exportCmd(t, g.UUID(), "-")
-		if code != exitNotSettled || stdout != "" || stderr != notSettledMessage(g.UUID(), 2, 3) {
+		if code != exitNotSettled || stdout != "" || stderr != notRevealedMessage(g.UUID()) {
 			t.Errorf("exit %d, stdout %q, stderr %q; want %d, nothing on stdout", code, stdout, stderr, exitNotSettled)
+		}
+	})
+	t.Run("revealed, not settled at the newest snapshot", func(t *testing.T) {
+		// LBT-21 K-10: a revealed round whose newest snapshot precedes
+		// settlement keeps the LBT-19 X-7 message.
+		_, pool := exportDatabase(t)
+		l := pgtest.LoadHistory(t, pool, readGoldenFile(t, "worked-example.jsonl"), []uint64{0, 9})
+		if !l.Revealed {
+			t.Fatal("worked-example loaded without its reveal")
+		}
+		round := string(canonjson.UUID(l.RoundID))
+		code, stdout, stderr := exportCmd(t, round, "-")
+		if code != exitNotSettled || stdout != "" || stderr != notSettledMessage(round, 9, 22) {
+			t.Errorf("exit %d, stdout %q, stderr %q; want %d and the X-7 message", code, stdout, stderr, exitNotSettled)
 		}
 	})
 }
@@ -334,12 +365,27 @@ func TestExportNoSnapshot(t *testing.T) {
 }
 
 func TestExportCorruptRound(t *testing.T) {
+	t.Run("reveal deleted", func(t *testing.T) {
+		_, pool := exportDatabase(t)
+		l := pgtest.LoadHistory(t, pool, readGoldenFile(t, "worked-example.jsonl"), nil)
+		replicaExec(t, pool, `DELETE FROM orvex.round_secret_reveals WHERE round_id = $1`, l.RoundID)
+		round := string(canonjson.UUID(l.RoundID))
+		path := filepath.Join(t.TempDir(), "round.jsonl")
+		code, stdout, stderr := exportCmd(t, round, path)
+		if code != exitNotSettled || stdout != "" || stderr != notRevealedMessage(round) {
+			t.Errorf("exit %d, stdout %q, stderr %q; want %d, no revealed secret", code, stdout, stderr, exitNotSettled)
+		}
+		requireNoFile(t, path)
+	})
 	t.Run("secret deleted", func(t *testing.T) {
 		_, pool := exportDatabase(t)
 		l := pgtest.LoadHistory(t, pool, readGoldenFile(t, "worked-example.jsonl"), nil)
+		// Without the reveal too, which would otherwise win (LBT-21 K-9).
+		replicaExec(t, pool, `DELETE FROM orvex.round_secret_reveals WHERE round_id = $1`, l.RoundID)
 		replicaExec(t, pool, `DELETE FROM orvex.round_secrets WHERE round_id = $1`, l.RoundID)
+		t.Setenv(sealing.KeyringFileEnv, pgtest.KeyringFile(t))
 		path := filepath.Join(t.TempDir(), "round.jsonl")
-		code, stdout, stderr := exportCmd(t, string(canonjson.UUID(l.RoundID)), path)
+		code, stdout, stderr := exportCmd(t, "-unsettled", string(canonjson.UUID(l.RoundID)), path)
 		if code != exitFailed || stdout != "" || !strings.Contains(stderr, "violates an export invariant") {
 			t.Errorf("exit %d, stdout %q, stderr %q; want %d naming the export invariant", code, stdout, stderr, exitFailed)
 		}
@@ -349,7 +395,7 @@ func TestExportCorruptRound(t *testing.T) {
 	t.Run("secret replaced", func(t *testing.T) {
 		_, pool := exportDatabase(t)
 		l := pgtest.LoadHistory(t, pool, readGoldenFile(t, "worked-example.jsonl"), nil)
-		replicaExec(t, pool, `UPDATE orvex.round_secrets SET config_secret = $2 WHERE round_id = $1`,
+		replicaExec(t, pool, `UPDATE orvex.round_secret_reveals SET config_secret = $2 WHERE round_id = $1`,
 			l.RoundID, []byte(`{"seed":"`+strings.Repeat("f", 64)+`"}`))
 		round := string(canonjson.UUID(l.RoundID))
 		dir := t.TempDir()
@@ -381,13 +427,15 @@ func TestExportUnsupportedRules(t *testing.T) {
 	l := pgtest.LoadHistory(t, pool, readGoldenFile(t, "tamper/rules-version-2.jsonl"), nil)
 	round := string(canonjson.UUID(l.RoundID))
 	path := filepath.Join(t.TempDir(), "round.jsonl")
+	// No engine executed the round, so it has no reveal: exit 6 before any
+	// replay (LBT-21 spec section 3 item 5).
 	code, stdout, stderr := exportCmd(t, round, path)
-	if code != exitUnsupported || stdout != "" || !strings.Contains(stderr, "rules unsupported at sequence 0") {
-		t.Errorf("exit %d, stdout %q, stderr %q; want %d naming the unsupported rules", code, stdout, stderr, exitUnsupported)
+	if code != exitNotSettled || stdout != "" || stderr != notRevealedMessage(round) {
+		t.Errorf("exit %d, stdout %q, stderr %q; want %d, no revealed secret", code, stdout, stderr, exitNotSettled)
 	}
-	requireOneExportLine(t, stderr)
 	requireNoFile(t, path)
 
+	t.Setenv(sealing.KeyringFileEnv, pgtest.KeyringFile(t))
 	code, stdout, stderr = exportCmd(t, "-unsettled", round, path)
 	if code != exitOK || stderr != "" || !strings.Contains(stdout, "\nsettled unknown\n") {
 		t.Fatalf("-unsettled: exit %d, stdout %q, stderr %q; want 0 and settled unknown", code, stdout, stderr)
@@ -413,21 +461,21 @@ func TestExportDatabaseErrors(t *testing.T) {
 		g := drained(t, pool, "worked-example.jsonl")
 		var grants []string
 		for _, s := range exportGrants {
-			if !strings.Contains(s, "round_secrets") {
+			if !strings.Contains(s, "round_secret_reveals") {
 				grants = append(grants, s)
 			}
 		}
 		if len(grants) != len(exportGrants)-1 {
-			t.Fatalf("grants without round_secrets: %v", grants)
+			t.Fatalf("grants without round_secret_reveals: %v", grants)
 		}
 		t.Setenv(databaseURLEnv, restrictedRole(t, dsn, grants))
 		path := filepath.Join(t.TempDir(), "round.jsonl")
 		code, stdout, stderr := exportCmd(t, g.UUID(), path)
-		if code != exitIO || stdout != "" || !strings.Contains(stderr, "42501") {
-			t.Errorf("exit %d, stdout %q, stderr %q; want %d with 42501", code, stdout, stderr, exitIO)
+		if code != exitIO || stdout != "" || !strings.Contains(stderr, "eventstore: read revealed secret: SQLSTATE 42501") {
+			t.Errorf("exit %d, stdout %q, stderr %q; want %d with eventstore: read revealed secret: SQLSTATE 42501", code, stdout, stderr, exitIO)
 		}
-		if strings.Contains(stdout, exportRolePassword) || strings.Contains(stderr, exportRolePassword) {
-			t.Errorf("output contains the password: stdout %q, stderr %q", stdout, stderr)
+		if strings.Contains(stdout+stderr, exportRolePassword) || strings.Contains(stdout+stderr, "orvex_export_") {
+			t.Errorf("output contains the password or the role: stdout %q, stderr %q", stdout, stderr)
 		}
 		requireOneExportLine(t, stderr)
 		requireNoFile(t, path)
@@ -456,11 +504,15 @@ func TestExportMinimalGrants(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
-	for _, sql := range []string{
+	queries := []string{
 		`SELECT state FROM orvex.round_snapshots LIMIT 1`,
 		`SELECT 1 FROM orvex.admissions LIMIT 1`,
-		`SELECT close_offset_micros FROM orvex.round_secrets LIMIT 1`,
-	} {
+	}
+	// The auditor holds nothing on round_secrets (LBT-21 K-10, K-14).
+	for _, c := range []string{"round_id", "config_secret", "secret_scheme", "secret_key_id", "secret_nonce", "secret_ciphertext", "close_offset_micros"} {
+		queries = append(queries, `SELECT `+c+` FROM orvex.round_secrets LIMIT 1`)
+	}
+	for _, sql := range queries {
 		var v any
 		err := conn.QueryRow(ctx, sql).Scan(&v)
 		var pgErr *pgconn.PgError
@@ -498,4 +550,77 @@ func TestExportOutputFailures(t *testing.T) {
 		}
 		requireNoFile(t, path)
 	})
+}
+
+// TestExportUnsettledNeedsPrivilegedPath: the auditor cannot read an
+// unsettled round's secret; -unsettled needs the orvex_secret_reader grants
+// and the keyring (LBT-21 K-10, acceptance 2).
+func TestExportUnsettledNeedsPrivilegedPath(t *testing.T) {
+	dsn, pool := exportDatabase(t)
+	g := drained(t, pool, "in-progress.jsonl")
+	worked := drained(t, pool, "worked-example.jsonl")
+	auditor := restrictedRole(t, dsn, exportGrants)
+	reader := restrictedRole(t, dsn, append(append([]string{}, exportGrants...), secretReaderGrants...))
+	dir := t.TempDir()
+	path := func(name string) string { return filepath.Join(dir, name+".jsonl") }
+
+	// 1. The auditor's default export: no reveal.
+	t.Setenv(databaseURLEnv, auditor)
+	t.Setenv(sealing.KeyringFileEnv, "")
+	code, stdout, stderr := exportCmd(t, g.UUID(), path("auditor"))
+	if code != exitNotSettled || stdout != "" || stderr != notRevealedMessage(g.UUID()) {
+		t.Errorf("auditor: exit %d, stdout %q, stderr %q; want %d, no revealed secret", code, stdout, stderr, exitNotSettled)
+	}
+	requireNoFile(t, path("auditor"))
+
+	// 2. The auditor with -unsettled and the keyring: no SELECT on
+	// round_secrets.
+	t.Setenv(sealing.KeyringFileEnv, pgtest.KeyringFile(t))
+	code, stdout, stderr = exportCmd(t, "-unsettled", g.UUID(), path("auditor-unsettled"))
+	if code != exitIO || stdout != "" || !strings.Contains(stderr, "eventstore: read sealed secret: SQLSTATE 42501") {
+		t.Errorf("auditor -unsettled: exit %d, stdout %q, stderr %q; want %d with eventstore: read sealed secret: SQLSTATE 42501",
+			code, stdout, stderr, exitIO)
+	}
+	requireOneExportLine(t, stderr)
+	requireNoFile(t, path("auditor-unsettled"))
+
+	// 3. Auditor plus secret reader, without a keyring.
+	t.Setenv(databaseURLEnv, reader)
+	t.Setenv(sealing.KeyringFileEnv, "")
+	code, stdout, stderr = exportCmd(t, "-unsettled", g.UUID(), path("no-keyring"))
+	want := "crashctl: audit export: round " + g.UUID() + " has a sealed secret config and no revealed one; set ORVEX_SECRET_KEYRING_FILE to export it\n"
+	if code != exitUsage || stdout != "" || stderr != want {
+		t.Errorf("reader without a keyring: exit %d, stdout %q, stderr %q; want %d and %q", code, stdout, stderr, exitUsage, want)
+	}
+	requireNoFile(t, path("no-keyring"))
+
+	// 4. The privileged path: role and keyring.
+	t.Setenv(sealing.KeyringFileEnv, pgtest.KeyringFile(t))
+	code, stdout, stderr = exportCmd(t, "-unsettled", g.UUID(), path("privileged"))
+	if code != exitOK || stderr != "" {
+		t.Fatalf("privileged path: exit %d, stderr %q; want 0", code, stderr)
+	}
+	head := g.Hash(2).String()
+	if want := wantExportReport(g.UUID(), 2, 3, head, settledNo); stdout != want {
+		t.Errorf("report =\n%s\nwant\n%s", stdout, want)
+	}
+	verifyFile(t, path("privileged"), 3, head)
+
+	// 5. Another key under the key ID pgtest: authentication fails.
+	other := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, sealing.KeySize))
+	t.Setenv(sealing.KeyringFileEnv, writeKeyringFile(t, "active pgtest\nkey pgtest "+other+"\n", 0o600))
+	code, stdout, stderr = exportCmd(t, "-unsettled", g.UUID(), path("wrong-key"))
+	if code != exitFailed || stdout != "" {
+		t.Errorf("wrong key: exit %d, stdout %q, stderr %q; want %d", code, stdout, stderr, exitFailed)
+	}
+	requireOneExportLine(t, stderr)
+	requireNoFile(t, path("wrong-key"))
+
+	// 6. A revealed round needs no key: the auditor's -unsettled export.
+	t.Setenv(databaseURLEnv, auditor)
+	t.Setenv(sealing.KeyringFileEnv, "")
+	code, stdout, stderr = exportCmd(t, "-unsettled", worked.UUID(), path("revealed"))
+	if code != exitOK || stderr != "" || !strings.Contains(stdout, "\nsettled yes\nok\n") {
+		t.Errorf("auditor -unsettled on a revealed round: exit %d, stdout %q, stderr %q; want 0 and settled yes", code, stdout, stderr)
+	}
 }

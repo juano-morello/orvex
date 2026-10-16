@@ -67,27 +67,42 @@ const exportRolePassword = "sentinel-pw"
 
 var exportRoles atomic.Int64
 
-// exportGrants is the auditor grant set (spec X-11 and section 7, with a
-// column-level round_secrets grant: migration 0009 added the secret
-// close_offset_micros column, which only orvex.admit_command reads). %[1]s is
-// the role, %[2]s the database.
+// exportGrants is the orvex_auditor grant set of LBT-21 K-14 (superseding
+// LBT-19 X-11): nothing on round_secrets, SELECT on round_secret_reveals,
+// the reveals of settled rounds. %[1]s is the role, %[2]s the database.
 var exportGrants = []string{
 	`GRANT CONNECT ON DATABASE %[2]s TO %[1]s`,
 	`GRANT USAGE ON SCHEMA orvex TO %[1]s`,
 	`GRANT SELECT ON orvex.rounds, orvex.chain_records TO %[1]s`,
-	`GRANT SELECT (round_id, config_secret) ON orvex.round_secrets TO %[1]s`,
+	`GRANT SELECT ON orvex.round_secret_reveals TO %[1]s`,
 	`GRANT SELECT (round_id, sequence, state_hash) ON orvex.round_snapshots TO %[1]s`,
+}
+
+// secretReaderGrants is the orvex_secret_reader grant set of LBT-21 K-10:
+// the sealed and legacy secret columns of round_secrets, never
+// close_offset_micros. Granting exportGrants and secretReaderGrants to one
+// login role models membership in both orvex_auditor and
+// orvex_secret_reader.
+var secretReaderGrants = []string{
+	`GRANT SELECT (round_id, config_secret, secret_scheme, secret_key_id, secret_nonce, secret_ciphertext) ON orvex.round_secrets TO %[1]s`,
 }
 
 // restrictedRole creates a LOGIN role orvex_export_<n> with password
 // exportRolePassword, runs grants in superDSN's database, and returns
-// superDSN with that role's credentials. At cleanup it runs DROP OWNED BY in
-// that database, then DROP ROLE; call it after creating the database so the
-// cleanup runs before the database is dropped.
+// superDSN with that role's credentials (loginRole).
 func restrictedRole(t *testing.T, superDSN string, grants []string) (roleDSN string) {
 	t.Helper()
+	return loginRole(t, superDSN, fmt.Sprintf("orvex_export_%d", exportRoles.Add(1)), exportRolePassword, grants)
+}
+
+// loginRole creates LOGIN role role with password, runs grants in
+// superDSN's database, and returns superDSN with that role's credentials.
+// At cleanup it runs DROP OWNED BY in that database, then DROP ROLE; call it
+// after creating the database so the cleanup runs before the database is
+// dropped.
+func loginRole(t *testing.T, superDSN, role, password string, grants []string) (roleDSN string) {
+	t.Helper()
 	ctx := context.Background()
-	role := fmt.Sprintf("orvex_export_%d", exportRoles.Add(1))
 	quotedRole := pgx.Identifier{role}.Sanitize()
 
 	conn, err := pgx.Connect(ctx, superDSN)
@@ -99,7 +114,7 @@ func restrictedRole(t *testing.T, superDSN string, grants []string) (roleDSN str
 	if err := conn.QueryRow(ctx, `SELECT current_database()`).Scan(&database); err != nil {
 		t.Fatal(err)
 	}
-	execOrFatal(t, conn, fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s'`, quotedRole, exportRolePassword))
+	execOrFatal(t, conn, fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s'`, quotedRole, password))
 	t.Cleanup(func() {
 		c, err := pgx.Connect(ctx, superDSN)
 		if err != nil {
@@ -121,6 +136,6 @@ func restrictedRole(t *testing.T, superDSN string, grants []string) (roleDSN str
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.UserPassword(role, exportRolePassword)
+	u.User = url.UserPassword(role, password)
 	return u.String()
 }

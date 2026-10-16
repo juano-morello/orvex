@@ -3,6 +3,7 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -143,7 +144,7 @@ func TestMigrateUpDownClean(t *testing.T) {
 		t.Fatal("fingerprint unchanged by migrating up")
 	}
 	reverted := down(t, pool, ms, 0)
-	if want := []int{9, 8, 7, 6, 5, 4, 3, 2, 1}; !equalInts(versions(reverted), want) {
+	if want := []int{10, 9, 8, 7, 6, 5, 4, 3, 2, 1}; !equalInts(versions(reverted), want) {
 		t.Errorf("reverted %v, want %v", versions(reverted), want)
 	}
 	if f2 := fingerprint(t, pool); f2 != f0 {
@@ -380,17 +381,17 @@ func TestMigrateDownRefusesAuditData(t *testing.T) {
 	records := count(t, pool, "SELECT count(*) FROM orvex.chain_records")
 	snapshots := count(t, pool, "SELECT count(*) FROM orvex.round_snapshots")
 
-	// 0009 refuses first: round_admission_heads and round_secrets hold the
-	// loaded round's rows.
+	// 0010 refuses first: round_secret_reveals holds the loaded round's
+	// reveal.
 	reverted, err := postgres.MigrateDown(ctx, pool, ms, 0)
 	if got := versions(reverted); len(got) != 0 {
-		t.Errorf("reverted %v, want nothing (0009 refuses)", got)
+		t.Errorf("reverted %v, want nothing (0010 refuses)", got)
 	}
 	if code := postgres.SQLState(err); code != postgres.CodeDownRefused {
 		t.Fatalf("err = %v, want SQLSTATE %s", err, postgres.CodeDownRefused)
 	}
-	if v := schemaVersion(t, pool); v != 9 {
-		t.Errorf("version = %d, want 9", v)
+	if v := schemaVersion(t, pool); v != len(ms) {
+		t.Errorf("version = %d, want %d", v, len(ms))
 	}
 	if n := count(t, pool, "SELECT count(*) FROM orvex.chain_records"); n != records {
 		t.Errorf("chain records = %d, want %d", n, records)
@@ -400,6 +401,77 @@ func TestMigrateDownRefusesAuditData(t *testing.T) {
 	}
 	if got := versions(up(t, pool, ms, len(ms))); len(got) != 0 {
 		t.Errorf("re-up applied %v, want nothing", got)
+	}
+}
+
+// TestMigrate0010LegacySecrets: migration 0010 keeps rows written before it
+// as plaintext, backfills the reveal of a legacy round whose admission
+// window is sealed at an accepted record, stops new plaintext, and its down
+// refuses while reveals exist (LBT-21 K-11).
+func TestMigrate0010LegacySecrets(t *testing.T) {
+	t.Parallel()
+	pool := pgtest.Pool(t, pgtest.EmptyDatabase(t))
+	ms := embedded(t)
+	up(t, pool, ms, 9)
+
+	settled := pgtest.LoadLegacyHistory(t, pool, readGolden(t, "empty-round"), nil)
+	if _, err := pool.Exec(ctx, `UPDATE orvex.round_admission_heads
+		SET admission_state = 'sealed', started_sequence = 1, closed_sequence = 2, sealed_sequence = 3
+		WHERE round_id = $1`, settled.RoundID); err != nil {
+		t.Fatalf("seal the legacy window: %v", err)
+	}
+	open := pgtest.LoadLegacyHistory(t, pool, readGolden(t, "in-progress"), nil)
+	up(t, pool, ms, len(ms))
+
+	for _, l := range []pgtest.Loaded{settled, open} {
+		var plain, ciphertext, nonce []byte
+		var scheme, keyID *string
+		if err := pool.QueryRow(ctx, `SELECT config_secret, secret_scheme, secret_key_id, secret_nonce, secret_ciphertext
+			FROM orvex.round_secrets WHERE round_id = $1`, l.RoundID).Scan(&plain, &scheme, &keyID, &nonce, &ciphertext); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(plain, l.Secret) || scheme != nil || keyID != nil || nonce != nil || ciphertext != nil {
+			t.Errorf("legacy row changed: plaintext %q (want %q), sealed columns %v %v %x %x", plain, l.Secret, scheme, keyID, nonce, ciphertext)
+		}
+	}
+	if n := count(t, pool, "SELECT count(*) FROM orvex.round_secret_reveals"); n != 1 {
+		t.Fatalf("round_secret_reveals holds %d rows, want 1", n)
+	}
+	var seq int64
+	var revealed []byte
+	if err := pool.QueryRow(ctx, `SELECT sequence, config_secret FROM orvex.round_secret_reveals WHERE round_id = $1`,
+		settled.RoundID).Scan(&seq, &revealed); err != nil {
+		t.Fatalf("empty-round reveal: %v", err)
+	}
+	if seq != 3 || !bytes.Equal(revealed, settled.Secret) {
+		t.Errorf("empty-round reveal at %d = %q, want 3 and %q", seq, revealed, settled.Secret)
+	}
+
+	// No new plaintext, from any role.
+	id := [16]byte{0x0b, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0x10, 0x10}
+	if _, err := pool.Exec(ctx, `INSERT INTO orvex.rounds
+		(round_id, game, rules_version, schema_version, state_version, chain, created_at_unix_micro)
+		VALUES ($1, 'crash', 1, 1, 1, 'orvex/audit/v1', 1)`, id); err != nil {
+		t.Fatal(err)
+	}
+	_, err := pool.Exec(ctx, `INSERT INTO orvex.round_secrets (round_id, config_secret) VALUES ($1, $2)`, id, settled.Secret)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "round_secrets_sealed_check" {
+		t.Errorf("plaintext insert: err = %v, want 23514 round_secrets_sealed_check", err)
+	}
+
+	secrets := count(t, pool, "SELECT count(*) FROM orvex.round_secrets")
+	reveals := count(t, pool, "SELECT count(*) FROM orvex.round_secret_reveals")
+	reverted, err := postgres.MigrateDown(ctx, pool, ms, 9)
+	if len(reverted) != 0 || postgres.SQLState(err) != postgres.CodeDownRefused {
+		t.Errorf("down to 9: reverted %v, err %v; want nothing and SQLSTATE %s", versions(reverted), err, postgres.CodeDownRefused)
+	}
+	if v := schemaVersion(t, pool); v != len(ms) {
+		t.Errorf("version = %d, want %d", v, len(ms))
+	}
+	if count(t, pool, "SELECT count(*) FROM orvex.round_secrets") != secrets ||
+		count(t, pool, "SELECT count(*) FROM orvex.round_secret_reveals") != reveals {
+		t.Error("the refused down changed round_secrets or round_secret_reveals")
 	}
 }
 
@@ -526,7 +598,7 @@ func TestMigrationsCreateOnlyOrvexObjects(t *testing.T) {
 		}
 	}
 	if n := count(t, pool, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = 'orvex' AND c.relkind IN ('r', 'v')`); n != 15 {
-		t.Errorf("orvex holds %d tables and views, want 15", n)
+		WHERE n.nspname = 'orvex' AND c.relkind IN ('r', 'v')`); n != 16 {
+		t.Errorf("orvex holds %d tables and views, want 16", n)
 	}
 }

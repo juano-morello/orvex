@@ -12,6 +12,7 @@ import (
 	"github.com/juano-morello/orvex/internal/audit/replay"
 	"github.com/juano-morello/orvex/internal/game"
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 )
 
 // load is the cold load (§5.2): one REPEATABLE READ READ ONLY transaction,
@@ -25,31 +26,56 @@ func (e *Executor) load(ctx context.Context, en *entry, lease Lease) error {
 	}
 	defer rollback(tx)
 
-	// 1. Round, secret and execution head.
+	// 1. Round, secret and execution head. The secret config comes from
+	// the reveal, else the legacy plaintext, else the sealed form opened
+	// with the keyring (LBT-21 K-8).
 	var (
 		gameID                  string
 		rulesV, schemaV, stateV int64
-		secret                  []byte
+		revealed, legacy        []byte
+		scheme, keyID           *string
+		nonce, ciphertext       []byte
 		processed, token        *int64
 	)
-	err = tx.QueryRow(ctx, `SELECT r.game, r.rules_version, r.schema_version, r.state_version, s.config_secret,
+	err = tx.QueryRow(ctx, `SELECT r.game, r.rules_version, r.schema_version, r.state_version,
+		v.config_secret, s.config_secret, s.secret_scheme, s.secret_key_id, s.secret_nonce, s.secret_ciphertext,
 		h.processed_sequence, h.fencing_token
 		FROM orvex.rounds r
+		LEFT JOIN orvex.round_secret_reveals v USING (round_id)
 		LEFT JOIN orvex.round_secrets s USING (round_id)
 		LEFT JOIN orvex.round_execution_heads h USING (round_id)
 		WHERE r.round_id = $1`, lease.RoundID).
-		Scan(&gameID, &rulesV, &schemaV, &stateV, &secret, &processed, &token)
+		Scan(&gameID, &rulesV, &schemaV, &stateV, &revealed, &legacy, &scheme, &keyID, &nonce, &ciphertext, &processed, &token)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrRoundNotFound
 	}
 	if err != nil {
 		return loadDBError(ctx, err)
 	}
-	if secret == nil || processed == nil || token == nil || *processed < 0 {
+	if (revealed == nil && legacy == nil && ciphertext == nil) || processed == nil || token == nil || *processed < 0 {
 		return fmt.Errorf("%w: the round has no secret config or execution head", ErrCorrupt)
 	}
 	if *token != lease.FencingToken {
 		return ErrFenced
+	}
+	var secret []byte
+	switch {
+	case revealed != nil:
+		secret = revealed
+	case legacy != nil:
+		secret = legacy
+	default:
+		sealed := sealing.Sealed{Nonce: nonce, Ciphertext: ciphertext}
+		if scheme != nil {
+			sealed.Scheme = *scheme
+		}
+		if keyID != nil {
+			sealed.KeyID = *keyID
+		}
+		secret, err = e.cfg.Keyring.Open(lease.RoundID, sealed)
+		if err != nil {
+			return fmt.Errorf("%w: secret config: %w", ErrCorrupt, err)
+		}
 	}
 
 	// 2. Rules.
@@ -185,6 +211,7 @@ func (e *Executor) load(ctx context.Context, en *entry, lease Lease) error {
 
 	// 7. The entry.
 	en.rules = r
+	en.secret = secret
 	en.state = final
 	en.processed = uint64(*processed)
 	copy(en.head[:], records[len(records)-1].hash)

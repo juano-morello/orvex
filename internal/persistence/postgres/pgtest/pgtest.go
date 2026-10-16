@@ -3,7 +3,9 @@
 // starts one Testcontainers PostgreSQL container per test binary and hands
 // each test its own database: empty, or cloned from a template migrated once
 // to the newest version. It also fingerprints catalogs and loads LBT-9
-// audit histories into the schema.
+// audit histories into the schema. It seals their round secrets with a
+// fixed test keyring and writes their reveals (LBT-21); no other key
+// belongs in the repository.
 //
 // Integration test files carry //go:build integration and declare
 //
@@ -228,6 +230,49 @@ func Pool(t testing.TB, dsn string) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// MigrateUpTo migrates the database at dsn up to version with the embedded
+// migrations and fails the test on error. Tests use it to build a database
+// at an older schema, for example 9, before migration 0010 (LBT-21).
+func MigrateUpTo(t testing.TB, dsn string, version int) {
+	t.Helper()
+	ms, err := postgres.LoadMigrations(migrations.FS)
+	if err != nil {
+		t.Fatalf("pgtest: load migrations: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgtest: connect: %v", err)
+	}
+	defer func() { _ = conn.Close(context.Background()) }()
+	if _, err := postgres.MigrateUp(ctx, conn, ms, version, "pgtest"); err != nil {
+		t.Fatalf("pgtest: migrate up to %d: %v", version, err)
+	}
+}
+
+// ReplicaExec runs one statement in its own committed transaction with
+// session_replication_role = replica, which skips the append-only triggers
+// and foreign keys. Tests use it to corrupt or remove stored rows.
+func ReplicaExec(t testing.TB, db *pgxpool.Pool, sql string, args ...any) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		t.Fatalf("pgtest: begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+		t.Fatalf("pgtest: replica mode: %v", err)
+	}
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
+		t.Fatalf("pgtest: %s: %v", sql, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("pgtest: commit: %v", err)
+	}
 }
 
 // WaitUntilBlocked polls pg_stat_activity until backend pid waits on a

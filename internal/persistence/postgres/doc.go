@@ -10,7 +10,10 @@
 // orvex:
 //
 //   - rounds, round_secrets: immutable round identity and the codec's secret
-//     config (the seed);
+//     config (the seed), sealed with AES-256-GCM from 0010; legacy rows
+//     written before 0010 keep their plaintext (LBT-21);
+//   - round_secret_reveals: the secret config revealed by the record that
+//     finalizes a round; it must name an accepted command record (OX010);
 //   - round_admission_heads: Transaction A's per-round lock row and
 //     admission counter;
 //   - admissions: gapless per-round admitted commands with a globally unique

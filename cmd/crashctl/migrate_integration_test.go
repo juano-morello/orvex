@@ -29,9 +29,9 @@ func lines(s string) []string {
 func TestMigrateCLI(t *testing.T) {
 	dsn := pgtest.EmptyDatabase(t)
 	t.Setenv(databaseURLEnv, dsn)
-	names := []string{"0001 foundation", "0002 rounds_admissions", "0003 chain_execution", "0004 snapshots", "0005 ledger", "0006 outbox", "0007 admission_window", "0008 execution_ledger", "0009 close_bound"}
+	names := []string{"0001 foundation", "0002 rounds_admissions", "0003 chain_execution", "0004 snapshots", "0005 ledger", "0006 outbox", "0007 admission_window", "0008 execution_ledger", "0009 close_bound", "0010 sealed_secrets"}
 
-	// 1. up applies all nine.
+	// 1. up applies all ten.
 	code, stdout, stderr := runMigrateCmd("up")
 	if code != exitOK || stderr != "" {
 		t.Fatalf("up: exit %d, stderr %q", code, stderr)
@@ -40,18 +40,18 @@ func TestMigrateCLI(t *testing.T) {
 	for _, n := range names {
 		want = append(want, "applied "+n)
 	}
-	want = append(want, "schema version 9")
+	want = append(want, "schema version 10")
 	if got := lines(stdout); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("up stdout:\n%s\nwant:\n%s", stdout, strings.Join(want, "\n"))
 	}
 
-	// 2. status lists nine applied migrations.
+	// 2. status lists ten applied migrations.
 	code, stdout, stderr = runMigrateCmd("status")
 	if code != exitOK || stderr != "" {
 		t.Fatalf("status: exit %d, stderr %q", code, stderr)
 	}
 	got := lines(stdout)
-	if len(got) != 10 || got[9] != "schema version 9" {
+	if len(got) != 11 || got[10] != "schema version 10" {
 		t.Fatalf("status stdout:\n%s", stdout)
 	}
 	for i, n := range names {
@@ -82,10 +82,10 @@ func TestMigrateCLI(t *testing.T) {
 	if code, _, stderr = runMigrateCmd("up"); code != exitOK {
 		t.Fatalf("second up: exit %d, stderr %q", code, stderr)
 	}
-	if code, stdout, _ = runMigrateCmd("up"); code != exitOK || stdout != "schema version 9\n" {
+	if code, stdout, _ = runMigrateCmd("up"); code != exitOK || stdout != "schema version 10\n" {
 		t.Errorf("no-op up: exit %d, stdout %q", code, stdout)
 	}
-	if code, _, stderr = runMigrateCmd("down", "-to", "9"); code != exitOK || stderr != "" {
+	if code, _, stderr = runMigrateCmd("down", "-to", "10"); code != exitOK || stderr != "" {
 		t.Errorf("no-op down: exit %d, stderr %q", code, stderr)
 	}
 	if code, _, stderr = runMigrateCmd("up", "-to", "3"); code != exitUsage || !strings.Contains(stderr, "other side") {
@@ -107,7 +107,7 @@ func TestMigrateCLI(t *testing.T) {
 		t.Errorf("down with data: stderr %q, want one crashctl: migrate down: line", stderr)
 	}
 	if stdout != "" {
-		t.Errorf("down with data: stdout %q, want nothing: 0009 refuses before any step completes", stdout)
+		t.Errorf("down with data: stdout %q, want nothing: 0010 refuses before any step completes", stdout)
 	}
 
 	// 6. a bookkeeping row from a newer build fails closed.
@@ -167,12 +167,12 @@ func TestMigrateCLIStdoutFailure(t *testing.T) {
 
 	// Successful runs whose report cannot be written.
 	runMigrateFailingStdout(t, "up")
-	if code, stdout, _ := runMigrateCmd("status"); code != exitOK || !strings.HasSuffix(stdout, "schema version 9\n") {
+	if code, stdout, _ := runMigrateCmd("status"); code != exitOK || !strings.HasSuffix(stdout, "schema version 10\n") {
 		t.Fatalf("up with failing stdout did not migrate: exit %d, stdout %q", code, stdout)
 	}
 	runMigrateFailingStdout(t, "status")
 
-	// A runner error (the down refuses at 0009), with a failing stdout: one
+	// A runner error (the down refuses at 0010), with a failing stdout: one
 	// line carries both errors.
 	history, err := os.ReadFile(filepath.Join(goldenDir, "worked-example.jsonl"))
 	if err != nil {

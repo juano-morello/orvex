@@ -15,6 +15,8 @@ import (
 
 	"github.com/juano-morello/orvex/internal/audit/verification"
 	"github.com/juano-morello/orvex/internal/buildinfo"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 )
 
 // Integration tests of make audit (LBT-25), run as an operator runs it,
@@ -31,7 +33,7 @@ import (
 var makeEnvDrop = map[string]bool{
 	"MAKEFLAGS": true, "MFLAGS": true, "MAKELEVEL": true, "MAKEOVERRIDES": true, "GNUMAKEFLAGS": true,
 	"MAKE_TERMOUT": true, "MAKE_TERMERR": true,
-	"ROUND_ID": true, "AUDIT_FORMAT": true, "AUDIT_UNSETTLED": true,
+	"ROUND_ID": true, "AUDIT_FORMAT": true, "AUDIT_UNSETTLED": true, sealing.KeyringFileEnv: true,
 	databaseURLEnv: true, "TMPDIR": true, "GOTMPDIR": true,
 }
 
@@ -199,6 +201,11 @@ func TestMakeAuditSettledRounds(t *testing.T) {
 	}
 }
 
+// TestMakeAuditUnsettled runs make audit on an unsettled round, whose
+// secret config is sealed and not revealed (LBT-21 K-10, K-13): without
+// AUDIT_UNSETTLED, exit 6; with it, the privileged path (the
+// orvex_secret_reader grants and ORVEX_SECRET_KEYRING_FILE) exports and
+// verifies the round, and a missing keyring or role fails the export.
 func TestMakeAuditUnsettled(t *testing.T) {
 	binDir := t.TempDir()
 	var r executedRound
@@ -212,12 +219,14 @@ func TestMakeAuditUnsettled(t *testing.T) {
 	}
 	dsn, pool := exportDatabase(t)
 	g := drained(t, pool, r.file)
-	env := []string{databaseURLEnv + "=" + dsn}
+	auditor := restrictedRole(t, dsn, exportGrants)
+	reader := restrictedRole(t, dsn, append(append([]string{}, exportGrants...), secretReaderGrants...))
+	keyring := sealing.KeyringFileEnv + "=" + pgtest.KeyringFile(t)
 
 	t.Run("default", func(t *testing.T) {
 		tmp := t.TempDir()
-		res := makeAudit(t, binDir, tmp, env, "ROUND_ID="+g.UUID())
-		requireMakeFailure(t, res, exitNotSettled, notSettledMessage(g.UUID(), r.s, r.n),
+		res := makeAudit(t, binDir, tmp, []string{databaseURLEnv + "=" + dsn}, "ROUND_ID="+g.UUID())
+		requireMakeFailure(t, res, exitNotSettled, notRevealedMessage(g.UUID()),
 			"audit: crashctl audit export failed with exit code 6\n")
 		if strings.Contains(res.stdout, "\nrecords ") {
 			t.Errorf("stdout = %q, want no export report", res.stdout)
@@ -225,10 +234,55 @@ func TestMakeAuditUnsettled(t *testing.T) {
 		requireEmptyDir(t, tmp)
 	})
 	t.Run("audit-unsettled", func(t *testing.T) {
+		// The privileged path: the secret reader's grants and the keyring.
 		tmp := t.TempDir()
-		res := makeAudit(t, binDir, tmp, env, "ROUND_ID="+g.UUID(), "AUDIT_UNSETTLED=1")
+		res := makeAudit(t, binDir, tmp, []string{databaseURLEnv + "=" + reader, keyring}, "ROUND_ID="+g.UUID(), "AUDIT_UNSETTLED=1")
 		requireMakeSuccess(t, res)
 		requireVerified(t, res.stdout, wantExportReport(g.UUID(), r.s, r.n, r.head, settledNo), g.UUID(), r.s+1, r.head)
+		requireEmptyDir(t, tmp)
+	})
+	t.Run("audit-unsettled-keyring-on-command-line", func(t *testing.T) {
+		// The keyring as a make variable reaches crashctl too.
+		tmp := t.TempDir()
+		res := makeAudit(t, binDir, tmp, []string{databaseURLEnv + "=" + reader}, "ROUND_ID="+g.UUID(), "AUDIT_UNSETTLED=1", keyring)
+		requireMakeSuccess(t, res)
+		requireVerified(t, res.stdout, wantExportReport(g.UUID(), r.s, r.n, r.head, settledNo), g.UUID(), r.s+1, r.head)
+		requireEmptyDir(t, tmp)
+	})
+	t.Run("audit-unsettled-no-keyring", func(t *testing.T) {
+		// K-13: the role without a keyring is exit 2.
+		tmp := t.TempDir()
+		res := makeAudit(t, binDir, tmp, []string{databaseURLEnv + "=" + reader}, "ROUND_ID="+g.UUID(), "AUDIT_UNSETTLED=1")
+		requireMakeFailure(t, res, exitUsage,
+			"crashctl: audit export: round "+g.UUID()+" has a sealed secret config and no revealed one; set ORVEX_SECRET_KEYRING_FILE to export it\n",
+			"audit: crashctl audit export failed with exit code 2\n")
+		if strings.Contains(res.stdout, "\nrecords ") {
+			t.Errorf("stdout = %q, want no export report", res.stdout)
+		}
+		requireEmptyDir(t, tmp)
+	})
+	t.Run("audit-unsettled-bad-keyring", func(t *testing.T) {
+		// K-13: a keyring file that cannot be loaded is exit 2, without its path.
+		tmp := t.TempDir()
+		missing := filepath.Join(t.TempDir(), "no-such-keyring")
+		res := makeAudit(t, binDir, tmp, []string{databaseURLEnv + "=" + reader, sealing.KeyringFileEnv + "=" + missing},
+			"ROUND_ID="+g.UUID(), "AUDIT_UNSETTLED=1")
+		requireMakeFailure(t, res, exitUsage, "crashctl: audit export: ORVEX_SECRET_KEYRING_FILE: unreadable\n",
+			"audit: crashctl audit export failed with exit code 2\n")
+		if strings.Contains(res.stdout+res.stderr, missing) {
+			t.Errorf("output names the keyring path\nstdout:\n%s\nstderr:\n%s", res.stdout, res.stderr)
+		}
+		requireEmptyDir(t, tmp)
+	})
+	t.Run("audit-unsettled-no-role", func(t *testing.T) {
+		// K-10: the keyring without the secret reader's grants is exit 4.
+		tmp := t.TempDir()
+		res := makeAudit(t, binDir, tmp, []string{databaseURLEnv + "=" + auditor, keyring}, "ROUND_ID="+g.UUID(), "AUDIT_UNSETTLED=1")
+		requireMakeFailure(t, res, exitIO, "crashctl: audit export: eventstore: read sealed secret: SQLSTATE 42501\n",
+			"audit: crashctl audit export failed with exit code 4\n")
+		if strings.Contains(res.stdout+res.stderr, exportRolePassword) || strings.Contains(res.stdout+res.stderr, "orvex_export_") {
+			t.Errorf("output names the role or its password\nstdout:\n%s\nstderr:\n%s", res.stdout, res.stderr)
+		}
 		requireEmptyDir(t, tmp)
 	})
 }
@@ -291,7 +345,9 @@ func TestMakeAuditFailures(t *testing.T) {
 	t.Run("verify-fails", func(t *testing.T) {
 		dsn, pool := exportDatabase(t)
 		g := drained(t, pool, "worked-example.jsonl")
-		replicaExec(t, pool, `UPDATE orvex.round_secrets SET config_secret = $2 WHERE round_id = $1`,
+		// The revealed secret: the export reads it (LBT-21 K-9), and the
+		// form check refuses plaintext in round_secrets (K-5).
+		replicaExec(t, pool, `UPDATE orvex.round_secret_reveals SET config_secret = $2 WHERE round_id = $1`,
 			g.RoundID, []byte(`{"seed":"`+strings.Repeat("f", 64)+`"}`))
 		tmp := t.TempDir()
 		// -unsettled: the export still writes the file (settled unknown).

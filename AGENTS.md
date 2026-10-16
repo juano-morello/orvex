@@ -26,6 +26,7 @@ Read the ADRs relevant to the area you touch before you plan or edit:
 - PostgreSQL, transactions, ledger, outbox: ADR-005
 - tests and CI: ADR-006
 - repository layout, modules, build, tooling: ADR-007
+- round secrets, sealing, the keyring, the reveal table: ADR-004, ADR-005 and `docs/specs/87d8d90c_round-secret-protection.md` (LBT-21)
 
 ## Flag conflicts explicitly
 
@@ -40,6 +41,8 @@ If a change conflicts with, or needs to deviate from, an ADR, say so explicitly 
 - Released historical rules versions, golden vectors and canonical serializers are immutable (ADR-001, ADR-003, ADR-007).
 - Game `Decide`/`Evolve` code is pure: no I/O, wall clock or uncontrolled randomness (ADR-003).
 - Merged migrations in `migrations/` are immutable; change the schema with a new migration (checksums are enforced).
+- Round secret configs are sealed at rest (LBT-21). New rounds store only the AES-256-GCM form (`internal/persistence/sealing`), and the record that settles a round writes the plaintext to `orvex.round_secret_reveals`. No SQL statement, log line or error text may carry a key, keyring content or an unrevealed secret config. Tests seal with `pgtest.Keyring()`; no other key belongs in the repository.
+- `crashctl` never prints any part of `ORVEX_DATABASE_URL` (LBT-21 K-12): render database errors with `describe`, never with `err.Error()`.
 
 ## Commands
 
@@ -51,7 +54,7 @@ If a change conflicts with, or needs to deviate from, an ADR, say so explicitly 
 - `make golden-check`: regenerate the Crash v1 golden vectors and the audit golden histories with the independent Python oracles (Python 3.11+, standard library only) and fail if they differ from the committed files. Never regenerate vectors or fixtures from Go output.
 - `make fuzz`: run every Go fuzz target for `FUZZTIME` each (default `30s`), one `go test -fuzz` invocation per target, since Go fuzzes one target per run. `make fuzz-list` prints the targets as `<package dir>:<FuzzName>`. `make fuzz-one FUZZ_PKG=internal/game/crash/v1 FUZZ_TARGET=FuzzRoundLifecycle` runs one; it refuses (exit 2) any name not in the list, and `make fuzz-guard-check` tests that refusal without running Go. A failing input is written to `<package>/testdata/fuzz/<FuzzName>/`; reproduce it with `go test -run=<FuzzName>/<file>` and fix the cause.
 - `make test-repeat`: the repeat (flakiness) runs the specs require, against PostgreSQL (needs a Docker daemon): `make test-repeat-admission` (`-count=5`, LBT-11 S-14), `make test-repeat-execution` (`-count=5`, LBT-12 E-17) and `make test-repeat-export` (`-count=3`, LBT-19).
-- `make audit ROUND_ID=<uuid>`: build `crashctl`, export the round from the database named by `ORVEX_DATABASE_URL` into a private temporary directory and verify it with `crashctl audit verify -expect-head` set to the head the export printed; `AUDIT_FORMAT=NAME` and `AUDIT_UNSETTLED=1` map to `-format` and `-unsettled`. A failed step names `crashctl`'s exit code (make reports `Error N` and exits 2). The `TestMakeAudit*` integration tests in `cmd/crashctl` cover it: run `make test-integration` when you change the target.
+- `make audit ROUND_ID=<uuid>`: build `crashctl`, export the round from the database named by `ORVEX_DATABASE_URL` into a private temporary directory and verify it with `crashctl audit verify -expect-head` set to the head the export printed; `AUDIT_FORMAT=NAME` and `AUDIT_UNSETTLED=1` map to `-format` and `-unsettled`. For a round whose secret config is not revealed, `AUDIT_UNSETTLED=1` needs the privileged path (LBT-21 K-10, K-13): an `orvex_secret_reader` role in `ORVEX_DATABASE_URL` and the keyring named by `ORVEX_SECRET_KEYRING_FILE`, from the environment or the make command line. A failed step names `crashctl`'s exit code (make reports `Error N` and exits 2). The `TestMakeAudit*` integration tests in `cmd/crashctl` cover it: run `make test-integration` when you change the target.
 - CI: `.github/workflows/ci.yml` runs on every push and pull request. `.github/workflows/nightly.yml` runs nightly and on manual dispatch: every fuzz target (5m each by default) and the three `make test-repeat-*` suites. Pin every GitHub Action to a full commit SHA, with its version in a trailing comment.
 - `make clean`: remove `bin/`.
 

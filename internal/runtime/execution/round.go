@@ -13,6 +13,7 @@ import (
 	"github.com/juano-morello/orvex/internal/game"
 	"github.com/juano-morello/orvex/internal/ledger"
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 )
 
 // NewRound is a round to create (E-16).
@@ -38,13 +39,15 @@ type Created struct {
 	Duplicate bool
 }
 
-// CreateRound writes the round, its secret config and secret close offset,
-// both heads, the genesis record, snapshot 0, the round's round_pool
-// account, the house account (if absent) and the genesis outbox message in
-// one transaction (E-16 and the LBT-12 engineer addendum). It is idempotent
+// CreateRound writes the round, its sealed secret config and secret close
+// offset, both heads, the genesis record, snapshot 0, the round's
+// round_pool account, the house account (if absent) and the genesis outbox
+// message in one transaction (E-16 and the LBT-12 engineer addendum). The
+// secret config is sealed once per call with Config.Keyring, before any
+// database call; config_secret stays NULL (LBT-21 K-8). It is idempotent
 // by round ID and genesis bytes: the identical round returns Duplicate, a
 // different one ErrRoundExists. Neither Created nor any error carries the
-// close offset.
+// close offset or the secret config.
 func (e *Executor) CreateRound(ctx context.Context, r NewRound) (Created, error) {
 	// 1. Validate before the database.
 	if r.RoundID == [16]byte{} {
@@ -83,6 +86,10 @@ func (e *Executor) CreateRound(ctx context.Context, r NewRound) (Created, error)
 	if err != nil {
 		return Created{}, fmt.Errorf("%w: close offset: %w", ErrInvalidRound, err)
 	}
+	sealed, err := e.cfg.Keyring.Seal(r.RoundID, secret)
+	if err != nil {
+		return Created{}, fmt.Errorf("%w: seal secret config: %w", ErrInternal, err)
+	}
 
 	// 2. Genesis.
 	genesis, err := chain.EncodeGenesis(chain.Genesis{
@@ -103,13 +110,14 @@ func (e *Executor) CreateRound(ctx context.Context, r NewRound) (Created, error)
 				return Created{}, contextError(ctx, err)
 			}
 		}
-		res, err := e.insertRound(ctx, r, re, secret, offset, out)
+		res, err := e.insertRound(ctx, r, re, sealed, offset, out)
 		switch res {
 		case createOK:
 			// 5. Seed the entry, unless this process already holds one.
 			en := e.lock(r.RoundID)
 			if !en.loaded && en.halt == nil {
 				en.rules = re
+				en.secret = secret
 				en.roundState = roundState{state: initial, processed: 0, head: out.Head, nextEventSequence: 1}
 				en.loaded = true
 			}
@@ -158,7 +166,7 @@ const (
 )
 
 // insertRound runs the round-creation transaction (E-16 step 3).
-func (e *Executor) insertRound(ctx context.Context, r NewRound, re rulesEntry, secret []byte, offset int64, c Created) (createResult, error) {
+func (e *Executor) insertRound(ctx context.Context, r NewRound, re rulesEntry, sealed sealing.Sealed, offset int64, c Created) (createResult, error) {
 	tx, err := e.db.BeginTx(ctx, postgres.ExecutionTxOptionsWithTimeouts(e.cfg.LockTimeout, e.cfg.IdleInTransactionTimeout))
 	if err != nil {
 		return createStatementResult(ctx, err), err
@@ -177,8 +185,10 @@ func (e *Executor) insertRound(ctx context.Context, r NewRound, re rulesEntry, s
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		r.RoundID, string(desc.Game), int64(desc.RulesVersion), int64(desc.SchemaVersion), int64(desc.StateVersion),
 		chain.Version, r.CreatedAtUnixMicro)
-	b.Queue(`INSERT INTO orvex.round_secrets (round_id, config_secret, close_offset_micros) VALUES ($1, $2, $3)`,
-		r.RoundID, secret, offset)
+	b.Queue(`INSERT INTO orvex.round_secrets
+		(round_id, secret_scheme, secret_key_id, secret_nonce, secret_ciphertext, close_offset_micros)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		r.RoundID, sealed.Scheme, sealed.KeyID, sealed.Nonce, sealed.Ciphertext, offset)
 	b.Queue(`INSERT INTO orvex.round_admission_heads (round_id) VALUES ($1)`, r.RoundID)
 	b.Queue(`INSERT INTO orvex.round_execution_heads (round_id) VALUES ($1)`, r.RoundID)
 	b.Queue(`INSERT INTO orvex.chain_records

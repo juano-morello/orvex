@@ -13,7 +13,9 @@ import (
 	"github.com/juano-morello/orvex/internal/audit/chain"
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
@@ -82,16 +84,33 @@ func requireCreatedRows(t *testing.T, pool *pgxpool.Pool, g chain.Genesis, creat
 	if game != "crash" || rules != 1 || schema != 1 || stateV != 1 || chainV != chain.Version || createdAt != g.CreatedAtUnixMicro {
 		t.Errorf("rounds row = %s %d %d %d %s %d", game, rules, schema, stateV, chainV, createdAt)
 	}
-	if err := pool.QueryRow(ctx, `SELECT config_secret, close_offset_micros FROM orvex.round_secrets WHERE round_id = $1`, round).
-		Scan(&secret, &closeOffset); err != nil {
+	var (
+		scheme, keyID     string
+		nonce, ciphertext []byte
+	)
+	if err := pool.QueryRow(ctx, `SELECT config_secret, secret_scheme, secret_key_id, secret_nonce, secret_ciphertext, close_offset_micros
+		FROM orvex.round_secrets WHERE round_id = $1`, round).
+		Scan(&secret, &scheme, &keyID, &nonce, &ciphertext, &closeOffset); err != nil {
 		t.Fatal(err)
 	}
 	_, wantSecret, err := v1.Adapter().EncodeConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(secret, wantSecret) {
-		t.Errorf("config_secret = %s, want %s", secret, wantSecret)
+	// LBT-21 K-5: only the sealed form, under the executor's keyring.
+	if secret != nil {
+		t.Errorf("config_secret = %s, want NULL", secret)
+	}
+	if scheme != sealing.Scheme || keyID != pgtest.KeyID || len(nonce) != sealing.NonceSize || len(ciphertext) != len(wantSecret)+sealing.TagSize {
+		t.Errorf("sealed form = %s %s nonce %d bytes ciphertext %d bytes, want %s %s 12 and %d",
+			scheme, keyID, len(nonce), len(ciphertext), sealing.Scheme, pgtest.KeyID, len(wantSecret)+sealing.TagSize)
+	}
+	opened, err := pgtest.Keyring().Open(round, sealing.Sealed{Scheme: scheme, KeyID: keyID, Nonce: nonce, Ciphertext: ciphertext})
+	if err != nil || !bytes.Equal(opened, wantSecret) {
+		t.Errorf("Open = %s, %v; want %s", opened, err, wantSecret)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM orvex.round_secret_reveals WHERE round_id = $1`, round); n != 0 {
+		t.Errorf("%d reveals of a new round, want none", n)
 	}
 	if closeOffset == nil || *closeOffset != offset {
 		t.Errorf("close_offset_micros = %v, want D = %d", closeOffset, offset)

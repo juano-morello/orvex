@@ -40,6 +40,7 @@ const usage = `usage: crashctl [-version]
        crashctl migrate status
 FILE "-" reads standard input (export: writes standard output).
 ORVEX_DATABASE_URL names the database for migrate and export (a PostgreSQL URL or key=value connection string).
+ORVEX_SECRET_KEYRING_FILE names the keyring audit export -unsettled reads to open a sealed, unrevealed round secret.
 `
 
 // Exit codes (spec section 7; 5 and 6: LBT-19 X-9).

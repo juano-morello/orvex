@@ -128,6 +128,68 @@ func TestTransitionReproducesGoldenRecords(t *testing.T) {
 	}
 }
 
+// TestComputeTransitionReveal: the reveal is set exactly on the record that
+// first makes the round final (LBT-21 K-6, R-6): worked-example's accepted
+// SettleRound at 21, never at 22 (final before and after), at a rejected
+// record or at an earlier record.
+func TestComputeTransitionReveal(t *testing.T) {
+	g := loadGolden(t, "worked-example")
+	initial, err := v1.Adapter().InitialState(g.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := roundState{state: initial, head: chain.LinkHash(g.lines[0]), nextEventSequence: 1}
+	var reveals, finals []uint64
+	for _, c := range g.cmds {
+		adm := admissionRow{sequence: c.Sequence, commandID: c.CommandID, effectiveTime: c.EffectiveTimeUnixMicro,
+			command: c.Payload, holds: holdsFor(t, c.Payload)}
+		tr, err := computeTransition(crashRules(), g.genesis.RoundID, st, adm, "golden")
+		if err != nil {
+			t.Fatalf("record %d: %v", c.Sequence, err)
+		}
+		if tr.reveal {
+			reveals = append(reveals, c.Sequence)
+			if tr.result.Rejected {
+				t.Errorf("record %d: a rejected record reveals", c.Sequence)
+			}
+		}
+		if tr.final {
+			finals = append(finals, c.Sequence)
+		}
+		st = roundState{state: tr.next, processed: c.Sequence, head: tr.hash, nextEventSequence: st.nextEventSequence + uint64(len(tr.events))}
+	}
+	if !slices.Equal(reveals, []uint64{21}) {
+		t.Errorf("reveals at %v, want [21]", reveals)
+	}
+	if !slices.Equal(finals, []uint64{21, 22}) {
+		t.Errorf("final at %v, want [21 22]", finals)
+	}
+
+	// A Final error for the state before the record fails closed.
+	adm := betAdmission(t, "alice", 100, []holdRow{{accountID: accountOf("alice"), amount: 100, player: "alice"}})
+	before := freshState(t, 1_000_000_000)
+	r := crashRules()
+	r.policy = finalErrPolicy{Policy: CrashV1Policy(), bad: before.state}
+	tr, err := computeTransition(r, testRound, before, adm, "golden")
+	var fc *FailClosedError
+	if tr != nil || !errors.As(err, &fc) || fc.Sequence != 1 || !errors.Is(err, ErrFailClosed) {
+		t.Errorf("Final error before the record: transition %v, err %v; want FailClosedError at 1", tr != nil, err)
+	}
+}
+
+// finalErrPolicy is the crash/v1 policy whose Final fails for state bad.
+type finalErrPolicy struct {
+	Policy
+	bad any
+}
+
+func (p finalErrPolicy) Final(s any) (bool, error) {
+	if reflect.DeepEqual(s, p.bad) {
+		return false, errors.New("boom")
+	}
+	return p.Policy.Final(s)
+}
+
 // failingAdapter is the crash/v1 adapter with a Decide that fails closed
 // at failDecide and an Evolve that always fails when failEvolve is set.
 type failingAdapter struct {

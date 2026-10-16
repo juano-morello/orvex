@@ -328,8 +328,8 @@ func newGenesis() chain.Genesis {
 	}
 }
 
-// insertRoundRows inserts the rounds row from g (after edit), its secret and
-// both heads at 0.
+// insertRoundRows inserts the rounds row from g (after edit), its sealed
+// secret and both heads at 0.
 func insertRoundRows(t *testing.T, db execer, g chain.Genesis, edit func(*roundRow)) {
 	t.Helper()
 	r := roundOf(g)
@@ -339,8 +339,9 @@ func insertRoundRows(t *testing.T, db execer, g chain.Genesis, edit func(*roundR
 	if err := insertRound(db, r); err != nil {
 		t.Fatalf("insert round: %v", err)
 	}
-	mustExec(t, db, `INSERT INTO orvex.round_secrets (round_id, config_secret) VALUES ($1, $2)`,
-		g.RoundID, []byte(`{"seed":"`+strings.Repeat("ab", 32)+`"}`))
+	s := pgtest.Seal(t, g.RoundID, []byte(`{"seed":"`+strings.Repeat("ab", 32)+`"}`))
+	mustExec(t, db, `INSERT INTO orvex.round_secrets (round_id, secret_scheme, secret_key_id, secret_nonce, secret_ciphertext)
+		VALUES ($1, $2, $3, $4, $5)`, g.RoundID, s.Scheme, s.KeyID, s.Nonce, s.Ciphertext)
 	mustExec(t, db, `INSERT INTO orvex.round_admission_heads (round_id) VALUES ($1)`, g.RoundID)
 	mustExec(t, db, `INSERT INTO orvex.round_execution_heads (round_id) VALUES ($1)`, g.RoundID)
 }
@@ -418,11 +419,112 @@ func TestRoundSecretsAppendOnly(t *testing.T) {
 	t.Parallel()
 	pool := migrated(t)
 	l := loadGolden(t, pool, "worked-example")
-	requireCode(t, exec(pool, `UPDATE orvex.round_secrets SET config_secret = '\x7b7d'::bytea WHERE round_id = $1`, l.RoundID), postgres.CodeAppendOnly, "")
+	requireCode(t, exec(pool, `UPDATE orvex.round_secrets SET secret_ciphertext = '\x00'::bytea WHERE round_id = $1`, l.RoundID), postgres.CodeAppendOnly, "")
 	requireCode(t, exec(pool, `DELETE FROM orvex.round_secrets WHERE round_id = $1`, l.RoundID), postgres.CodeAppendOnly, "")
-	requireCode(t, exec(pool, `TRUNCATE orvex.round_secrets`), postgres.CodeAppendOnly, "")
+	// round_secret_reveals references round_secrets, so a plain TRUNCATE
+	// fails with 0A000 before any trigger runs.
+	requireTruncateRejected(t, pool, "round_secrets")
 	if n := count(t, pool, "SELECT count(*) FROM orvex.round_secrets"); n != 1 {
 		t.Errorf("round_secrets holds %d rows, want 1", n)
+	}
+}
+
+// TestRoundSecretsSealedForm: from 0010 a round_secrets row holds exactly
+// one form, never new plaintext, and a sealed form of the K-5 shape (LBT-21).
+func TestRoundSecretsSealedForm(t *testing.T) {
+	t.Parallel()
+	pool := migrated(t)
+	secret := []byte(`{"seed":"` + strings.Repeat("ab", 32) + `"}`)
+	type row struct {
+		plain             []byte
+		scheme, keyID     *string
+		nonce, ciphertext []byte
+	}
+	sealedRow := func(id [16]byte) row {
+		s := pgtest.Seal(t, id, secret)
+		return row{scheme: &s.Scheme, keyID: &s.KeyID, nonce: s.Nonce, ciphertext: s.Ciphertext}
+	}
+	insert := func(id [16]byte, r row) error {
+		return exec(pool, `INSERT INTO orvex.round_secrets
+			(round_id, config_secret, secret_scheme, secret_key_id, secret_nonce, secret_ciphertext)
+			VALUES ($1, $2, $3, $4, $5, $6)`, id, r.plain, r.scheme, r.keyID, r.nonce, r.ciphertext)
+	}
+	newRound := func() [16]byte {
+		g := newGenesis()
+		if err := insertRound(pool, roundOf(g)); err != nil {
+			t.Fatalf("insert round: %v", err)
+		}
+		return g.RoundID
+	}
+	cases := []struct {
+		name       string
+		edit       func(*row)
+		constraint string
+	}{
+		{"plaintext only", func(r *row) { *r = row{plain: secret} }, "round_secrets_sealed_check"},
+		{"both forms", func(r *row) { r.plain = secret }, "round_secrets_form_check"},
+		{"no form", func(r *row) { *r = row{} }, "round_secrets_form_check"},
+		{"scheme v2", func(r *row) { r.scheme = new("aes-256-gcm/v2") }, "round_secrets_sealed_shape_check"},
+		{"key id Bad", func(r *row) { r.keyID = new("Bad") }, "round_secrets_sealed_shape_check"},
+		{"11-byte nonce", func(r *row) { r.nonce = r.nonce[:11] }, "round_secrets_sealed_shape_check"},
+		{"17-byte ciphertext", func(r *row) { r.ciphertext = r.ciphertext[:17] }, "round_secrets_sealed_shape_check"},
+		{"ciphertext without nonce", func(r *row) { r.nonce = nil }, "round_secrets_sealed_shape_check"},
+		{"ciphertext without scheme", func(r *row) { r.scheme = nil }, "round_secrets_sealed_shape_check"},
+		{"ciphertext without key id", func(r *row) { r.keyID = nil }, "round_secrets_sealed_shape_check"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			id := newRound()
+			r := sealedRow(id)
+			c.edit(&r)
+			requireCode(t, insert(id, r), codeCheckViolation, c.constraint)
+		})
+	}
+	id := newRound()
+	if err := insert(id, sealedRow(id)); err != nil {
+		t.Fatalf("valid sealed row: %v", err)
+	}
+}
+
+// TestRoundSecretReveals: a reveal names an accepted command record of its
+// own round, at most one per round, and is append-only (LBT-21 K-6).
+func TestRoundSecretReveals(t *testing.T) {
+	t.Parallel()
+	pool := migrated(t)
+	worked := loadGolden(t, pool, "worked-example")
+	inProgress := loadGolden(t, pool, "in-progress")
+	if !worked.Revealed || worked.RevealSequence != 21 || inProgress.Revealed {
+		t.Fatalf("loaded reveals: worked-example %v at %d, in-progress %v; want 21 and none",
+			worked.Revealed, worked.RevealSequence, inProgress.Revealed)
+	}
+	reveal := func(id [16]byte, seq int64) error {
+		return exec(pool, `INSERT INTO orvex.round_secret_reveals (round_id, sequence, config_secret) VALUES ($1, $2, $3)`,
+			id, seq, []byte(`{"seed":"`+strings.Repeat("cd", 32)+`"}`))
+	}
+	requireCode(t, reveal(inProgress.RoundID, 0), codeCheckViolation, "round_secret_reveals_sequence_check")
+	// Record 22 is a rejected PlaceBet: the BEFORE trigger fires ahead of
+	// the primary key.
+	requireCode(t, reveal(worked.RoundID, 22), postgres.CodeSecretReveal, "")
+	requireCode(t, reveal(inProgress.RoundID, 99), codeFKViolation, "round_secret_reveals_record_fkey")
+	requireCode(t, reveal(worked.RoundID, 21), codeUniqueViolation, "round_secret_reveals_pkey")
+
+	requireCode(t, exec(pool, `UPDATE orvex.round_secret_reveals SET sequence = 21 WHERE round_id = $1`, worked.RoundID), postgres.CodeAppendOnly, "")
+	requireCode(t, exec(pool, `DELETE FROM orvex.round_secret_reveals WHERE round_id = $1`, worked.RoundID), postgres.CodeAppendOnly, "")
+	requireTruncateRejected(t, pool, "round_secret_reveals")
+
+	// An accepted record commits.
+	if err := reveal(inProgress.RoundID, 1); err != nil {
+		t.Fatalf("reveal at an accepted record: %v", err)
+	}
+
+	// A round without a round_secrets row.
+	empty := loadGolden(t, pool, "empty-round")
+	pgtest.ReplicaExec(t, pool, `DELETE FROM orvex.round_secret_reveals WHERE round_id = $1`, empty.RoundID)
+	pgtest.ReplicaExec(t, pool, `DELETE FROM orvex.round_secrets WHERE round_id = $1`, empty.RoundID)
+	requireCode(t, reveal(empty.RoundID, 1), codeFKViolation, "round_secret_reveals_secret_fkey")
+
+	if n := count(t, pool, "SELECT count(*) FROM orvex.round_secret_reveals"); n != 2 {
+		t.Errorf("round_secret_reveals holds %d rows, want 2", n)
 	}
 }
 
@@ -1400,8 +1502,8 @@ func TestTruncateRejectedEverywhere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tables) != 14 {
-		t.Errorf("orvex holds %d tables, want 14", len(tables))
+	if len(tables) != 15 {
+		t.Errorf("orvex holds %d tables, want 15", len(tables))
 	}
 	for _, table := range tables {
 		t.Run(table, func(t *testing.T) {

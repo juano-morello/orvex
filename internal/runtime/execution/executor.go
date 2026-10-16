@@ -15,6 +15,7 @@ import (
 	"github.com/juano-morello/orvex/internal/buildinfo"
 	"github.com/juano-morello/orvex/internal/game"
 	"github.com/juano-morello/orvex/internal/ledger"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 )
 
 // DB is what the Executor needs; *pgxpool.Pool implements it.
@@ -39,6 +40,9 @@ type Config struct {
 	// MaxAttempts bounds the attempts of one ExecuteNext or CreateRound
 	// call; retries and reloads count. In [1, 10].
 	MaxAttempts int
+	// Keyring seals each new round's secret config and opens sealed
+	// secrets at cold load (LBT-21 K-8). Required.
+	Keyring *sealing.Keyring
 }
 
 // Config bounds.
@@ -62,7 +66,8 @@ const (
 
 var engineBuildPattern = regexp.MustCompile(`^[!-~]{1,128}$`)
 
-// DefaultConfig returns {buildinfo.Version, 3s, 1s, 3}.
+// DefaultConfig returns {buildinfo.Version, 3s, 1s, 3} with no Keyring;
+// callers set Keyring, which New requires.
 func DefaultConfig() Config {
 	return Config{
 		EngineBuild:              buildinfo.Version,
@@ -119,6 +124,9 @@ type entry struct {
 	roundState
 	// playerAccounts memoizes player ID -> account ID (E-4).
 	playerAccounts map[string][16]byte
+	// secret is the round's plaintext secret config bytes, kept next to
+	// the state; the record that finalizes the round reveals it (K-8).
+	secret []byte
 	// halt is the error a halted round returns until Forget (E-14).
 	halt error
 	// pending is the admission read for processed + 1, kept across
@@ -138,6 +146,9 @@ func New(db DB, reg *game.Registry, cfg Config, policies ...Policy) (*Executor, 
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
+	}
+	if cfg.Keyring == nil {
+		return nil, fmt.Errorf("%w: nil Keyring", ErrInvalidConfig)
 	}
 	if len(policies) == 0 {
 		return nil, fmt.Errorf("%w: no policies", ErrInvalidConfig)

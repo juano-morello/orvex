@@ -151,7 +151,7 @@ func TestEmbeddedMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadMigrations(migrations.FS): %v", err)
 	}
-	want := []string{"foundation", "rounds_admissions", "chain_execution", "snapshots", "ledger", "outbox", "admission_window", "execution_ledger", "close_bound"}
+	want := []string{"foundation", "rounds_admissions", "chain_execution", "snapshots", "ledger", "outbox", "admission_window", "execution_ledger", "close_bound", "sealed_secrets"}
 	if len(ms) < len(want) {
 		t.Fatalf("got %d migrations, want at least %d", len(ms), len(want))
 	}
