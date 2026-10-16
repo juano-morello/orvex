@@ -1,4 +1,4 @@
-# Orvex build orchestration (ADR-007). Add targets (proto, dev, audit) only
+# Orvex build orchestration (ADR-007). Add targets (proto, dev) only
 # when they become meaningful.
 
 GO ?= go
@@ -36,7 +36,7 @@ REPEAT_TIMEOUT ?= 60m
 
 BUILD_TARGETS := $(addprefix build-,$(BINARIES))
 
-.PHONY: all build $(BUILD_TARGETS) test test-integration test-repeat test-repeat-admission test-repeat-execution test-repeat-export lint golden-check fuzz fuzz-one fuzz-list fuzz-guard-check clean
+.PHONY: all build $(BUILD_TARGETS) test test-integration test-repeat test-repeat-admission test-repeat-execution test-repeat-export lint golden-check audit fuzz fuzz-one fuzz-list fuzz-guard-check clean
 
 all: build
 
@@ -77,6 +77,42 @@ golden-check:
 	$(PYTHON) $(GOLDEN_GEN) --check
 	$(PYTHON) $(AUDIT_GOLDEN_GEN) --check
 	$(PYTHON) $(AUDIT_GOLDEN_V2_GEN) --check
+
+# make audit ROUND_ID=<uuid> (ADR-007, LBT-25): build crashctl, export the
+# round from the database named by ORVEX_DATABASE_URL with crashctl audit
+# export into a new private directory (mktemp -d, mode 0700; crashctl creates
+# the file with mode 0600), then verify the file with crashctl audit verify
+# -expect-head set to the head the export printed. The directory is removed
+# on every exit. AUDIT_FORMAT=NAME passes -format NAME and AUDIT_UNSETTLED=1
+# passes -unsettled. ROUND_ID and ORVEX_DATABASE_URL are checked before the
+# build. A failed crashctl step exits with crashctl's code, which make reports
+# as "Error N"; make itself then exits 2, as for any failed recipe. The
+# Makefile never expands ORVEX_DATABASE_URL: crashctl reads it from the
+# environment, so a "$" in it survives.
+ROUND_ID ?=
+AUDIT_FORMAT ?=
+AUDIT_UNSETTLED ?=
+export ROUND_ID AUDIT_FORMAT AUDIT_UNSETTLED
+
+audit:
+	@[ -n "$$ROUND_ID" ] || { echo "audit: ROUND_ID is not set; usage: make audit ROUND_ID=<uuid> [AUDIT_FORMAT=NAME] [AUDIT_UNSETTLED=1]" >&2; exit 2; }
+	@[ -n "$$ORVEX_DATABASE_URL" ] || { echo "audit: ORVEX_DATABASE_URL is not set; it names the database to export from" >&2; exit 2; }
+	@case "$$AUDIT_UNSETTLED" in ''|1) ;; *) echo "audit: AUDIT_UNSETTLED must be 1 or empty, got '$$AUDIT_UNSETTLED'" >&2; exit 2 ;; esac
+	@$(MAKE) --no-print-directory build-crashctl
+	@dir=$$(mktemp -d "$${TMPDIR:-/tmp}/orvex-audit.XXXXXXXX") || { echo "audit: cannot create a temporary directory" >&2; exit 4; }; \
+	trap 'rm -rf "$$dir"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
+	file="$$dir/round.jsonl"; \
+	set --; \
+	if [ -n "$$AUDIT_UNSETTLED" ]; then set -- "$$@" -unsettled; fi; \
+	if [ -n "$$AUDIT_FORMAT" ]; then set -- "$$@" -format "$$AUDIT_FORMAT"; fi; \
+	report=$$("$(BIN_DIR)/crashctl" audit export "$$@" "$$ROUND_ID" "$$file"); rc=$$?; \
+	[ -z "$$report" ] || printf '%s\n' "$$report"; \
+	if [ "$$rc" -ne 0 ]; then echo "audit: crashctl audit export failed with exit code $$rc" >&2; exit "$$rc"; fi; \
+	expect=$$(printf '%s\n' "$$report" | sed -n 's/^records [0-9][0-9]* of [0-9][0-9]* head \([0-9a-f]\{64\}\)$$/\1/p'); \
+	if [ -z "$$expect" ]; then echo "audit: crashctl audit export printed no head" >&2; exit 1; fi; \
+	"$(BIN_DIR)/crashctl" audit verify -expect-head "$$expect" "$$file"; rc=$$?; \
+	if [ "$$rc" -ne 0 ]; then echo "audit: crashctl audit verify failed with exit code $$rc" >&2; exit "$$rc"; fi; \
+	echo "audit: round $$ROUND_ID verified, head $$expect"
 
 fuzz:
 	$(if $(FUZZ_TARGETS),,$(error no fuzz targets found under cmd/ or internal/))
