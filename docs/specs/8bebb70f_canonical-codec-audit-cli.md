@@ -3,7 +3,7 @@
 Status: **APPROVED** on 2026-10-14. The engineer approved decisions A-1 to A-20 as written, with no
 edits, and accepted every point in section 2, including the ADR-007 layout deviation and the LBT-6
 contract change. Section 0 described the planning run and no longer applies; implementation follows
-section 10, as planned in `docs/specs/8bebb70f_audit-codec-implementation_v2.md`.
+section 10, as planned in `docs/specs/archive/8bebb70f_audit-codec-implementation_v2.md`.
 
 - Linear: [LBT-9](https://linear.app/lbtworks/issue/LBT-9/build-canonical-event-codec-and-audit-replay-cli),
   milestone M1 · Deterministic Core, blocks LBT-10.

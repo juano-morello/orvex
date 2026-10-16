@@ -12,7 +12,7 @@ The repository now has a single Go module (`github.com/juano-morello/orvex`, `go
 - `docs/adr/0001` to `0007`: one file per ADR, mirroring the source text.
 - `AGENTS.md`: ADR table with links, which ADRs to read per area, the rule to flag ADR conflicts explicitly (citing ADR number and section), repository conventions and commands.
 - `README.md`: layout and development commands.
-- `specs/ebb8f044_go-module-scaffold.md`: the build spec.
+- `docs/specs/ebb8f044_go-module-scaffold.md`: the build spec.
 
 ## Verify
 ```

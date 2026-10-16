@@ -143,7 +143,7 @@ Rules (spec §6):
    - `23505` on `admissions_command_id_key` in A: a duplicate; return the original admission;
    - `23514` on `ledger_accounts_floor_check`: insufficient available credits;
    - any other `23xxx` or `OX` code: a bug; fail closed and do not retry.
-5. Effective time in A: after the lock, `(EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint`
+5. Effective time in A: after the lock, `orvex.unix_micro(clock_timestamp())`
    (`orvex.unix_micro`, clamped to the previous admission's time, §12). Never `now()`, which is the
    transaction start time (ADR-002).
 6. B commits only when its compare-and-set affected exactly one row. The deferred checks are a

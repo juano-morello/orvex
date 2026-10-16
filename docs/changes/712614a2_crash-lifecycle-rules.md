@@ -22,7 +22,7 @@ One bet per player; no double cash-out; cash-out only strictly after `T0` and st
 No ADR is contradicted. State hashing is left to LBT-9.
 
 ## Where
-`round.go` (types, config, `InitialState`, constants), `commands.go`, `events.go`, `decide.go`, `evolve.go`, `projection.go`, all in `internal/game/crash/v1/`. Design plan: `specs/712614a2_crash-lifecycle-rules.md`. `README.md` status and layout updated. `params_test.go` `TestNoIOImports` now also covers the new files.
+`round.go` (types, config, `InitialState`, constants), `commands.go`, `events.go`, `decide.go`, `evolve.go`, `projection.go`, all in `internal/game/crash/v1/`. Design plan: `docs/specs/712614a2_crash-lifecycle-rules.md`. `README.md` status and layout updated. `params_test.go` `TestNoIOImports` now also covers the new files.
 
 ## Verify
 Tests: `decide_test.go` (acceptance cases), `evolve_test.go`, `projection_test.go`, `round_test.go`, `purity_test.go` (determinism, no input mutation), `round_fuzz_test.go`.

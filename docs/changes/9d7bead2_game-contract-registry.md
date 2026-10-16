@@ -18,7 +18,7 @@ New package `internal/game` implements the ADR-003 game contract and a versioned
 - `internal/game/contract_test.go`: purity checks run on the typed game and through the adapter (determinism, no caller-state mutation including spare slice capacity), negative controls proving the checks catch leaky games, concurrent use, and a compile-time check that `Input` is comparable.
 - `internal/game/registry_test.go`: adapter and registry behavior.
 
-A design spec is at `specs/9d7bead2_game-contract-registry.md`.
+A design spec is at `docs/specs/9d7bead2_game-contract-registry.md`.
 
 ## Verify
 `make test`, `make lint`, `make build`; or `go test -race ./internal/game/...`.

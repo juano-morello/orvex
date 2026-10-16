@@ -1,7 +1,7 @@
 # Crash v1 math spec freeze and golden vectors (LBT-7)
 
 ## What changed
-The Crash v1 arithmetic is now frozen in code and in committed golden vectors. The spec `specs/e96d124d_crash-v1-math-spec.md` is marked approved (decisions D-1 to D-14). `specs/e96d124d_crash-v1-implementation.md` is also added.
+The Crash v1 arithmetic is now frozen in code and in committed golden vectors. The spec `docs/specs/e96d124d_crash-v1-math-spec.md` is marked approved (decisions D-1 to D-14). `docs/specs/e96d124d_crash-v1-implementation.md` is also added.
 
 Package `internal/game/crash/v1` (package `v1`, rules version string `crash/v1`) holds the pure math. It does no I/O, and the Crash lifecycle, commands, events and Decide/Evolve (LBT-8) are not part of it.
 
