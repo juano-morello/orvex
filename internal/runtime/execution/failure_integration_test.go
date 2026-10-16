@@ -17,6 +17,7 @@ import (
 	"github.com/juano-morello/orvex/internal/ledger"
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
@@ -26,7 +27,7 @@ func betRound(t *testing.T, pool *pgxpool.Pool, x *execution.Executor) [16]byte 
 	t.Helper()
 	round := newRoundID()
 	createRound(t, x, round, testSeed, 1_000_000_000, 100)
-	fundPlayer(t, pool, "alice", 100)
+	roundtest.FundPlayer(t, pool, "alice", 100)
 	seed(t, pool, round, 1, placeBet("alice", 100), 1_000)
 	seed(t, pool, round, 2, startRound, 2_000)
 	return round
@@ -71,7 +72,7 @@ func TestInjectedFailureLeavesNoPartialEffects(t *testing.T) {
 		t.Run(table, func(t *testing.T) {
 			_, pool := newDB(t)
 			installFaults(t, pool)
-			x := newExecutor(t, pool, nil, nil)
+			x := roundtest.NewExecutor(t, pool, nil, nil)
 			round := betRound(t, pool, x)
 			after := oneBet
 			if table == "round_snapshots" {
@@ -99,7 +100,7 @@ func TestInjectedFailureLeavesNoPartialEffects(t *testing.T) {
 func TestLedgerFailureRollsBack(t *testing.T) {
 	_, pool := newDB(t)
 	installFaults(t, pool)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := betRound(t, pool, x)
 	before := effects(t, pool, round)
 	enableFault(t, pool, "ledger_postings", "23514", "ledger_accounts_floor_check", 1_000_000)
@@ -113,7 +114,7 @@ func TestLedgerFailureRollsBack(t *testing.T) {
 func TestLedgerFailureRetried(t *testing.T) {
 	_, pool := newDB(t)
 	installFaults(t, pool)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := betRound(t, pool, x)
 	before := effects(t, pool, round)
 	enableFault(t, pool, "ledger_postings", "40P01", "", 1)
@@ -130,7 +131,7 @@ func TestLedgerFailureRetried(t *testing.T) {
 func TestCommitFailureRollsBack(t *testing.T) {
 	_, pool := newDB(t)
 	installFaults(t, pool)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := betRound(t, pool, x)
 	before := effects(t, pool, round)
 	enableCommitFault(t, pool, "23000")
@@ -142,7 +143,7 @@ func TestCommitFailureRollsBack(t *testing.T) {
 
 func TestStaleFencingTokenBeforeStep(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := betRound(t, pool, x)
 	before := effects(t, pool, round)
 	token := takeover(t, pool, round, "engine-b")
@@ -166,7 +167,7 @@ func TestStaleFencingTokenBeforeStep(t *testing.T) {
 func TestTakeoverWaitsForCommit(t *testing.T) {
 	_, pool := newDB(t)
 	fdb := &faultDB{pool: pool}
-	x := newExecutor(t, fdb, nil, nil)
+	x := roundtest.NewExecutor(t, fdb, nil, nil)
 	round := betRound(t, pool, x)
 
 	paused, release := make(chan struct{}), make(chan struct{})
@@ -228,7 +229,7 @@ func takeoverConn(conn *pgx.Conn, round [16]byte) int64 {
 func TestTakeoverBeforeCompareAndSet(t *testing.T) {
 	_, pool := newDB(t)
 	fdb := &faultDB{pool: pool}
-	x := newExecutor(t, fdb, nil, nil)
+	x := roundtest.NewExecutor(t, fdb, nil, nil)
 	round := betRound(t, pool, x)
 	before := effects(t, pool, round)
 	var once sync.Once
@@ -271,7 +272,7 @@ func TestCrashBeforeCommit(t *testing.T) {
 	t.Run("same call retries", func(t *testing.T) {
 		_, pool := newDB(t)
 		fdb := &faultDB{pool: pool}
-		x := newExecutor(t, fdb, nil, nil)
+		x := roundtest.NewExecutor(t, fdb, nil, nil)
 		round := betRound(t, pool, x)
 		before := effects(t, pool, round)
 		terminateBeforeCommit(t, fdb, pool)
@@ -284,7 +285,7 @@ func TestCrashBeforeCommit(t *testing.T) {
 	t.Run("abandoned instance", func(t *testing.T) {
 		_, pool := newDB(t)
 		fdb := &faultDB{pool: pool}
-		x := newExecutor(t, fdb, func(c *execution.Config) { c.MaxAttempts = 1 }, nil)
+		x := roundtest.NewExecutor(t, fdb, func(c *execution.Config) { c.MaxAttempts = 1 }, nil)
 		round := betRound(t, pool, x)
 		before := effects(t, pool, round)
 		terminateBeforeCommit(t, fdb, pool)
@@ -293,7 +294,7 @@ func TestCrashBeforeCommit(t *testing.T) {
 		}
 		requireEffects(t, effects(t, pool, round), before)
 		// A new instance cold-loads and executes 1 once.
-		y := newExecutor(t, pool, nil, nil)
+		y := roundtest.NewExecutor(t, pool, nil, nil)
 		out, err := y.ExecuteNext(ctx, lease(round))
 		if err != nil || out.Sequence != 1 || out.Adopted {
 			t.Fatalf("new instance = %+v, %v", out, err)
@@ -309,7 +310,7 @@ func TestCrashAfterCommit(t *testing.T) {
 		t.Helper()
 		_, pool := newDB(t)
 		fdb := &faultDB{pool: pool}
-		x := newExecutor(t, fdb, func(c *execution.Config) { c.MaxAttempts = maxAttempts }, nil)
+		x := roundtest.NewExecutor(t, fdb, func(c *execution.Config) { c.MaxAttempts = maxAttempts }, nil)
 		round := betRound(t, pool, x)
 		before := effects(t, pool, round)
 		var once sync.Once
@@ -340,7 +341,7 @@ func TestCrashAfterCommit(t *testing.T) {
 			t.Fatalf("crashing instance = %v, want ErrUnavailable", err)
 		}
 		requireEffects(t, effects(t, pool, round), oneBet(before, round))
-		y := newExecutor(t, pool, nil, nil)
+		y := roundtest.NewExecutor(t, pool, nil, nil)
 		out, err := y.ExecuteNext(ctx, lease(round))
 		if err != nil || !out.Executed || out.Sequence != 2 {
 			t.Fatalf("new instance = %+v, %v; want sequence 2, never 1 again", out, err)
@@ -353,32 +354,32 @@ func TestCrashAfterCommit(t *testing.T) {
 
 func TestDuplicatePayoutImpossible(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
-	y := newExecutor(t, pool, func(c *execution.Config) { c.EngineBuild = "other" }, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
+	y := roundtest.NewExecutor(t, pool, func(c *execution.Config) { c.EngineBuild = "other" }, nil)
 
 	// 1. The in-progress golden up to admission 2; Y caches the state at 2;
 	// X executes alice's cash-out; Y reloads and finds nothing pending.
-	gr := seedGolden(t, pool, x, "in-progress", 2)
-	if n, err := x.Drain(ctx, lease(gr.roundID), 10); err != nil || n != 2 {
+	gr := roundtest.SeedGolden(t, pool, x, goldenPath("in-progress"), 2)
+	if n, err := x.Drain(ctx, lease(gr.RoundID), 10); err != nil || n != 2 {
 		t.Fatalf("X Drain = %d, %v", n, err)
 	}
-	if out, err := y.ExecuteNext(ctx, lease(gr.roundID)); err != nil || out.Executed {
+	if out, err := y.ExecuteNext(ctx, lease(gr.RoundID)); err != nil || out.Executed {
 		t.Fatalf("Y idle = %+v, %v", out, err)
 	}
-	seedGoldenAdmissions(t, pool, gr, 3, 3)
-	if out, err := x.ExecuteNext(ctx, lease(gr.roundID)); err != nil || out.Sequence != 3 || out.Result.Rejected {
+	roundtest.SeedGoldenAdmissions(t, pool, gr, 3, 3)
+	if out, err := x.ExecuteNext(ctx, lease(gr.RoundID)); err != nil || out.Sequence != 3 || out.Result.Rejected {
 		t.Fatalf("X cash-out = %+v, %v", out, err)
 	}
-	if out, err := y.ExecuteNext(ctx, lease(gr.roundID)); err != nil || out.Executed {
+	if out, err := y.ExecuteNext(ctx, lease(gr.RoundID)); err != nil || out.Executed {
 		t.Fatalf("Y after X's cash-out = %+v, %v; want a reload, then nothing pending", out, err)
 	}
 	payouts := func() int64 {
-		return count(t, pool, `SELECT count(*) FROM orvex.ledger_transactions WHERE round_id = $1 AND kind = 'crash_cash_out'`, gr.roundID)
+		return count(t, pool, `SELECT count(*) FROM orvex.ledger_transactions WHERE round_id = $1 AND kind = 'crash_cash_out'`, gr.RoundID)
 	}
 	if n := payouts(); n != 1 {
 		t.Errorf("%d cash-out transactions, want 1", n)
 	}
-	if n := count(t, pool, `SELECT count(*) FROM orvex.ledger_postings WHERE round_id = $1 AND event_sequence = 3`, gr.roundID); n != 1 {
+	if n := count(t, pool, `SELECT count(*) FROM orvex.ledger_postings WHERE round_id = $1 AND event_sequence = 3`, gr.RoundID); n != 1 {
 		t.Errorf("%d postings for event 3, want 1", n)
 	}
 	alice := playerAccount(t, pool, "alice")
@@ -387,9 +388,9 @@ func TestDuplicatePayoutImpossible(t *testing.T) {
 	}
 
 	// 2. A second cash-out is rejected and posts nothing.
-	third := gr.cmds[2]
-	seedAdmission(t, pool, gr.roundID, cmdID(4), encode(t, cashOut("alice")), third.EffectiveTimeUnixMicro, nil)
-	out, err := x.ExecuteNext(ctx, lease(gr.roundID))
+	third := gr.Commands[2]
+	roundtest.SeedAdmission(t, pool, gr.RoundID, cmdID(4), encode(t, cashOut("alice")), third.EffectiveTimeUnixMicro, nil)
+	out, err := x.ExecuteNext(ctx, lease(gr.RoundID))
 	if err != nil || !out.Result.Rejected || out.Result.Reason != string(v1.ReasonAlreadyCashedOut) {
 		t.Fatalf("second cash-out = %+v, %v; want rejected already_cashed_out", out, err)
 	}
@@ -398,39 +399,39 @@ func TestDuplicatePayoutImpossible(t *testing.T) {
 	}
 
 	// 3. The database refuses a second payout on its own.
-	pot := ledger.RoundAccountID(gr.roundID)
+	pot := ledger.RoundAccountID(gr.RoundID)
 	var aliceID [16]byte
 	if err := pool.QueryRow(ctx, `SELECT account_id FROM orvex.ledger_accounts WHERE player_id = 'alice'`).Scan(&aliceID); err != nil {
 		t.Fatal(err)
 	}
 	requireStmtError(t, pool, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO orvex.ledger_transactions (transaction_id, kind, round_id, sequence) VALUES ($1, 'crash_cash_out', $2, 3)`,
-			newRoundID(), gr.roundID)
+			newRoundID(), gr.RoundID)
 		return err
 	}, "23505", "ledger_transactions_record_key")
 	requireStmtError(t, pool, func(tx pgx.Tx) error {
 		id := newRoundID()
 		if _, err := tx.Exec(ctx, `INSERT INTO orvex.ledger_transactions (transaction_id, kind, round_id, sequence) VALUES ($1, 'crash_cash_out', $2, 4)`,
-			id, gr.roundID); err != nil {
+			id, gr.RoundID); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO orvex.ledger_postings
 			(transaction_id, posting_index, debit_account_id, credit_account_id, amount, round_id, event_sequence)
-			VALUES ($1, 0, $2, $3, 3320, $4, 3)`, id, pot, aliceID, gr.roundID)
+			VALUES ($1, 0, $2, $3, 3320, $4, 3)`, id, pot, aliceID, gr.RoundID)
 		return err
 	}, "23505", "ledger_postings_event_key")
 	requireStmtError(t, pool, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO orvex.ledger_hold_releases (round_id, sequence, account_id) VALUES ($1, 1, $2)`, gr.roundID, aliceID)
+		_, err := tx.Exec(ctx, `INSERT INTO orvex.ledger_hold_releases (round_id, sequence, account_id) VALUES ($1, 1, $2)`, gr.RoundID, aliceID)
 		return err
 	}, "23505", "ledger_hold_releases_pkey")
 
 	// 4. Two instances with the same token race on a fresh round's
 	// cash-out: one posting.
 	round := newRoundID()
-	a := newExecutor(t, pool, nil, nil)
-	b := newExecutor(t, pool, nil, nil)
+	a := roundtest.NewExecutor(t, pool, nil, nil)
+	b := roundtest.NewExecutor(t, pool, nil, nil)
 	createRound(t, a, round, seedWithDeadline(t, round, 30_000_000_000, 150_000_000_000), 1_000_000_000, 100)
-	fundPlayer(t, pool, "zara", 100)
+	roundtest.FundPlayer(t, pool, "zara", 100)
 	seed(t, pool, round, 1, placeBet("zara", 100), 1_000)
 	seed(t, pool, round, 2, startRound, 2_000)
 	if n, err := a.Drain(ctx, lease(round), 10); err != nil || n != 2 {
@@ -498,7 +499,7 @@ func requireStmtError(t *testing.T, db *pgxpool.Pool, fn func(tx pgx.Tx) error, 
 func TestContextEndedKeepsEntry(t *testing.T) {
 	_, pool := newDB(t)
 	fdb := &faultDB{pool: pool}
-	x := newExecutor(t, fdb, nil, nil)
+	x := roundtest.NewExecutor(t, fdb, nil, nil)
 	round := betRound(t, pool, x)
 	before := effects(t, pool, round)
 

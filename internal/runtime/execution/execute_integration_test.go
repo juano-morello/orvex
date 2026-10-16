@@ -15,6 +15,7 @@ import (
 	"github.com/juano-morello/orvex/internal/audit/verification"
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
@@ -72,14 +73,14 @@ func TestExecuteReproducesGoldenHistories(t *testing.T) {
 	for name, want := range goldenExpectations {
 		t.Run(name, func(t *testing.T) {
 			_, pool := newDB(t)
-			x := newExecutor(t, pool, nil, nil)
-			gr := seedGolden(t, pool, x, name, 0)
-			n, err := x.Drain(ctx, lease(gr.roundID), 100)
+			x := roundtest.NewExecutor(t, pool, nil, nil)
+			gr := roundtest.SeedGolden(t, pool, x, goldenPath(name), 0)
+			n, err := x.Drain(ctx, lease(gr.RoundID), 100)
 			if err != nil {
 				t.Fatalf("Drain: %v", err)
 			}
-			if n != len(gr.cmds) {
-				t.Fatalf("Drain executed %d, want %d", n, len(gr.cmds))
+			if n != len(gr.Commands) {
+				t.Fatalf("Drain executed %d, want %d", n, len(gr.Commands))
 			}
 			requireGoldenRecords(t, pool, gr)
 			requireGoldenLedger(t, pool, gr, want)
@@ -90,9 +91,9 @@ func TestExecuteReproducesGoldenHistories(t *testing.T) {
 
 // requireGoldenRecords compares records, results and events with the
 // golden history.
-func requireGoldenRecords(t *testing.T, pool *pgxpool.Pool, gr goldenRound) {
+func requireGoldenRecords(t *testing.T, pool *pgxpool.Pool, gr roundtest.Golden) {
 	t.Helper()
-	rows, err := pool.Query(ctx, `SELECT sequence, record FROM orvex.chain_records WHERE round_id = $1 ORDER BY sequence`, gr.roundID)
+	rows, err := pool.Query(ctx, `SELECT sequence, record FROM orvex.chain_records WHERE round_id = $1 ORDER BY sequence`, gr.RoundID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,15 +105,15 @@ func requireGoldenRecords(t *testing.T, pool *pgxpool.Pool, gr goldenRound) {
 		if err := rows.Scan(&seq, &rec); err != nil {
 			t.Fatal(err)
 		}
-		if seq != int64(i) || i >= len(gr.lines) || !bytes.Equal(rec, gr.lines[i]) {
-			t.Errorf("record %d differs from the golden line:\n got %s\nwant %s", seq, rec, gr.lines[min(i, len(gr.lines)-1)])
+		if seq != int64(i) || i >= len(gr.Lines) || !bytes.Equal(rec, gr.Lines[i]) {
+			t.Errorf("record %d differs from the golden line:\n got %s\nwant %s", seq, rec, gr.Lines[min(i, len(gr.Lines)-1)])
 		}
 		i++
 	}
-	if i != len(gr.lines) {
-		t.Errorf("%d records, want %d", i, len(gr.lines))
+	if i != len(gr.Lines) {
+		t.Errorf("%d records, want %d", i, len(gr.Lines))
 	}
-	for _, c := range gr.cmds {
+	for _, c := range gr.Commands {
 		var status string
 		var reason *string
 		if err := pool.QueryRow(ctx, `SELECT status, reason FROM orvex.command_results WHERE command_id = $1`, c.CommandID).
@@ -124,20 +125,20 @@ func requireGoldenRecords(t *testing.T, pool *pgxpool.Pool, gr goldenRound) {
 		}
 	}
 	var events int64
-	for _, c := range gr.cmds {
+	for _, c := range gr.Commands {
 		events += int64(len(c.Events))
 	}
-	if n := count(t, pool, `SELECT count(*) FROM orvex.domain_events WHERE round_id = $1`, gr.roundID); n != events {
+	if n := count(t, pool, `SELECT count(*) FROM orvex.domain_events WHERE round_id = $1`, gr.RoundID); n != events {
 		t.Errorf("%d domain events, want %d", n, events)
 	}
 }
 
 // requireGoldenLedger checks ledger rows, releases, snapshots, outbox rows
 // and final totals against spec section 8.
-func requireGoldenLedger(t *testing.T, pool *pgxpool.Pool, gr goldenRound, want goldenExpectation) {
+func requireGoldenLedger(t *testing.T, pool *pgxpool.Pool, gr roundtest.Golden, want goldenExpectation) {
 	t.Helper()
 	kinds := map[int64]string{}
-	rows, err := pool.Query(ctx, `SELECT transaction_id, sequence, kind FROM orvex.ledger_transactions WHERE round_id = $1`, gr.roundID)
+	rows, err := pool.Query(ctx, `SELECT transaction_id, sequence, kind FROM orvex.ledger_transactions WHERE round_id = $1`, gr.RoundID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +149,7 @@ func requireGoldenLedger(t *testing.T, pool *pgxpool.Pool, gr goldenRound, want 
 		if err := rows.Scan(&id, &seq, &kind); err != nil {
 			t.Fatal(err)
 		}
-		if id != ledger.TransactionID(gr.roundID, uint64(seq)) {
+		if id != ledger.TransactionID(gr.RoundID, uint64(seq)) {
 			t.Errorf("ledger transaction of record %d has a non-deterministic ID", seq)
 		}
 		kinds[seq] = kind
@@ -161,14 +162,14 @@ func requireGoldenLedger(t *testing.T, pool *pgxpool.Pool, gr goldenRound, want 
 	if n := count(t, pool, `SELECT count(*) FROM orvex.ledger_postings p
 		JOIN orvex.ledger_transactions x USING (transaction_id)
 		JOIN orvex.domain_events d ON d.round_id = p.round_id AND d.event_sequence = p.event_sequence
-		WHERE x.round_id = $1 AND d.sequence = x.sequence`, gr.roundID); n != int64(len(want.transactions)) {
+		WHERE x.round_id = $1 AND d.sequence = x.sequence`, gr.RoundID); n != int64(len(want.transactions)) {
 		t.Errorf("%d postings bound to their record's events, want %d", n, len(want.transactions))
 	}
-	if n := count(t, pool, `SELECT count(*) FROM orvex.ledger_hold_releases WHERE round_id = $1`, gr.roundID); n != want.releases {
+	if n := count(t, pool, `SELECT count(*) FROM orvex.ledger_hold_releases WHERE round_id = $1`, gr.RoundID); n != want.releases {
 		t.Errorf("%d releases, want %d", n, want.releases)
 	}
 	var snaps []int64
-	rows, err = pool.Query(ctx, `SELECT sequence FROM orvex.round_snapshots WHERE round_id = $1 AND state IS NULL AND engine_build = 'golden' ORDER BY sequence`, gr.roundID)
+	rows, err = pool.Query(ctx, `SELECT sequence FROM orvex.round_snapshots WHERE round_id = $1 AND state IS NULL AND engine_build = 'golden' ORDER BY sequence`, gr.RoundID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,15 +185,15 @@ func requireGoldenLedger(t *testing.T, pool *pgxpool.Pool, gr goldenRound, want 
 		t.Errorf("snapshots = %v, want %v", snaps, want.snapshots)
 	}
 	if n := count(t, pool, `SELECT count(*) FROM orvex.outbox_messages o JOIN orvex.chain_records r USING (round_id, sequence)
-		WHERE o.round_id = $1 AND o.message_index = 0 AND o.topic = 'round.record.v1' AND o.payload = r.record`, gr.roundID); n != int64(len(gr.lines)) {
-		t.Errorf("%d outbox messages equal to their records, want %d", n, len(gr.lines))
+		WHERE o.round_id = $1 AND o.message_index = 0 AND o.topic = 'round.record.v1' AND o.payload = r.record`, gr.RoundID); n != int64(len(gr.Lines)) {
+		t.Errorf("%d outbox messages equal to their records, want %d", n, len(gr.Lines))
 	}
 	for p, a := range want.players {
 		if got := playerAccount(t, pool, p); got != a {
 			t.Errorf("%s = %+v, want %+v", p, got, a)
 		}
 	}
-	if name := "worked-example"; gr.roundID == mustGoldenRound(t, name) {
+	if name := "worked-example"; gr.RoundID == mustGoldenRound(t, name) {
 		p3 := string(goldenP3(t, gr))
 		if got := playerAccount(t, pool, p3); got != (account{debits: 1_000_000_000, credits: 2_757_600_000}) {
 			t.Errorf("P3 = %+v", got)
@@ -201,7 +202,7 @@ func requireGoldenLedger(t *testing.T, pool *pgxpool.Pool, gr goldenRound, want 
 	if n := count(t, pool, `SELECT count(*) FROM orvex.ledger_accounts WHERE kind = 'player' AND held <> 0`); n != 0 {
 		t.Errorf("%d player accounts still hold credits", n)
 	}
-	if got := accountByID(t, pool, ledger.RoundAccountID(gr.roundID)); got != want.round {
+	if got := accountByID(t, pool, ledger.RoundAccountID(gr.RoundID)); got != want.round {
 		t.Errorf("round account = %+v, want %+v", got, want.round)
 	}
 	if got := accountByID(t, pool, ledger.HouseAccountID()); got != want.house {
@@ -226,15 +227,15 @@ func requireBalanced(t *testing.T, pool *pgxpool.Pool) {
 
 func mustGoldenRound(t *testing.T, name string) [16]byte {
 	t.Helper()
-	header, lines := readGolden(t, name)
-	g, _ := goldenConfig(t, header, lines[0])
+	header, lines := roundtest.ReadGolden(t, goldenPath(name))
+	g, _ := roundtest.GoldenConfig(t, header, lines[0])
 	return g.RoundID
 }
 
 // goldenP3 returns the player of worked-example record 3 (LBT-9 §5.6).
-func goldenP3(t *testing.T, gr goldenRound) v1.PlayerID {
+func goldenP3(t *testing.T, gr roundtest.Golden) v1.PlayerID {
 	t.Helper()
-	cmd, err := v1.Adapter().DecodeCommand(gr.cmds[2].Payload)
+	cmd, err := v1.Adapter().DecodeCommand(gr.Commands[2].Payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,10 +244,10 @@ func goldenP3(t *testing.T, gr goldenRound) v1.PlayerID {
 
 // requireExportVerifies exports the round, verifies it with decision replay
 // and compares its record lines with the golden lines 0..newest.
-func requireExportVerifies(t *testing.T, pool *pgxpool.Pool, gr goldenRound, newest int64) {
+func requireExportVerifies(t *testing.T, pool *pgxpool.Pool, gr roundtest.Golden, newest int64) {
 	t.Helper()
-	b := exportHistory(t, pool, gr.roundID)
-	if _, err := verification.Verify(bytes.NewReader(b), verification.Options{Mode: verification.ModeVerify, Registry: crashRegistry(t)}); err != nil {
+	b := exportHistory(t, pool, gr.RoundID)
+	if _, err := verification.Verify(bytes.NewReader(b), verification.Options{Mode: verification.ModeVerify, Registry: roundtest.Registry(t)}); err != nil {
 		t.Fatalf("Verify(export): %v", err)
 	}
 	lines := bytes.Split(bytes.TrimSuffix(b, []byte("\n")), []byte("\n"))[1:]
@@ -254,7 +255,7 @@ func requireExportVerifies(t *testing.T, pool *pgxpool.Pool, gr goldenRound, new
 		t.Fatalf("export has %d records, want %d", len(lines), newest+1)
 	}
 	for i, l := range lines {
-		if !bytes.Equal(l, gr.lines[i]) {
+		if !bytes.Equal(l, gr.Lines[i]) {
 			t.Errorf("export record %d differs from the golden line", i)
 		}
 	}
@@ -262,7 +263,7 @@ func requireExportVerifies(t *testing.T, pool *pgxpool.Pool, gr goldenRound, new
 
 func TestExecuteIdle(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := newRoundID()
 	createRound(t, x, round, testSeed, 1_000_000_000, 100)
 	before := effects(t, pool, round)
@@ -279,10 +280,10 @@ func TestExecuteIdle(t *testing.T) {
 
 func TestExecuteBetConsumesHoldAtExactBalance(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := newRoundID()
 	createRound(t, x, round, testSeed, 1_000_000_000, 100)
-	fundPlayer(t, pool, "alice", 100)
+	roundtest.FundPlayer(t, pool, "alice", 100)
 	seed(t, pool, round, 1, placeBet("alice", 100), 1_000)
 	if got := playerAccount(t, pool, "alice"); got != (account{credits: 100, held: 100}) {
 		t.Fatalf("alice before = %+v", got)
@@ -301,10 +302,10 @@ func TestExecuteBetConsumesHoldAtExactBalance(t *testing.T) {
 
 func TestExecuteRejectedBetReleasesHold(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := newRoundID()
 	createRound(t, x, round, testSeed, 100, 100)
-	fundPlayer(t, pool, "alice", 200)
+	roundtest.FundPlayer(t, pool, "alice", 200)
 	seed(t, pool, round, 1, placeBet("alice", 150), 1_000)
 	out, err := x.ExecuteNext(ctx, lease(round))
 	if err != nil || !out.Result.Rejected || out.Result.Reason != string(v1.ReasonInvalidAmount) {
@@ -323,22 +324,22 @@ func TestExecuteRejectedBetReleasesHold(t *testing.T) {
 
 func TestExecuteSnapshots(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
-	gr := seedGolden(t, pool, x, "worked-example", 0)
-	if _, err := x.Drain(ctx, lease(gr.roundID), 100); err != nil {
+	x := roundtest.NewExecutor(t, pool, nil, nil)
+	gr := roundtest.SeedGolden(t, pool, x, goldenPath("worked-example"), 0)
+	if _, err := x.Drain(ctx, lease(gr.RoundID), 100); err != nil {
 		t.Fatal(err)
 	}
 	// Replay the golden events and compare the state hash at every
 	// snapshot.
 	a := v1.Adapter()
-	_, cfg := goldenConfig(t, gr.header, gr.lines[0])
+	_, cfg := roundtest.GoldenConfig(t, gr.Header, gr.Lines[0])
 	var s any
 	s, err := a.InitialState(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	hashes := map[int64]chain.Hash{0: mustStateHash(t, s)}
-	for _, c := range gr.cmds {
+	for _, c := range gr.Commands {
 		for _, ev := range c.Events {
 			e, err := a.DecodeEvent(ev.Payload)
 			if err != nil {
@@ -350,7 +351,7 @@ func TestExecuteSnapshots(t *testing.T) {
 		}
 		hashes[int64(c.Sequence)] = mustStateHash(t, s)
 	}
-	rows, err := pool.Query(ctx, `SELECT sequence, state_hash, state IS NULL, engine_build FROM orvex.round_snapshots WHERE round_id = $1 ORDER BY sequence`, gr.roundID)
+	rows, err := pool.Query(ctx, `SELECT sequence, state_hash, state IS NULL, engine_build FROM orvex.round_snapshots WHERE round_id = $1 ORDER BY sequence`, gr.RoundID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,12 +391,12 @@ func mustStateHash(t *testing.T, s any) chain.Hash {
 
 func TestExecuteOutbox(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
-	gr := seedGolden(t, pool, x, "worked-example", 0)
-	if _, err := x.Drain(ctx, lease(gr.roundID), 100); err != nil {
+	x := roundtest.NewExecutor(t, pool, nil, nil)
+	gr := roundtest.SeedGolden(t, pool, x, goldenPath("worked-example"), 0)
+	if _, err := x.Drain(ctx, lease(gr.RoundID), 100); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := pool.Query(ctx, `SELECT sequence, message_index, topic, payload FROM orvex.outbox_messages WHERE round_id = $1 ORDER BY sequence`, gr.roundID)
+	rows, err := pool.Query(ctx, `SELECT sequence, message_index, topic, payload FROM orvex.outbox_messages WHERE round_id = $1 ORDER BY sequence`, gr.RoundID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,8 +413,8 @@ func TestExecuteOutbox(t *testing.T) {
 		if err := rows.Scan(&seq, &idx, &topic, &payload); err != nil {
 			t.Fatal(err)
 		}
-		if seq != i || idx != 0 || topic != execution.OutboxTopicRecord || !bytes.Equal(payload, gr.lines[i]) {
-			t.Errorf("outbox %d = (%d, %d, %q), payload equal %v", i, seq, idx, topic, bytes.Equal(payload, gr.lines[min(int(i), len(gr.lines)-1)]))
+		if seq != i || idx != 0 || topic != execution.OutboxTopicRecord || !bytes.Equal(payload, gr.Lines[i]) {
+			t.Errorf("outbox %d = (%d, %d, %q), payload equal %v", i, seq, idx, topic, bytes.Equal(payload, gr.Lines[min(int(i), len(gr.Lines)-1)]))
 		}
 		if seq < crashed {
 			for _, k := range secretKeys {
@@ -427,28 +428,28 @@ func TestExecuteOutbox(t *testing.T) {
 		}
 		i++
 	}
-	if i != int64(len(gr.lines)) || i != 23 {
-		t.Errorf("%d outbox messages, want %d (23)", i, len(gr.lines))
+	if i != int64(len(gr.Lines)) || i != 23 {
+		t.Errorf("%d outbox messages, want %d (23)", i, len(gr.Lines))
 	}
 }
 
 func TestColdLoadMatchesCache(t *testing.T) {
 	// Uninterrupted run.
 	_, poolA := newDB(t)
-	xa := newExecutor(t, poolA, nil, nil)
-	ga := seedGolden(t, poolA, xa, "worked-example", 0)
-	if _, err := xa.Drain(ctx, lease(ga.roundID), 100); err != nil {
+	xa := roundtest.NewExecutor(t, poolA, nil, nil)
+	ga := roundtest.SeedGolden(t, poolA, xa, goldenPath("worked-example"), 0)
+	if _, err := xa.Drain(ctx, lease(ga.RoundID), 100); err != nil {
 		t.Fatal(err)
 	}
 	// Half, Forget, the rest.
 	_, poolB := newDB(t)
-	xb := newExecutor(t, poolB, nil, nil)
-	gb := seedGolden(t, poolB, xb, "worked-example", 0)
-	if n, err := xb.Drain(ctx, lease(gb.roundID), 11); err != nil || n != 11 {
+	xb := roundtest.NewExecutor(t, poolB, nil, nil)
+	gb := roundtest.SeedGolden(t, poolB, xb, goldenPath("worked-example"), 0)
+	if n, err := xb.Drain(ctx, lease(gb.RoundID), 11); err != nil || n != 11 {
 		t.Fatalf("Drain(11) = %d, %v", n, err)
 	}
-	xb.Forget(gb.roundID)
-	if _, err := xb.Drain(ctx, lease(gb.roundID), 100); err != nil {
+	xb.Forget(gb.RoundID)
+	if _, err := xb.Drain(ctx, lease(gb.RoundID), 100); err != nil {
 		t.Fatal(err)
 	}
 	records := func(pool *pgxpool.Pool, roundID [16]byte) [][]byte {
@@ -467,13 +468,13 @@ func TestColdLoadMatchesCache(t *testing.T) {
 		}
 		return out
 	}
-	if a, b := records(poolA, ga.roundID), records(poolB, gb.roundID); !reflect.DeepEqual(a, b) || len(a) != 23 {
+	if a, b := records(poolA, ga.RoundID), records(poolB, gb.RoundID); !reflect.DeepEqual(a, b) || len(a) != 23 {
 		t.Errorf("records after a cold load differ from an uninterrupted run (%d vs %d)", len(a), len(b))
 	}
 }
 
 func TestColdLoadChecksSnapshots(t *testing.T) {
-	header, lines := readGolden(t, "worked-example")
+	header, lines := roundtest.ReadGolden(t, goldenPath("worked-example"))
 	history := func(alter bool) []byte {
 		h := header
 		if alter {
@@ -488,7 +489,7 @@ func TestColdLoadChecksSnapshots(t *testing.T) {
 
 	_, pool := newDB(t)
 	l := loadHistory(t, pool, history(false))
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	if out, err := x.ExecuteNext(ctx, lease(l)); err != nil || out.Executed {
 		t.Fatalf("ExecuteNext = %+v, %v; want not executed after a matching cold load", out, err)
 	}
@@ -496,7 +497,7 @@ func TestColdLoadChecksSnapshots(t *testing.T) {
 	_, pool2 := newDB(t)
 	l2 := loadHistory(t, pool2, history(true))
 	fdb := &faultDB{pool: pool2}
-	x2 := newExecutor(t, fdb, nil, nil)
+	x2 := roundtest.NewExecutor(t, fdb, nil, nil)
 	before := effects(t, pool2, l2)
 	if _, err := x2.ExecuteNext(ctx, lease(l2)); !errors.Is(err, execution.ErrCorrupt) {
 		t.Fatalf("ExecuteNext = %v, want ErrCorrupt", err)
@@ -515,11 +516,11 @@ func TestFailClosedHaltsRound(t *testing.T) {
 	_, pool := newDB(t)
 	fdb := &faultDB{pool: pool}
 	fa := newFailingAdapter(2, 0)
-	x := newExecutor(t, fdb, nil, failingRegistry(t, fa))
+	x := roundtest.NewExecutor(t, fdb, nil, failingRegistry(t, fa))
 	round := newRoundID()
 	createRound(t, x, round, testSeed, 1_000_000_000, 100)
-	fundPlayer(t, pool, "alice", 100)
-	fundPlayer(t, pool, "bob", 100)
+	roundtest.FundPlayer(t, pool, "alice", 100)
+	roundtest.FundPlayer(t, pool, "bob", 100)
 	seed(t, pool, round, 1, placeBet("alice", 10), 1_000)
 	seed(t, pool, round, 2, placeBet("bob", 20), 1_001)
 	seed(t, pool, round, 3, placeBet("carol", 0), 1_002)
@@ -578,7 +579,7 @@ func TestSettlementResolvesEarlierCommands(t *testing.T) {
 		}
 		d := s.CrashDeadlineOffsetMicros
 		for _, p := range []string{"alice", "bob", "carol"} {
-			fundPlayer(t, pool, p, 1000)
+			roundtest.FundPlayer(t, pool, p, 1000)
 		}
 		t0 := int64(1_760_000_000_000_000)
 		seed(t, pool, round, 1, placeBet("alice", 100), t0-3)
@@ -593,7 +594,7 @@ func TestSettlementResolvesEarlierCommands(t *testing.T) {
 	}
 	t.Run("settles", func(t *testing.T) {
 		_, pool := newDB(t)
-		x := newExecutor(t, pool, nil, nil)
+		x := roundtest.NewExecutor(t, pool, nil, nil)
 		round, _ := setup(t, x, pool)
 		run(t, x, pool, round)
 		if n := count(t, pool, `SELECT processed_sequence FROM orvex.round_execution_heads WHERE round_id = $1`, round); n != 8 {
@@ -724,7 +725,7 @@ func TestSettlementResolvesEarlierCommands(t *testing.T) {
 	})
 	t.Run("blocked by a fail-closed cash-out", func(t *testing.T) {
 		_, pool := newDB(t)
-		x := newExecutor(t, pool, nil, failingRegistry(t, newFailingAdapter(6, 0)))
+		x := roundtest.NewExecutor(t, pool, nil, failingRegistry(t, newFailingAdapter(6, 0)))
 		round, _ := setup(t, x, pool)
 		run(t, x, pool, round)
 		if n := count(t, pool, `SELECT processed_sequence FROM orvex.round_execution_heads WHERE round_id = $1`, round); n != 5 {

@@ -16,6 +16,7 @@ import (
 	"github.com/juano-morello/orvex/internal/audit/chain"
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
@@ -62,10 +63,10 @@ func seedMany(t *testing.T, db *pgxpool.Pool, roundID [16]byte, funds map[string
 			seq++
 			mustExec(t, tx, `INSERT INTO orvex.admissions (round_id, sequence, command_id, effective_time_unix_micro, command)
 				VALUES ($1, $2, $3, $4, $5)`, roundID, seq, cmdID(100_000+i), c.at, encode(t, c.cmd))
-			if h := holdFor(c.cmd); h != nil {
+			if h := roundtest.HoldFor(c.cmd); h != nil {
 				mustExec(t, tx, `INSERT INTO orvex.ledger_holds (round_id, sequence, account_id, amount)
 					SELECT $1, $2, account_id, $4 FROM orvex.ledger_accounts WHERE kind = 'player' AND player_id = $3`,
-					roundID, seq, h.player, h.credits)
+					roundID, seq, h.Player, h.Credits)
 			}
 		}
 		mustExec(t, tx, `UPDATE orvex.round_admission_heads SET admitted_sequence = $2 WHERE round_id = $1`, roundID, seq)
@@ -155,7 +156,7 @@ func TestConflictingPerRoundCommits(t *testing.T) {
 
 	// The sequential reference run.
 	_, refPool := newDB(t)
-	ref := newExecutor(t, refPool, nil, nil)
+	ref := roundtest.NewExecutor(t, refPool, nil, nil)
 	conflictRound(t, refPool, ref, seed)
 	if n, err := ref.Drain(ctx, lease(conflictRoundID), 1000); err != nil || n != 200 {
 		t.Fatalf("reference Drain = %d, %v", n, err)
@@ -171,8 +172,8 @@ func TestConflictingPerRoundCommits(t *testing.T) {
 			for trial := range 10 {
 				_, pool := newDB(t)
 				xs := [2]*execution.Executor{
-					newExecutor(t, pool, func(c *execution.Config) { c.EngineBuild = variant.builds[0] }, nil),
-					newExecutor(t, pool, func(c *execution.Config) { c.EngineBuild = variant.builds[1] }, nil),
+					roundtest.NewExecutor(t, pool, func(c *execution.Config) { c.EngineBuild = variant.builds[0] }, nil),
+					roundtest.NewExecutor(t, pool, func(c *execution.Config) { c.EngineBuild = variant.builds[1] }, nil),
 				}
 				conflictRound(t, pool, xs[0], seed)
 				var (
@@ -272,8 +273,8 @@ func requireConflictInvariants(t *testing.T, pool *pgxpool.Pool, outs [2][]execu
 
 func TestStaleCacheDiscarded(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
-	y := newExecutor(t, pool, func(c *execution.Config) { c.EngineBuild = "other" }, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
+	y := roundtest.NewExecutor(t, pool, func(c *execution.Config) { c.EngineBuild = "other" }, nil)
 	round := newRoundID()
 	createRound(t, x, round, testSeed, 1_000_000_000, 100)
 	funds := map[string]int64{}

@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,7 +20,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/juano-morello/orvex/internal/audit/chain"
 	"github.com/juano-morello/orvex/internal/audit/verification"
 	"github.com/juano-morello/orvex/internal/canonjson"
 	"github.com/juano-morello/orvex/internal/game"
@@ -29,7 +27,7 @@ import (
 	"github.com/juano-morello/orvex/internal/persistence/eventstore"
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
-	"github.com/juano-morello/orvex/internal/runtime/admission"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
@@ -49,35 +47,6 @@ func newDB(t *testing.T) (string, *pgxpool.Pool) {
 	t.Helper()
 	dsn := pgtest.MigratedDatabase(t)
 	return dsn, pgtest.Pool(t, dsn)
-}
-
-// crashRegistry returns a registry holding crash/v1 only.
-func crashRegistry(t *testing.T) *game.Registry {
-	t.Helper()
-	reg, err := game.NewRegistry(v1.Adapter())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return reg
-}
-
-// newExecutor returns an executor over db with EngineBuild "golden" unless
-// mutate changes it; reg nil means crash/v1 only.
-func newExecutor(t *testing.T, db execution.DB, mutate func(*execution.Config), reg *game.Registry) *execution.Executor {
-	t.Helper()
-	cfg := execution.DefaultConfig()
-	cfg.EngineBuild = "golden"
-	if mutate != nil {
-		mutate(&cfg)
-	}
-	if reg == nil {
-		reg = crashRegistry(t)
-	}
-	x, err := execution.New(db, reg, cfg, execution.CrashV1Policy())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return x
 }
 
 func lease(roundID [16]byte) execution.Lease { return execution.Lease{RoundID: roundID} }
@@ -169,25 +138,6 @@ func inTx(t *testing.T, db *pgxpool.Pool, fn func(tx pgx.Tx)) {
 	}
 }
 
-// fundPlayer creates the player's account if absent and grants it credits
-// from the global system account faucet, which it creates if absent.
-func fundPlayer(t *testing.T, db *pgxpool.Pool, player string, credits int64) {
-	t.Helper()
-	inTx(t, db, func(tx pgx.Tx) {
-		mustExec(t, tx, `INSERT INTO orvex.ledger_accounts (account_id, kind, name, floor_enforced)
-			SELECT gen_random_uuid(), 'system', 'faucet', false
-			WHERE NOT EXISTS (SELECT 1 FROM orvex.ledger_accounts WHERE kind = 'system' AND name = 'faucet' AND round_id IS NULL)`)
-		mustExec(t, tx, `INSERT INTO orvex.ledger_accounts (account_id, kind, player_id, floor_enforced)
-			VALUES (gen_random_uuid(), 'player', $1, true) ON CONFLICT (player_id) DO NOTHING`, player)
-		txID := newRoundID()
-		mustExec(t, tx, `INSERT INTO orvex.ledger_transactions (transaction_id, kind) VALUES ($1, 'grant')`, txID)
-		mustExec(t, tx, `INSERT INTO orvex.ledger_postings (transaction_id, posting_index, debit_account_id, credit_account_id, amount)
-			SELECT $1, 0, f.account_id, p.account_id, $3
-			FROM orvex.ledger_accounts f, orvex.ledger_accounts p
-			WHERE f.kind = 'system' AND f.name = 'faucet' AND f.round_id IS NULL AND p.player_id = $2`, txID, player, credits)
-	})
-}
-
 // account is a ledger account's totals.
 type account struct{ debits, credits, held int64 }
 
@@ -223,21 +173,6 @@ func count(t *testing.T, db *pgxpool.Pool, sql string, args ...any) int64 {
 	return n
 }
 
-// holdSpec is a credit hold placed with a seeded admission.
-type holdSpec struct {
-	player  string
-	credits int64
-}
-
-// holdFor applies LBT-11 S-10 to cmd: the hold a player PlaceBet carries.
-func holdFor(cmd any) *holdSpec {
-	cl, err := admission.CrashV1Policy().Classify(cmd)
-	if err != nil || cl.Hold.PlayerID == "" {
-		return nil
-	}
-	return &holdSpec{player: cl.Hold.PlayerID, credits: cl.Hold.Credits}
-}
-
 // encode encodes a crash/v1 command.
 func encode(t *testing.T, cmd v1.Command) []byte {
 	t.Helper()
@@ -248,34 +183,10 @@ func encode(t *testing.T, cmd v1.Command) []byte {
 	return b
 }
 
-// seedAdmission inserts the next admission directly, as LBT-11 does: under
-// the admission head lock, with the hold (if any) in the same transaction.
-// It returns the sequence.
-func seedAdmission(t *testing.T, db *pgxpool.Pool, roundID, commandID [16]byte, command []byte, effectiveTime int64, hold *holdSpec) uint64 {
-	t.Helper()
-	var seq int64
-	inTx(t, db, func(tx pgx.Tx) {
-		if err := tx.QueryRow(ctx, `SELECT admitted_sequence FROM orvex.round_admission_heads WHERE round_id = $1 FOR UPDATE`,
-			roundID).Scan(&seq); err != nil {
-			t.Fatal(err)
-		}
-		seq++
-		mustExec(t, tx, `INSERT INTO orvex.admissions (round_id, sequence, command_id, effective_time_unix_micro, command)
-			VALUES ($1, $2, $3, $4, $5)`, roundID, seq, commandID, effectiveTime, command)
-		if hold != nil {
-			mustExec(t, tx, `INSERT INTO orvex.ledger_holds (round_id, sequence, account_id, amount)
-				SELECT $1, $2, account_id, $4 FROM orvex.ledger_accounts WHERE kind = 'player' AND player_id = $3`,
-				roundID, seq, hold.player, hold.credits)
-		}
-		mustExec(t, tx, `UPDATE orvex.round_admission_heads SET admitted_sequence = $2 WHERE round_id = $1`, roundID, seq)
-	})
-	return uint64(seq)
-}
-
 // seed seeds cmd with its S-10 hold.
 func seed(t *testing.T, db *pgxpool.Pool, roundID [16]byte, n int, cmd v1.Command, effectiveTime int64) uint64 {
 	t.Helper()
-	return seedAdmission(t, db, roundID, cmdID(n), encode(t, cmd), effectiveTime, holdFor(cmd))
+	return roundtest.SeedAdmission(t, db, roundID, cmdID(n), encode(t, cmd), effectiveTime, roundtest.HoldFor(cmd))
 }
 
 func placeBet(player string, credits int64) v1.PlaceBet {
@@ -294,115 +205,8 @@ var (
 
 // --- Golden histories ---
 
-// goldenRound is a golden history seeded into a database.
-type goldenRound struct {
-	roundID [16]byte
-	// lines are the record lines 0..N (without the header).
-	lines  [][]byte
-	header canonjson.Object
-	cmds   []chain.Command
-}
-
-func readGolden(t *testing.T, name string) (canonjson.Object, [][]byte) {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(goldenDir, name+".jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := bytes.Split(bytes.TrimSuffix(b, []byte("\n")), []byte("\n"))
-	header, err := canonjson.Unmarshal(lines[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	return header, lines[1:]
-}
-
-// goldenConfig returns the golden round's genesis and typed config.
-func goldenConfig(t *testing.T, header canonjson.Object, genesisLine []byte) (chain.Genesis, v1.Config) {
-	t.Helper()
-	rec, err := chain.Decode(genesisLine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	g := rec.(chain.Genesis)
-	so, err := canonjson.Obj(header["configSecret"])
-	if err != nil {
-		t.Fatal(err)
-	}
-	secret, err := canonjson.Marshal(so)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := v1.Adapter().DecodeConfig(g.RoundID, g.Config, secret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return g, cfg.(v1.Config)
-}
-
-// seedGolden creates the golden round with x, funds each player with the
-// sum of their holds, and seeds every admission from the golden records,
-// up to admission upTo (0: all).
-func seedGolden(t *testing.T, db *pgxpool.Pool, x *execution.Executor, name string, upTo int) goldenRound {
-	t.Helper()
-	header, lines := readGolden(t, name)
-	g, cfg := goldenConfig(t, header, lines[0])
-	created, err := x.CreateRound(ctx, execution.NewRound{
-		RoundID: g.RoundID, Game: g.Game, RulesVersion: g.RulesVersion, Config: cfg, CreatedAtUnixMicro: g.CreatedAtUnixMicro,
-	})
-	if err != nil {
-		t.Fatalf("CreateRound(%s): %v", name, err)
-	}
-	if !bytes.Equal(created.Genesis, lines[0]) {
-		t.Fatalf("%s genesis differs:\n got %s\nwant %s", name, created.Genesis, lines[0])
-	}
-	gr := goldenRound{roundID: g.RoundID, lines: lines, header: header}
-	funds := map[string]int64{}
-	for _, line := range lines[1:] {
-		rec, err := chain.Decode(line)
-		if err != nil {
-			t.Fatal(err)
-		}
-		c := rec.(chain.Command)
-		gr.cmds = append(gr.cmds, c)
-		if h := goldenHold(t, c); h != nil {
-			funds[h.player] += h.credits
-		}
-	}
-	players := make([]string, 0, len(funds))
-	for p := range funds {
-		players = append(players, p)
-	}
-	sort.Strings(players)
-	for _, p := range players {
-		fundPlayer(t, db, p, funds[p])
-	}
-	seedGoldenAdmissions(t, db, gr, 1, upTo)
-	return gr
-}
-
-// seedGoldenAdmissions seeds golden admissions from..to (to 0: all).
-func seedGoldenAdmissions(t *testing.T, db *pgxpool.Pool, gr goldenRound, from, to int) {
-	t.Helper()
-	if to == 0 {
-		to = len(gr.cmds)
-	}
-	for i := from; i <= to; i++ {
-		c := gr.cmds[i-1]
-		if seq := seedAdmission(t, db, gr.roundID, c.CommandID, c.Payload, c.EffectiveTimeUnixMicro, goldenHold(t, c)); seq != c.Sequence {
-			t.Fatalf("seeded sequence %d, want %d", seq, c.Sequence)
-		}
-	}
-}
-
-func goldenHold(t *testing.T, c chain.Command) *holdSpec {
-	t.Helper()
-	cmd, err := v1.Adapter().DecodeCommand(c.Payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return holdFor(cmd)
-}
+// goldenPath returns the path of LBT-9 golden history name.
+func goldenPath(name string) string { return filepath.Join(goldenDir, name+".jsonl") }
 
 // --- Effects ---
 
@@ -782,5 +586,5 @@ func alterCheckpoint(t *testing.T, header canonjson.Object, seq uint64) canonjso
 // verifyExport verifies an exported history with decision replay.
 func verifyExport(t *testing.T, b []byte) (verification.Report, error) {
 	t.Helper()
-	return verification.Verify(bytes.NewReader(b), verification.Options{Mode: verification.ModeVerify, Registry: crashRegistry(t)})
+	return verification.Verify(bytes.NewReader(b), verification.Options{Mode: verification.ModeVerify, Registry: roundtest.Registry(t)})
 }

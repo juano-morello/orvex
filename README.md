@@ -15,7 +15,7 @@ Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-mo
 - `internal/audit/chain`: chain records, link hash and state hash
 - `internal/audit/replay`: state replay and decision replay through the rules registry
 - `internal/audit/verification`: history reader (formats v1 and v2), staged verifier with the ledger stage, golden histories
-- `internal/persistence/postgres`: PostgreSQL migration runner, SQLSTATE constants and transaction options (ADR-005, LBT-10); `pgtest`: Testcontainers harness, catalog fingerprint and audit-history loader for integration tests
+- `internal/persistence/postgres`: PostgreSQL migration runner, SQLSTATE constants and transaction options (ADR-005, LBT-10); `pgtest`: Testcontainers harness, catalog fingerprint and audit-history loader for integration tests; `pgtest/roundtest`: crash/v1 round and golden-history seeding through the executor for integration tests (LBT-24)
 - `internal/persistence/eventstore`: audit history export from the database (v1 LBT-10, v2 with ledger rows LBT-18)
 - `internal/runtime/admission`: durable per-round admission sequencer (Transaction A): dedupe, sequence and effective time, admission window and closure barrier, credit holds, crash/v1 admission policy (ADR-002, ADR-005, LBT-11)
 - `internal/runtime/execution`: per-round command executor (Transaction B): atomic commit of the chain record, events, ledger postings, hold releases, outbox message and snapshot under a compare-and-set and fencing token; cold load by chain replay; round creation; crash/v1 execution policy (ADR-005, LBT-12)

@@ -13,6 +13,7 @@ import (
 
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/admission"
 )
 
@@ -22,7 +23,7 @@ import (
 // offset, a CloseRound at exactly T0 + D is admitted, and the round settles.
 func TestCloseBoundRefusesEarlyCloseAndSettles(t *testing.T) {
 	_, pool := newDB(t)
-	x := newExecutor(t, pool, nil, nil)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
 	s := newSequencer(t, pool)
 
 	// 1. The round stores D; no bound yet.
@@ -60,8 +61,8 @@ func TestCloseBoundRefusesEarlyCloseAndSettles(t *testing.T) {
 	}
 
 	// 2. Bets and the start; the bound is T0 + D.
-	fundPlayer(t, pool, "alice", 100)
-	fundPlayer(t, pool, "bob", 200)
+	roundtest.FundPlayer(t, pool, "alice", 100)
+	roundtest.FundPlayer(t, pool, "bob", 200)
 	mustAdmit(t, s, request(round, cmdID(1), placeBet("alice", 100)))
 	mustAdmit(t, s, request(round, cmdID(2), placeBet("bob", 200)))
 	start := mustAdmit(t, s, request(round, cmdID(3), startRound))
@@ -131,7 +132,7 @@ func TestCloseBoundRefusesEarlyCloseAndSettles(t *testing.T) {
 	}
 
 	// 5. Closure at exactly T0 + D.
-	if seq := seedAdmission(t, pool, round, cmdID(5), encode(t, cashOut("alice")), t0+d, nil); seq != 5 {
+	if seq := roundtest.SeedAdmission(t, pool, round, cmdID(5), encode(t, cashOut("alice")), t0+d, nil); seq != 5 {
 		t.Fatalf("seeded sequence %d, want 5", seq)
 	}
 	closed := mustAdmit(t, s, request(round, cmdID(6), closeRound))

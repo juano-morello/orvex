@@ -15,6 +15,7 @@ import (
 	"github.com/juano-morello/orvex/internal/canonjson"
 	"github.com/juano-morello/orvex/internal/ledger"
 	"github.com/juano-morello/orvex/internal/persistence/eventstore"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 )
 
 const goldenV2Dir = "../../audit/verification/testdata/golden-v2"
@@ -43,7 +44,7 @@ func exportHistoryV2(t *testing.T, db *pgxpool.Pool, roundID [16]byte) []byte {
 func verifyExportV2(t *testing.T, b []byte) (verification.Report, error) {
 	t.Helper()
 	return verification.Verify(bytes.NewReader(b), verification.Options{
-		Mode: verification.ModeVerify, Registry: crashRegistry(t), LedgerRules: []ledger.Rule{ledger.CrashV1()},
+		Mode: verification.ModeVerify, Registry: roundtest.Registry(t), LedgerRules: []ledger.Rule{ledger.CrashV1()},
 	})
 }
 
@@ -116,7 +117,7 @@ func TestExecutedGoldensExportVerifiedLedger(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, pool := newDB(t)
-			x := newExecutor(t, pool, nil, nil)
+			x := roundtest.NewExecutor(t, pool, nil, nil)
 
 			golden := readGoldenV2(t, tc.name)
 			n := (len(golden) - 1) / 2 // records
@@ -138,16 +139,16 @@ func TestExecutedGoldensExportVerifiedLedger(t *testing.T) {
 					VALUES ($1, 'player', $2, true)`, id, player)
 			}
 
-			gr := seedGolden(t, pool, x, tc.name, 0)
-			executed, err := x.Drain(ctx, lease(gr.roundID), 100)
+			gr := roundtest.SeedGolden(t, pool, x, goldenPath(tc.name), 0)
+			executed, err := x.Drain(ctx, lease(gr.RoundID), 100)
 			if err != nil {
 				t.Fatalf("Drain: %v", err)
 			}
-			if executed != len(gr.cmds) {
-				t.Fatalf("Drain executed %d, want %d", executed, len(gr.cmds))
+			if executed != len(gr.Commands) {
+				t.Fatalf("Drain executed %d, want %d", executed, len(gr.Commands))
 			}
 
-			out := exportHistoryV2(t, pool, gr.roundID)
+			out := exportHistoryV2(t, pool, gr.RoundID)
 			rep, err := verifyExportV2(t, out)
 			if err != nil {
 				t.Fatalf("verify: %v", err)
