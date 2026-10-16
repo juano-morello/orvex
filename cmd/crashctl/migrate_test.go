@@ -40,6 +40,7 @@ func TestMigrateUsage(t *testing.T) {
 		{"-to leading zero", []string{"up", "-to", "01"}},
 		{"-to plus sign", []string{"up", "-to", "+1"}},
 		{"-to empty", []string{"down", "-to", ""}},
+		{"unknown flag", []string{"up", "-bogus"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -74,30 +75,53 @@ func TestMigrateUsage(t *testing.T) {
 		}
 	})
 	t.Run("ORVEX_DATABASE_URL unparsable", func(t *testing.T) {
-		t.Setenv(databaseURLEnv, "::bad")
-		code, _, stderr := runMigrateCmd("up")
-		if code != exitUsage {
-			t.Errorf("exit code = %d, want %d", code, exitUsage)
-		}
-		if want := "crashctl: migrate up: invalid ORVEX_DATABASE_URL\n"; stderr != want {
-			t.Errorf("stderr = %q, want %q", stderr, want)
+		for name, dsn := range map[string]string{
+			"syntax":                 "::bad",
+			"bad parameter":          "postgres://u:p@127.0.0.1:1/db?connect_timeout=x",
+			"bad sslmode":            "postgres://u:p@127.0.0.1:1/db?sslmode=bogus",
+			"unterminated key=value": "host='unterminated",
+		} {
+			t.Run(name, func(t *testing.T) {
+				for _, sub := range [][]string{{"up"}, {"down", "-to", "0"}, {"status"}} {
+					t.Run(sub[0], func(t *testing.T) {
+						t.Setenv(databaseURLEnv, dsn)
+						code, stdout, stderr := runMigrateCmd(sub...)
+						if code != exitUsage {
+							t.Errorf("exit code = %d, want %d", code, exitUsage)
+						}
+						if stdout != "" {
+							t.Errorf("stdout = %q, want empty", stdout)
+						}
+						if want := "crashctl: migrate " + sub[0] + ": invalid ORVEX_DATABASE_URL\n"; stderr != want {
+							t.Errorf("stderr = %q, want %q", stderr, want)
+						}
+					})
+				}
+			})
 		}
 	})
 }
 
 func TestMigrateConnectError(t *testing.T) {
-	for _, sub := range [][]string{{"up"}, {"down", "-to", "0"}, {"status"}} {
-		t.Run(sub[0], func(t *testing.T) {
-			t.Setenv(databaseURLEnv, unreachableDSN)
-			code, stdout, stderr := runMigrateCmd(sub...)
-			if code != exitIO {
-				t.Errorf("exit code = %d, want %d (stderr %q)", code, exitIO, stderr)
-			}
-			if stdout != "" {
-				t.Errorf("stdout = %q, want empty", stdout)
-			}
-			if !strings.HasPrefix(stderr, "crashctl: migrate "+sub[0]+": ") || strings.Count(stderr, "\n") != 1 {
-				t.Errorf("stderr = %q, want one crashctl: migrate %s: line", stderr, sub[0])
+	for name, dsn := range map[string]string{
+		"url":       unreachableDSN,
+		"key=value": "host=127.0.0.1 port=1 user=u password=p dbname=db connect_timeout=2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, sub := range [][]string{{"up"}, {"down", "-to", "0"}, {"status"}} {
+				t.Run(sub[0], func(t *testing.T) {
+					t.Setenv(databaseURLEnv, dsn)
+					code, stdout, stderr := runMigrateCmd(sub...)
+					if code != exitIO {
+						t.Errorf("exit code = %d, want %d (stderr %q)", code, exitIO, stderr)
+					}
+					if stdout != "" {
+						t.Errorf("stdout = %q, want empty", stdout)
+					}
+					if !strings.HasPrefix(stderr, "crashctl: migrate "+sub[0]+": ") || strings.Count(stderr, "\n") != 1 {
+						t.Errorf("stderr = %q, want one crashctl: migrate %s: line", stderr, sub[0])
+					}
+				})
 			}
 		})
 	}

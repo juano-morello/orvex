@@ -6,13 +6,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/juano-morello/orvex/internal/persistence/postgres"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
+	"github.com/juano-morello/orvex/migrations"
 )
 
 func TestMain(m *testing.M) { os.Exit(pgtest.Run(m)) }
@@ -188,4 +191,148 @@ func TestMigrateCLIStdoutFailure(t *testing.T) {
 	if line := runMigrateFailingStdout(t, "status"); !strings.Contains(line, "bookkeeping is inconsistent") {
 		t.Errorf("status with version 99 and failing stdout: stderr %q, want the runner error", line)
 	}
+}
+
+// TestMigrateCLIExitCodes runs crashctl migrate end to end against real
+// PostgreSQL for the LBT-10 P-6 exit-code rows no other test exercises
+// through run: 1 a migration failed, 2 a target on the wrong side, 3 a schema
+// that differs from or is newer than this build, 4 a database that cannot be
+// reached. Stderr is matched on SQLSTATEs and runner phrases only.
+func TestMigrateCLIExitCodes(t *testing.T) {
+	ms, err := postgres.LoadMigrations(migrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	requireLine := func(t *testing.T, stderr, sub, want string) {
+		t.Helper()
+		if strings.Count(stderr, "\n") != 1 || !strings.HasSuffix(stderr, "\n") {
+			t.Errorf("%s: stderr %q, want exactly one line", sub, stderr)
+		}
+		if !strings.HasPrefix(stderr, "crashctl: migrate "+sub+": ") {
+			t.Errorf("%s: stderr %q, want the crashctl: migrate %s: prefix", sub, stderr, sub)
+		}
+		if !strings.Contains(stderr, want) {
+			t.Errorf("%s: stderr %q, want it to contain %q", sub, stderr, want)
+		}
+	}
+	requireStatusVersion := func(t *testing.T, v string) string {
+		t.Helper()
+		code, stdout, stderr := runMigrateCmd("status")
+		if code != exitOK || !strings.HasSuffix(stdout, "schema version "+v+"\n") {
+			t.Errorf("status: exit %d, stdout %q, stderr %q; want 0 ending with schema version %s", code, stdout, stderr, v)
+		}
+		return stdout
+	}
+	mustUp := func(t *testing.T, args ...string) {
+		t.Helper()
+		if code, _, stderr := runMigrateCmd(append([]string{"up"}, args...)...); code != exitOK {
+			t.Fatalf("up %v: exit %d, stderr %q", args, code, stderr)
+		}
+	}
+
+	t.Run("1 sql error", func(t *testing.T) {
+		dsn := pgtest.EmptyDatabase(t)
+		t.Setenv(databaseURLEnv, dsn)
+		mustUp(t, "-to", "1")
+		if _, err := pgtest.Pool(t, dsn).Exec(ctx, `CREATE TABLE orvex.chain_records (x int)`); err != nil {
+			t.Fatal(err)
+		}
+		code, stdout, stderr := runMigrateCmd("up")
+		if code != exitFailed {
+			t.Errorf("up: exit %d, stderr %q; want %d", code, stderr, exitFailed)
+		}
+		if stdout != "applied 0002 rounds_admissions\n" {
+			t.Errorf("up: stdout %q, want only the committed 0002 step", stdout)
+		}
+		requireLine(t, stderr, "up", "42P07")
+		if !strings.Contains(stderr, "0003 chain_execution up") {
+			t.Errorf("up: stderr %q, want it to name 0003 chain_execution up", stderr)
+		}
+		if out := requireStatusVersion(t, "2"); !strings.Contains(out, "0003 chain_execution pending\n") {
+			t.Errorf("status: stdout %q, want 0003 chain_execution pending", out)
+		}
+	})
+
+	t.Run("1 encoding", func(t *testing.T) {
+		t.Setenv(databaseURLEnv, pgtest.CreateDatabase(t, "ENCODING 'SQL_ASCII' TEMPLATE template0"))
+		code, stdout, stderr := runMigrateCmd("up")
+		if code != exitFailed || stdout != "" {
+			t.Errorf("up: exit %d, stdout %q, stderr %q; want %d and no stdout", code, stdout, stderr, exitFailed)
+		}
+		requireLine(t, stderr, "up", postgres.CodeEncoding)
+		requireStatusVersion(t, "0")
+	})
+
+	t.Run("2 down target above current", func(t *testing.T) {
+		t.Setenv(databaseURLEnv, pgtest.EmptyDatabase(t))
+		mustUp(t, "-to", "2")
+		code, stdout, stderr := runMigrateCmd("down", "-to", "5")
+		if code != exitUsage || stdout != "" {
+			t.Errorf("down -to 5: exit %d, stdout %q, stderr %q; want %d and no stdout", code, stdout, stderr, exitUsage)
+		}
+		requireLine(t, stderr, "down", "other side")
+		requireStatusVersion(t, "2")
+	})
+
+	unsupported := func(t *testing.T, want string) {
+		t.Helper()
+		for _, args := range [][]string{{"status"}, {"up"}, {"down", "-to", "0"}} {
+			code, stdout, stderr := runMigrateCmd(args...)
+			if code != exitUnsupported || stdout != "" {
+				t.Errorf("%v: exit %d, stdout %q, stderr %q; want %d and no stdout", args, code, stdout, stderr, exitUnsupported)
+			}
+			requireLine(t, stderr, args[0], want)
+		}
+	}
+
+	t.Run("3 checksum mismatch", func(t *testing.T) {
+		dsn := pgtest.EmptyDatabase(t)
+		t.Setenv(databaseURLEnv, dsn)
+		mustUp(t)
+		if _, err := pgtest.Pool(t, dsn).Exec(ctx,
+			`UPDATE orvex_migrate.schema_migrations SET up_sha256 = $1 WHERE version = 1`, make([]byte, 32)); err != nil {
+			t.Fatal(err)
+		}
+		unsupported(t, "differs from this build")
+	})
+
+	t.Run("3 schema newer than build", func(t *testing.T) {
+		dsn := pgtest.EmptyDatabase(t)
+		t.Setenv(databaseURLEnv, dsn)
+		mustUp(t)
+		// Contiguous versions, so the runner reports ErrSchemaTooNew rather
+		// than ErrSchemaState.
+		if _, err := pgtest.Pool(t, dsn).Exec(ctx, `INSERT INTO orvex_migrate.schema_migrations
+			(version, name, up_sha256, down_sha256, applied_by) VALUES ($1, 'future', $2, $2, 'test')`,
+			len(ms)+1, make([]byte, 32)); err != nil {
+			t.Fatal(err)
+		}
+		unsupported(t, "newer than this build")
+	})
+
+	unreachable := func(t *testing.T, edit func(*url.URL), want string) {
+		t.Helper()
+		u, err := url.Parse(pgtest.EmptyDatabase(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		edit(u)
+		t.Setenv(databaseURLEnv, u.String())
+		for _, sub := range []string{"status", "up"} {
+			code, stdout, stderr := runMigrateCmd(sub)
+			if code != exitIO || stdout != "" {
+				t.Errorf("%s: exit %d, stdout %q, stderr %q; want %d and no stdout", sub, code, stdout, stderr, exitIO)
+			}
+			requireLine(t, stderr, sub, want)
+		}
+	}
+
+	t.Run("4 database does not exist", func(t *testing.T) {
+		unreachable(t, func(u *url.URL) { u.Path = "/no_such_database" }, "3D000")
+	})
+
+	t.Run("4 wrong password", func(t *testing.T) {
+		unreachable(t, func(u *url.URL) { u.User = url.UserPassword(u.User.Username(), "wrong-password") }, "28P01")
+	})
 }

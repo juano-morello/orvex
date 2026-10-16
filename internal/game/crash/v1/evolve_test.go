@@ -54,6 +54,7 @@ func TestEvolveValidatesApplicability(t *testing.T) {
 	goodSettle := RoundSettled{SettledAtUnixMicro: deadline + 1, BetCount: 2,
 		TotalBetCredits: 2_000, TotalPayoutCredits: lost.TotalPayoutCredits, Seed: workedSeed()}
 	settleWith := func(f func(*RoundSettled)) RoundSettled { e := goodSettle; f(&e); return e }
+	stateWith := func(f func(*State)) State { s := lost; f(&s); return s }
 
 	// The unmodified templates apply, so each failing case below fails for
 	// the one difference it introduces.
@@ -110,6 +111,8 @@ func TestEvolveValidatesApplicability(t *testing.T) {
 		{"RoundSettled wrong total bet", lost, settleWith(func(e *RoundSettled) { e.TotalBetCredits++ })},
 		{"RoundSettled wrong total payout", lost, settleWith(func(e *RoundSettled) { e.TotalPayoutCredits++ })},
 		{"RoundSettled wrong seed", lost, settleWith(func(e *RoundSettled) { e.Seed[31] ^= 0x01 })},
+		{"RoundSettled commitment does not match the seed", stateWith(func(s *State) { s.Commitment[0] ^= 0x01 }), goodSettle},
+		{"RoundSettled crash point does not match the seed", stateWith(func(s *State) { s.CrashPointScaled++ }), goodSettle},
 		{"RoundSettled negative time", lost, settleWith(func(e *RoundSettled) { e.SettledAtUnixMicro = -1 })},
 
 		{"nil event", betting, nil},

@@ -14,6 +14,23 @@ func TestCrashV1PolicyDescriptor(t *testing.T) {
 	}
 }
 
+// TestCrashV1HoldCeiling pins the LBT-11 S-10 admission bet ceiling to
+// 1,000,000,000 and to v1.MaxBetCredits (math spec D-7), so no change can
+// widen or narrow admission silently.
+func TestCrashV1HoldCeiling(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		got, want int64
+	}{
+		{"S-10 ceiling", crashV1MaxHoldCredits, 1_000_000_000},
+		{"D-7 MaxBetCredits", crashV1MaxHoldCredits, v1.MaxBetCredits},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s: crashV1MaxHoldCredits = %d, want %d", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestCrashV1Classify(t *testing.T) {
 	ordinary := Classification{Class: ClassOrdinary}
 	hold := func(p string, n int64) Classification {
