@@ -190,6 +190,10 @@ func evolveBetLost(s State, e BetLost) (State, error) {
 	return next, nil
 }
 
+// evolveRoundSettled also rechecks the reveal against the state (LBT-9 A-12,
+// defence in depth): the seed must open the round's commitment and derive its
+// crash point. InitialState guarantees both, so only a state that InitialState
+// and Evolve did not build fails them.
 func evolveRoundSettled(s State, e RoundSettled) (State, error) {
 	const name = "RoundSettled"
 	switch {
@@ -205,6 +209,10 @@ func evolveRoundSettled(s State, e RoundSettled) (State, error) {
 		return State{}, notApplicable(name, "total payout does not match")
 	case e.Seed != s.Seed:
 		return State{}, notApplicable(name, "seed does not match")
+	case !VerifyCommitment(e.Seed, s.Commitment):
+		return State{}, notApplicable(name, "commitment does not match the seed")
+	case CrashPoint(e.Seed, s.RoundID) != s.CrashPointScaled:
+		return State{}, notApplicable(name, "crash point does not match the seed")
 	case e.SettledAtUnixMicro < 0:
 		return State{}, notApplicable(name, "negative settlement time")
 	}

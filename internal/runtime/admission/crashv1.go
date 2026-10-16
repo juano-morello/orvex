@@ -11,14 +11,23 @@ import (
 // CrashV1Policy returns the crash/v1 admission policy (S-10).
 //
 //   - A player-authority PlaceBet with a non-empty player and
-//     v1.MinBetCredits <= BetCredits <= v1.MaxBetCredits holds BetCredits
-//     for the player; every other command holds nothing.
+//     v1.MinBetCredits <= BetCredits <= crashV1MaxHoldCredits
+//     (1,000,000,000) holds BetCredits for the player; every other command
+//     holds nothing.
 //   - System-authority StartRound, CloseRound and SettleRound are
 //     ClassStart, ClassClose and ClassSettle; with any other authority they
 //     are ClassOrdinary, so Decide records them as unauthorized.
 //   - A PlaceBet or CashOut whose player contains U+0000, nil, pointers and
 //     foreign types return ErrInvalidCommand.
 func CrashV1Policy() Policy { return crashV1Policy{} }
+
+// crashV1MaxHoldCredits is the LBT-11 S-10 admission bet ceiling: the
+// largest player PlaceBet amount that gets a hold. It is written out rather
+// than read from v1.MaxBetCredits so that no other change widens admission
+// silently; TestCrashV1HoldCeiling requires it to be 1,000,000,000 and to
+// equal v1.MaxBetCredits (math spec D-7), so every bet Decide can accept
+// still has a hold.
+const crashV1MaxHoldCredits int64 = 1_000_000_000
 
 type crashV1Policy struct{}
 
@@ -32,7 +41,7 @@ func (crashV1Policy) Classify(command any) (Classification, error) {
 			return Classification{}, fmt.Errorf("%w: crash/v1 PlaceBet player contains U+0000", ErrInvalidCommand)
 		}
 		if c.Authority == v1.AuthorityPlayer && c.Player != "" &&
-			c.BetCredits >= v1.MinBetCredits && c.BetCredits <= v1.MaxBetCredits {
+			c.BetCredits >= v1.MinBetCredits && c.BetCredits <= crashV1MaxHoldCredits {
 			ordinary.Hold = Hold{PlayerID: string(c.Player), Credits: c.BetCredits}
 		}
 		return ordinary, nil

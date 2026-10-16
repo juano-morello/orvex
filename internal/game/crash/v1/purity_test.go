@@ -353,6 +353,20 @@ func TestRoundErrorsDoNotLeakSecrets(t *testing.T) {
 		t.Fatalf("Evolve(RoundSettled) with a wrong seed = %v, want the seed-mismatch error", seedErr)
 	}
 	collect(nil, seedErr)
+	badCommitment := lost
+	badCommitment.Commitment[0] ^= 1
+	_, commitErr := r.Evolve(badCommitment, goodSettle)
+	if !errors.Is(commitErr, ErrEventNotApplicable) || !strings.Contains(errText(commitErr), "commitment does not match the seed") {
+		t.Fatalf("Evolve(RoundSettled) on a state with a wrong commitment = %v, want the commitment-mismatch error", commitErr)
+	}
+	collect(nil, commitErr)
+	badCrash := lost
+	badCrash.CrashPointScaled++
+	_, crashErr := r.Evolve(badCrash, goodSettle)
+	if !errors.Is(crashErr, ErrEventNotApplicable) || !strings.Contains(errText(crashErr), "crash point does not match the seed") {
+		t.Fatalf("Evolve(RoundSettled) on a state with a wrong crash point = %v, want the crash-point-mismatch error", crashErr)
+	}
+	collect(nil, crashErr)
 	m, err := MultiplierAtTick(941)
 	if err != nil {
 		t.Fatal(err)

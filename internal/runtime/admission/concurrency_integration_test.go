@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/juano-morello/orvex/internal/persistence/postgres"
 	"github.com/juano-morello/orvex/internal/runtime/admission"
 )
 
@@ -302,6 +303,12 @@ func TestAdmitManyRoundsIndependentSequences(t *testing.T) {
 	}
 }
 
+// TestAdmitConcurrentCrossRoundHolds checks that concurrent cross-round bets
+// on one account are refused by the S-11 available-credits check under the
+// account row lock (FOR NO KEY UPDATE in orvex.admit_command). No admission
+// may surface the ledger_accounts_floor_check backstop (SQLSTATE 23514),
+// which the sequencer would also report as insufficient_credits (S-11, S-12),
+// so the counts alone cannot tell the two controls apart.
 func TestAdmitConcurrentCrossRoundHolds(t *testing.T) {
 	e := newEnv(t, 16)
 	s := newSequencer(t, e.pool, nil)
@@ -316,8 +323,13 @@ func TestAdmitConcurrentCrossRoundHolds(t *testing.T) {
 	together(goroutines, func(i int) {
 		results[i], errsOf[i] = s.Admit(ctx, request(rounds[i%2], cmdID(i+1), placeBet("alice", 100)))
 	})
-	ok, rejected := 0, 0
+	ok, rejected, floorViolations := 0, 0, 0
 	for i, err := range errsOf {
+		if code := postgres.SQLState(err); code == "23514" {
+			floorViolations++
+			t.Errorf("goroutine %d: SQLSTATE 23514 on %q: the floor CHECK refused the hold, not the S-11 account-lock check",
+				i, constraintOf(err))
+		}
 		var re *admission.RejectedError
 		switch {
 		case err == nil:
@@ -332,6 +344,9 @@ func TestAdmitConcurrentCrossRoundHolds(t *testing.T) {
 	}
 	if ok != 1 || rejected != goroutines-1 {
 		t.Errorf("%d admitted and %d insufficient_credits, want 1 and %d", ok, rejected, goroutines-1)
+	}
+	if floorViolations != 0 {
+		t.Errorf("%d admissions surfaced SQLSTATE 23514, want 0", floorViolations)
 	}
 	if h := held(t, e.obs, "alice"); h != 100 {
 		t.Errorf("alice held %d, want 100", h)

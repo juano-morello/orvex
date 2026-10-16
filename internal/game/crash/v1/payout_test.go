@@ -36,3 +36,34 @@ func TestPayoutRejectsOutOfRange(t *testing.T) {
 		}
 	}
 }
+
+// TestMaxPayoutCreditsIsReachableMaximum pins MaxPayoutCredits to the
+// reachable maximum payout (math spec D-7): payable ticks are 0..MaxTick-1, M
+// is non-decreasing, and Payout is monotone in m, so the largest payout is
+// Payout(MaxBetCredits, M(MaxTick-1)).
+func TestMaxPayoutCreditsIsReachableMaximum(t *testing.T) {
+	last, err := MultiplierAtTick(MaxTick - 1)
+	if err != nil {
+		t.Fatalf("MultiplierAtTick(%d): %v", MaxTick-1, err)
+	}
+	if got, err := Payout(MaxBetCredits, last); err != nil || got != MaxPayoutCredits {
+		t.Errorf("Payout(%d, M(%d) = %d) = %d, %v; want MaxPayoutCredits %d",
+			MaxBetCredits, MaxTick-1, last, got, err, MaxPayoutCredits)
+	}
+
+	// Reachable: the latest eligible cash-out of the longest round lands on MaxTick-1.
+	tick, eligible, err := CashOutTiming(0, MaxDurationMicros-1, MaxTick)
+	if err != nil || !eligible || tick != MaxTick-1 {
+		t.Errorf("CashOutTiming(0, %d, %d) = %d, %v, %v; want %d, true, nil",
+			MaxDurationMicros-1, MaxTick, tick, eligible, err, MaxTick-1)
+	}
+
+	// Maximal: MaxTick itself reaches the cap and is never payable.
+	capM, err := MultiplierAtTick(MaxTick)
+	if err != nil || capM < MaxCrashPointScaled {
+		t.Fatalf("MultiplierAtTick(%d) = %d, %v; want at least %d", MaxTick, capM, err, MaxCrashPointScaled)
+	}
+	if got, err := Payout(MaxBetCredits, capM); !errors.Is(err, ErrOutOfRange) {
+		t.Errorf("Payout(%d, M(%d) = %d) = %d, %v; want ErrOutOfRange", MaxBetCredits, MaxTick, capM, got, err)
+	}
+}
