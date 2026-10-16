@@ -40,7 +40,7 @@ Prerequisites: Go 1.26, golangci-lint v2.14.0, Python 3.11 or newer (standard li
 - CI: `.github/workflows/ci.yml` on every push and pull request; `.github/workflows/nightly.yml` nightly and on demand (every fuzz target and the repeat runs)
 - `make clean`: remove build output
 - `crashctl migrate up [-to N]`, `crashctl migrate down -to N`, `crashctl migrate status`: apply, revert or list schema migrations on the database named by `ORVEX_DATABASE_URL`
-- `crashctl audit export [-unsettled] ROUND_ID FILE`: write a settled round's audit history file from the database named by `ORVEX_DATABASE_URL`
+- `crashctl audit export [-unsettled] ROUND_ID FILE`: write a settled round's audit history file from the database named by `ORVEX_DATABASE_URL`; for a round whose secret config is not yet revealed, `-unsettled` needs the privileged path: `SELECT` on `orvex.round_secrets` and the keyring named by `ORVEX_SECRET_KEYRING_FILE`
 
 Local PostgreSQL:
 

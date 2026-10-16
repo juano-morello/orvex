@@ -80,15 +80,16 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, prefix+err.Error())
 		return exitUsage
 	}
-	// fail prints one stderr line; the password never appears in it.
+	// fail prints one stderr line rendering a runner error under the K-12
+	// rule (LBT-21): no part of ORVEX_DATABASE_URL ever appears in it.
 	fail := func(err error) {
-		_, _ = fmt.Fprintln(stderr, prefix+mask(cfg, err))
+		_, _ = fmt.Fprintln(stderr, prefix+describe(cfg, err))
 	}
 
 	ctx := context.Background()
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
-		fail(err)
+		_, _ = fmt.Fprintln(stderr, prefix+redact(cfg, connectFailure(err)))
 		return exitIO
 	}
 	defer func() { _ = conn.Close(ctx) }()
@@ -125,12 +126,14 @@ func runMigrate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(&out, "schema version %d\n", version)
 	}
 	if _, werr := io.WriteString(stdout, out.String()); werr != nil {
-		// One stderr line (P-6), naming the runner error too if there was one.
+		// One stderr line (P-6), naming the runner error too if there was
+		// one. The stdout error is local, not a database error: it keeps
+		// its text (LBT-21 I-1); the line still goes through redact.
+		msg := "write stdout: " + werr.Error()
 		if err != nil {
-			fail(fmt.Errorf("%w; write stdout: %w", err, werr))
-		} else {
-			fail(fmt.Errorf("write stdout: %w", werr))
+			msg = render(err) + "; " + msg
 		}
+		_, _ = fmt.Fprintln(stderr, prefix+redact(cfg, msg))
 		return exitIO
 	}
 	if err != nil {

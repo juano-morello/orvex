@@ -117,6 +117,8 @@ func TestAdmittingRoleCannotReadCloseBound(t *testing.T) {
 	}{
 		{`SELECT close_offset_micros FROM orvex.round_secrets`, nil},
 		{`SELECT config_secret FROM orvex.round_secrets`, nil},
+		{`SELECT secret_ciphertext FROM orvex.round_secrets`, nil},
+		{`SELECT config_secret FROM orvex.round_secret_reveals`, nil},
 		{`SELECT close_not_before_unix_micro FROM orvex.round_admission_heads`, nil},
 		{`SELECT admission_state FROM orvex.round_admission_heads`, nil},
 		{`INSERT INTO orvex.admissions (round_id, sequence, command_id, effective_time_unix_micro, command)
@@ -135,6 +137,7 @@ func TestAdmittingRoleCannotReadCloseBound(t *testing.T) {
 	}{
 		{`SELECT has_column_privilege($1, 'orvex.round_secrets', 'close_offset_micros', 'SELECT')`, []any{name}, false},
 		{`SELECT has_column_privilege($1, 'orvex.round_admission_heads', 'close_not_before_unix_micro', 'SELECT')`, []any{name}, false},
+		{`SELECT has_table_privilege($1, 'orvex.round_secret_reveals', 'SELECT')`, []any{name}, false},
 		{`SELECT has_function_privilege('public', $1, 'EXECUTE')`, []any{admitCommandSignature}, false},
 		{`SELECT has_function_privilege($1, $2, 'EXECUTE')`, []any{name, admitCommandSignature}, true},
 	} {

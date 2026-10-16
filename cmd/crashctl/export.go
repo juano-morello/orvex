@@ -20,6 +20,7 @@ import (
 	"github.com/juano-morello/orvex/internal/canonjson"
 	"github.com/juano-morello/orvex/internal/game"
 	"github.com/juano-morello/orvex/internal/persistence/eventstore"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
@@ -44,7 +45,7 @@ func (v settledVerdict) String() string {
 }
 
 // exporter writes one round's history in one format.
-type exporter func(ctx context.Context, db eventstore.TxBeginner, roundID [16]byte, w io.Writer) (eventstore.Export, error)
+type exporter func(ctx context.Context, db eventstore.TxBeginner, roundID [16]byte, w io.Writer, opts eventstore.Options) (eventstore.Export, error)
 
 // exporters maps -format values to writers (X-10); LBT-18 adds v2 here.
 var exporters = map[string]exporter{verification.Format: eventstore.ExportHistory}
@@ -63,10 +64,13 @@ var (
 )
 
 // runExport implements crashctl audit export [-unsettled] [-format NAME]
-// ROUND_ID FILE (LBT-19, docs/specs/73dbe98d_audit-export-cli.md section 5).
-// Exit codes: 0 written, 1 export or settlement check failed, 2 usage, 3
+// ROUND_ID FILE (LBT-19, docs/specs/73dbe98d_audit-export-cli.md section 5;
+// LBT-21, docs/specs/87d8d90c_round-secret-protection.md K-10, K-12 and
+// K-13). Exit codes: 0 written, 1 export or settlement check failed or a
+// sealed secret failed to open, 2 usage or a keyring problem, 3
 // unsupported, 4 I/O (every database error), 5 round not found, 6 round not
-// settled.
+// settled or its secret not revealed. Database errors print under the K-12
+// rule: no part of ORVEX_DATABASE_URL ever appears in the output.
 func runExport(args []string, stdout, stderr io.Writer) int {
 	prefix := name + ": audit export: "
 
@@ -76,7 +80,7 @@ func runExport(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "usage: %s audit export [-unsettled] [-format NAME] ROUND_ID FILE\n", name)
 		flags.PrintDefaults()
 	}
-	unsettled := flags.Bool("unsettled", false, "write the history even if the round is not settled at its newest snapshot (the file then discloses its secret config)")
+	unsettled := flags.Bool("unsettled", false, "write the history even if the round is not settled; for a round whose secret is not revealed, this reads the sealed secret (needs SELECT on orvex.round_secrets and ORVEX_SECRET_KEYRING_FILE); the file then discloses its secret config")
 	format := flags.String("format", verification.Format, "history format `NAME` to write")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -113,9 +117,16 @@ func runExport(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	exportConnConfig(cfg)
-	// fail prints one masked stderr line and returns err's exit code.
+	// fail prints one stderr line, an Orvex-authored message or a local
+	// file error (never a database error), and returns err's exit code.
 	fail := func(err error, msg string) int {
-		_, _ = fmt.Fprintln(stderr, prefix+mask(cfg, errors.New(msg)))
+		_, _ = fmt.Fprintln(stderr, prefix+redact(cfg, msg))
+		return exportExitCode(err)
+	}
+	// failDB prints one stderr line rendering err under the K-12 rule and
+	// returns err's exit code.
+	failDB := func(err error) int {
+		_, _ = fmt.Fprintln(stderr, prefix+describe(cfg, err))
 		return exportExitCode(err)
 	}
 
@@ -125,26 +136,48 @@ func runExport(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// The keyring (K-13): only with -unsettled, and only when the variable
+	// names a file.
+	opts := eventstore.Options{Unrevealed: *unsettled}
+	if *unsettled {
+		if file := os.Getenv(sealing.KeyringFileEnv); file != "" {
+			kr, err := sealing.LoadKeyringFile(file)
+			if err != nil {
+				reason := "unreadable"
+				var ke *sealing.KeyringError
+				if errors.As(err, &ke) {
+					reason = ke.Reason
+				}
+				return fail(err, sealing.KeyringFileEnv+": "+reason)
+			}
+			opts.Keyring = kr
+		}
+	}
+
 	ctx := context.Background()
 	conn, err := pgx.ConnectConfig(ctx, cfg)
 	if err != nil {
-		return fail(err, err.Error())
+		return fail(err, connectFailure(err))
 	}
 	var buf bytes.Buffer
-	exp, err := export(ctx, conn, roundID, &buf)
+	exp, err := export(ctx, conn, roundID, &buf, opts)
 	_ = conn.Close(ctx)
 	switch {
 	case errors.Is(err, eventstore.ErrRoundNotFound):
 		return fail(err, "round "+round+" not found")
 	case errors.Is(err, eventstore.ErrNoCheckpoint):
 		return fail(err, "round "+round+" has no snapshot to end an export at")
+	case errors.Is(err, eventstore.ErrNotRevealed):
+		return fail(err, "round "+round+" has no revealed secret config: it is not settled; -unsettled exports it through the privileged path")
+	case errors.Is(err, eventstore.ErrKeyringRequired):
+		return fail(err, "round "+round+" has a sealed secret config and no revealed one; set "+sealing.KeyringFileEnv+" to export it")
 	case err != nil:
-		return fail(err, err.Error())
+		return failDB(err)
 	}
 
 	reg, err := newRegistry()
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, prefix+mask(cfg, err))
+		_, _ = fmt.Fprintln(stderr, prefix+describe(cfg, err))
 		return exitFailed
 	}
 	settled, err := settlement(buf.Bytes(), reg, settlementPolicies())
@@ -286,7 +319,9 @@ func settlementReason(err error) string {
 	return strings.TrimPrefix(msg, name+": ")
 }
 
-// exportExitCode maps an export error to its X-9 exit code.
+// exportExitCode maps an export error to its X-9 exit code, with the LBT-21
+// K-10 cases. The keyring cases precede ErrCorrupt, which wraps the
+// sealing errors of a sealed secret that cannot be opened.
 func exportExitCode(err error) int {
 	var f *verification.Failure
 	switch {
@@ -296,10 +331,12 @@ func exportExitCode(err error) int {
 		return exitUsage
 	case errors.Is(err, errFormatUnsupported):
 		return exitUnsupported
-	case errors.Is(err, errNotSettled):
+	case errors.Is(err, errNotSettled), errors.Is(err, eventstore.ErrNotRevealed):
 		return exitNotSettled
 	case errors.Is(err, eventstore.ErrRoundNotFound):
 		return exitNotFound
+	case errors.Is(err, eventstore.ErrKeyringRequired), errors.Is(err, sealing.ErrUnknownKey), errors.Is(err, sealing.ErrKeyring):
+		return exitUsage
 	case errors.Is(err, eventstore.ErrNoCheckpoint), errors.Is(err, eventstore.ErrCorrupt):
 		return exitFailed
 	case errors.As(err, &f):

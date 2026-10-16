@@ -73,6 +73,10 @@ type transition struct {
 	checkpoint bool
 	stateHash  chain.Hash
 	final      bool
+	// reveal: this record first makes the round final; Transaction B
+	// writes the round's secret config to round_secret_reveals (LBT-21
+	// K-6).
+	reveal bool
 	// betPlayers memoizes player -> account for the FromHold postings.
 	betPlayers map[string][16]byte
 }
@@ -187,10 +191,16 @@ func computeTransition(r rulesEntry, roundID [16]byte, st roundState, adm admiss
 		}
 	}
 
-	// 7. Finality.
+	// 7. Finality, and the reveal on the record that first makes the round
+	// final (LBT-21 K-6).
 	if tr.final, err = r.policy.Final(tr.next); err != nil {
 		return failClosed(fmt.Errorf("final: %w", err))
 	}
+	finalBefore, err := r.policy.Final(st.state)
+	if err != nil {
+		return failClosed(fmt.Errorf("final before: %w", err))
+	}
+	tr.reveal = tr.final && !finalBefore
 	return tr, nil
 }
 

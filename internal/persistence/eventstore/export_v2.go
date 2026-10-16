@@ -18,15 +18,16 @@ import (
 // ExportHistoryV2 writes round roundID as an "orvex/audit-history/v2" file:
 // ExportHistory's header fields, records 0..S verbatim, then the round's
 // ledger rows of sequences 0..S as one ledger line per record (LBT-18 L-9).
-// On error, w may hold a partial file the caller must discard.
-func ExportHistoryV2(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Writer) (Export, error) {
+// opts selects the secret config's source as for ExportHistory (LBT-21
+// K-9). On error, w may hold a partial file the caller must discard.
+func ExportHistoryV2(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Writer, opts Options) (Export, error) {
 	tx, err := db.BeginTx(ctx, postgres.SnapshotReadTxOptions())
 	if err != nil {
 		return Export{}, fmt.Errorf("eventstore: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	secret, cps, head, err := readExportBase(ctx, tx, roundID)
+	secret, cps, head, err := readExportBase(ctx, tx, roundID, opts)
 	if err != nil {
 		return Export{}, err
 	}
@@ -64,21 +65,14 @@ func ExportHistoryV2(ctx context.Context, db TxBeginner, roundID [16]byte, w io.
 	return Export{RoundID: roundID, Records: int(n), Head: head, Checkpoints: cps}, nil //nolint:gosec // G115: n is one round's record count (last + 1), as in ExportHistory's int(n)
 }
 
-// readExportBase reads the round's secret config, its snapshots as
-// checkpoints and the head at the newest snapshot, with ExportHistory's
-// queries and checks (LBT-10 section 7.2 steps 1 to 4).
-func readExportBase(ctx context.Context, tx pgx.Tx, roundID [16]byte) ([]byte, []Checkpoint, chain.Hash, error) {
+// readExportBase reads the round's secret config (readSecret), its
+// snapshots as checkpoints and the head at the newest snapshot, with
+// ExportHistory's queries and checks (LBT-10 section 7.2 steps 1 to 4).
+func readExportBase(ctx context.Context, tx pgx.Tx, roundID [16]byte, opts Options) ([]byte, []Checkpoint, chain.Hash, error) {
 	var none chain.Hash
-	var secret []byte
-	err := tx.QueryRow(ctx, `SELECT s.config_secret FROM orvex.rounds r
-		LEFT JOIN orvex.round_secrets s USING (round_id) WHERE r.round_id = $1`, roundID).Scan(&secret)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return nil, nil, none, ErrRoundNotFound
-	case err != nil:
-		return nil, nil, none, fmt.Errorf("eventstore: read secret: %w", err)
-	case secret == nil:
-		return nil, nil, none, fmt.Errorf("%w: round has no secret config", ErrCorrupt)
+	secret, err := readSecret(ctx, tx, roundID, opts)
+	if err != nil {
+		return nil, nil, none, err
 	}
 
 	rows, err := tx.Query(ctx, `SELECT sequence, state_hash FROM orvex.round_snapshots

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"github.com/juano-morello/orvex/internal/canonjson"
 	crashv1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/persistence/eventstore"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
@@ -124,6 +126,12 @@ func TestExportUsage(t *testing.T) {
 			if !strings.Contains(stderr, "usage: crashctl audit export [-unsettled] [-format NAME] ROUND_ID FILE") {
 				t.Errorf("stderr = %q, want the usage", stderr)
 			}
+			const helpText = "write the history even if the round is not settled; for a round whose secret is not revealed, " +
+				"this reads the sealed secret (needs SELECT on orvex.round_secrets and ORVEX_SECRET_KEYRING_FILE); " +
+				"the file then discloses its secret config"
+			if !strings.Contains(stderr, helpText) {
+				t.Errorf("stderr = %q, want the K-10 -unsettled help text", stderr)
+			}
 		})
 	}
 }
@@ -215,26 +223,92 @@ func TestExportConnectError(t *testing.T) {
 	}
 }
 
-func TestExportNeverPrintsPassword(t *testing.T) {
-	const secret = "sentinel-pw"
-	for name, dsn := range map[string]string{
-		"unparsable":  "postgres://u:" + secret + "@127.0.0.1:1/db?connect_timeout=x",
-		"unreachable": "postgres://u:" + secret + "@127.0.0.1:1/db?connect_timeout=2",
-		"key=value":   "host=127.0.0.1 port=1 user=u password=" + secret + " dbname=db connect_timeout=2",
-	} {
+// TestExportNeverPrintsDatabaseURL: no output of audit export, whatever the
+// failure, holds any part of ORVEX_DATABASE_URL (LBT-21 K-12).
+func TestExportNeverPrintsDatabaseURL(t *testing.T) {
+	t.Setenv(sealing.KeyringFileEnv, "")
+	for name, dsn := range sentinelDSNs {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(databaseURLEnv, dsn)
-			for _, target := range []string{filepath.Join(t.TempDir(), "out.jsonl"), "-"} {
-				code, stdout, stderr := exportCmd(t, exportRoundID, target)
+			file := filepath.Join(t.TempDir(), "out.jsonl")
+			for _, args := range [][]string{
+				{exportRoundID, file},
+				{exportRoundID, "-"},
+				{"-unsettled", exportRoundID, file},
+			} {
+				code, stdout, stderr := exportCmd(t, args...)
 				if code != exitUsage && code != exitIO {
-					t.Errorf("%s: exit code = %d, want %d or %d", target, code, exitUsage, exitIO)
+					t.Errorf("%v: exit code = %d, want %d or %d (stderr %q)", args, code, exitUsage, exitIO, stderr)
 				}
-				if strings.Contains(stderr, secret) || strings.Contains(stdout, secret) {
-					t.Errorf("%s: output contains the password: stdout %q, stderr %q", target, stdout, stderr)
-				}
+				requireOneExportLine(t, stderr)
+				requireNoSentinel(t, "stdout", stdout, dsn)
+				requireNoSentinel(t, "stderr", stderr, dsn)
+				requireNoFile(t, file)
 			}
 		})
 	}
+}
+
+// writeKeyringFile writes content to a new file with mode and returns its
+// path.
+func writeKeyringFile(t *testing.T, content string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "keyring")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil { //nolint:gosec // G302: tests set too-open modes to check that the keyring is rejected
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestExportKeyringEnv: ORVEX_SECRET_KEYRING_FILE is read only with
+// -unsettled; a keyring that cannot be used is exit 2 with one line that
+// names the rule broken and never the path or key material (LBT-21 K-13).
+func TestExportKeyringEnv(t *testing.T) {
+	// The password occurs in no expected message (step d would scrub it).
+	t.Setenv(databaseURLEnv, "postgres://u:sentinel-kr-pw@127.0.0.1:1/db?connect_timeout=2") //nolint:gosec // G101: dummy credentials for a port nothing listens on, not a secret
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, sealing.KeySize))
+	valid := "active k1\nkey k1 " + key + "\n"
+	open := writeKeyringFile(t, valid, 0o644)
+	tests := []struct {
+		name, path, reason string
+	}{
+		{"missing file", filepath.Join(t.TempDir(), "missing"), "unreadable"},
+		{"mode 0644", open, "permissions too open (0644)"},
+		{"malformed", writeKeyringFile(t, "active k1\nkey k1 !!!\n", 0o600), "line 2: key is not padded standard base64"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(sealing.KeyringFileEnv, tt.path)
+			file := filepath.Join(t.TempDir(), "out.jsonl")
+			code, stdout, stderr := exportCmd(t, "-unsettled", exportRoundID, file)
+			if code != exitUsage || stdout != "" {
+				t.Errorf("exit code = %d, stdout %q; want %d and empty", code, stdout, exitUsage)
+			}
+			if want := "crashctl: audit export: ORVEX_SECRET_KEYRING_FILE: " + tt.reason + "\n"; stderr != want {
+				t.Errorf("stderr = %q, want %q", stderr, want)
+			}
+			if strings.Contains(stderr, tt.path) || strings.Contains(stderr, filepath.Dir(tt.path)) || strings.Contains(stderr, key) || strings.Contains(stderr, "!!!") {
+				t.Errorf("stderr = %q names the path or key material", stderr)
+			}
+			requireNoFile(t, file)
+		})
+	}
+	t.Run("empty variable: no keyring", func(t *testing.T) {
+		t.Setenv(sealing.KeyringFileEnv, "")
+		if code, _, stderr := exportCmd(t, "-unsettled", exportRoundID, filepath.Join(t.TempDir(), "out.jsonl")); code != exitIO {
+			t.Errorf("exit code = %d, want %d (connect; stderr %q)", code, exitIO, stderr)
+		}
+	})
+	t.Run("ignored without -unsettled", func(t *testing.T) {
+		t.Setenv(sealing.KeyringFileEnv, open)
+		code, _, stderr := exportCmd(t, exportRoundID, filepath.Join(t.TempDir(), "out.jsonl"))
+		if code != exitIO || strings.Contains(stderr, sealing.KeyringFileEnv) {
+			t.Errorf("exit code = %d, stderr %q; want %d (connect) without the keyring", code, stderr, exitIO)
+		}
+	})
 }
 
 func TestExportConnConfig(t *testing.T) {
@@ -264,7 +338,7 @@ func TestExportConnConfig(t *testing.T) {
 }
 
 func TestExportExitCodes(t *testing.T) {
-	wrapped := func(err error) error { return fmt.Errorf("eventstore: read secret: %w", err) }
+	wrapped := func(err error) error { return fmt.Errorf("eventstore: read revealed secret: %w", err) }
 	finalErr := errors.New("execution: state has the wrong type for the crash rules")
 	tests := []struct {
 		name string
@@ -290,6 +364,13 @@ func TestExportExitCodes(t *testing.T) {
 		{"final error", fmt.Errorf("%w: %w", errSettlementCheck, finalErr), exitFailed},
 		{"not settled", errNotSettled, exitNotSettled},
 		{"output exists", errOutputExists, exitUsage},
+		{"not revealed", eventstore.ErrNotRevealed, exitNotSettled},
+		{"keyring required", eventstore.ErrKeyringRequired, exitUsage},
+		{"unknown key", fmt.Errorf("%w: secret config: %w", eventstore.ErrCorrupt, sealing.ErrUnknownKey), exitUsage},
+		{"authentication failure", fmt.Errorf("%w: secret config: %w", eventstore.ErrCorrupt, sealing.ErrOpen), exitFailed},
+		{"unknown scheme", fmt.Errorf("%w: secret config: %w", eventstore.ErrCorrupt, sealing.ErrScheme), exitFailed},
+		{"keyring file", &sealing.KeyringError{Reason: "unreadable"}, exitUsage},
+		{"sealed secret 42501", fmt.Errorf("eventstore: read sealed secret: %w", &pgconn.PgError{Code: "42501"}), exitIO},
 	}
 	for _, tt := range tests {
 		if got := exportExitCode(tt.err); got != tt.want {

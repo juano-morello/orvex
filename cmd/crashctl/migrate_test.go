@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 )
 
 // unreachableDSN names a port nothing listens on, so a run that gets past
@@ -127,23 +128,38 @@ func TestMigrateConnectError(t *testing.T) {
 	}
 }
 
-func TestMigrateNeverPrintsPassword(t *testing.T) {
-	const secret = "sentinel-pw"
-	for name, dsn := range map[string]string{
-		"unparsable":  "postgres://u:" + secret + "@127.0.0.1:1/db?connect_timeout=x",
-		"unreachable": "postgres://u:" + secret + "@127.0.0.1:1/db?connect_timeout=2",
-		"key=value":   "host=127.0.0.1 port=1 user=u password=" + secret + " dbname=db connect_timeout=2",
-	} {
+// TestMigrateNeverPrintsDatabaseURL: no output of crashctl migrate holds
+// any part of ORVEX_DATABASE_URL (LBT-21 K-12).
+func TestMigrateNeverPrintsDatabaseURL(t *testing.T) {
+	for name, dsn := range sentinelDSNs {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(databaseURLEnv, dsn)
-			code, stdout, stderr := runMigrateCmd("up")
-			if code != exitUsage && code != exitIO {
-				t.Errorf("exit code = %d, want %d or %d", code, exitUsage, exitIO)
-			}
-			if strings.Contains(stderr, secret) || strings.Contains(stdout, secret) {
-				t.Errorf("output contains the password: stdout %q, stderr %q", stdout, stderr)
+			for _, sub := range [][]string{{"up"}, {"down", "-to", "0"}, {"status"}} {
+				code, stdout, stderr := runMigrateCmd(sub...)
+				if code != exitUsage && code != exitIO {
+					t.Errorf("%v: exit code = %d, want %d or %d (stderr %q)", sub, code, exitUsage, exitIO, stderr)
+				}
+				if !strings.HasPrefix(stderr, "crashctl: migrate "+sub[0]+": ") || strings.Count(stderr, "\n") != 1 {
+					t.Errorf("%v: stderr = %q, want one crashctl: migrate %s: line", sub, stderr, sub[0])
+				}
+				requireNoSentinel(t, "stdout", stdout, dsn)
+				requireNoSentinel(t, "stderr", stderr, dsn)
 			}
 		})
+	}
+}
+
+// TestMigrateIgnoresKeyringEnv: crashctl migrate never reads
+// ORVEX_SECRET_KEYRING_FILE (LBT-21 K-13).
+func TestMigrateIgnoresKeyringEnv(t *testing.T) {
+	t.Setenv(databaseURLEnv, unreachableDSN)
+	t.Setenv(sealing.KeyringFileEnv, writeKeyringFile(t, "active k1\n", 0o644))
+	code, stdout, stderr := runMigrateCmd("status")
+	if code != exitIO || stdout != "" {
+		t.Errorf("exit code = %d, stdout %q; want %d (connect) and empty", code, stdout, exitIO)
+	}
+	if strings.Contains(stderr, sealing.KeyringFileEnv) || strings.Contains(stderr, "keyring") {
+		t.Errorf("stderr = %q mentions the keyring", stderr)
 	}
 }
 

@@ -26,6 +26,7 @@ Read the ADRs relevant to the area you touch before you plan or edit:
 - PostgreSQL, transactions, ledger, outbox: ADR-005
 - tests and CI: ADR-006
 - repository layout, modules, build, tooling: ADR-007
+- round secrets, sealing, the keyring, the reveal table: ADR-004, ADR-005 and `docs/specs/87d8d90c_round-secret-protection.md` (LBT-21)
 
 ## Flag conflicts explicitly
 
@@ -40,6 +41,8 @@ If a change conflicts with, or needs to deviate from, an ADR, say so explicitly 
 - Released historical rules versions, golden vectors and canonical serializers are immutable (ADR-001, ADR-003, ADR-007).
 - Game `Decide`/`Evolve` code is pure: no I/O, wall clock or uncontrolled randomness (ADR-003).
 - Merged migrations in `migrations/` are immutable; change the schema with a new migration (checksums are enforced).
+- Round secret configs are sealed at rest (LBT-21). New rounds store only the AES-256-GCM form (`internal/persistence/sealing`), and the record that settles a round writes the plaintext to `orvex.round_secret_reveals`. No SQL statement, log line or error text may carry a key, keyring content or an unrevealed secret config. Tests seal with `pgtest.Keyring()`; no other key belongs in the repository.
+- `crashctl` never prints any part of `ORVEX_DATABASE_URL` (LBT-21 K-12): render database errors with `describe`, never with `err.Error()`.
 
 ## Commands
 

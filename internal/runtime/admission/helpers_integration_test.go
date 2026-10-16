@@ -200,7 +200,8 @@ func roundConfig(t *testing.T, roundID [16]byte, seed [32]byte) (v1.Config, v1.S
 
 // createRoundWith is createRoundRules with round_secrets.close_offset_micros
 // set to *offset, or NULL when offset is nil (a round created before
-// migration 0009).
+// migration 0009). The secret config is stored sealed with the pgtest
+// keyring, as round creation does from migration 0010 (LBT-21).
 func createRoundWith(t *testing.T, db *pgxpool.Pool, roundID [16]byte, seed [32]byte, rules game.RulesVersion, offset *int64) (v1.Config, v1.State) {
 	t.Helper()
 	cfg, state := roundConfig(t, roundID, seed)
@@ -218,13 +219,16 @@ func createRoundWith(t *testing.T, db *pgxpool.Pool, roundID [16]byte, seed [32]
 		t.Fatal(err)
 	}
 	hash := chain.LinkHash(record)
+	sealed := pgtest.Seal(t, roundID, secret)
 	inTx(t, db, func(tx pgx.Tx) {
 		mustExec(t, tx, `INSERT INTO orvex.rounds
 			(round_id, game, rules_version, schema_version, state_version, chain, created_at_unix_micro)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 			roundID, string(g.Game), int64(rules), int64(g.SchemaVersion), int64(g.StateVersion), chain.Version, g.CreatedAtUnixMicro)
-		mustExec(t, tx, `INSERT INTO orvex.round_secrets (round_id, config_secret, close_offset_micros) VALUES ($1, $2, $3)`,
-			roundID, secret, offset)
+		mustExec(t, tx, `INSERT INTO orvex.round_secrets
+			(round_id, secret_scheme, secret_key_id, secret_nonce, secret_ciphertext, close_offset_micros)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			roundID, sealed.Scheme, sealed.KeyID, sealed.Nonce, sealed.Ciphertext, offset)
 		mustExec(t, tx, `INSERT INTO orvex.round_admission_heads (round_id) VALUES ($1)`, roundID)
 		mustExec(t, tx, `INSERT INTO orvex.round_execution_heads (round_id, processed_sequence, fencing_token)
 			VALUES ($1, 0, 0)`, roundID)

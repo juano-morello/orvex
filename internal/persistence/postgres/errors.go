@@ -33,6 +33,9 @@ const (
 	// CodeHoldUnreleased: at commit, a command record's admission still
 	// holds credits (LBT-12 spec E-11).
 	CodeHoldUnreleased = "OX009"
+	// CodeSecretReveal: a reveal row names a chain record that is not an
+	// accepted command record of its round (LBT-21 K-15).
+	CodeSecretReveal = "OX010"
 )
 
 // Standard SQLSTATEs that IsRetryable accepts.

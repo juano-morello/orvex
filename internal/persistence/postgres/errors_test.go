@@ -65,6 +65,7 @@ func TestCodes(t *testing.T) {
 		{CodeEncoding, "OX007"},
 		{CodeRecordBinding, "OX008"},
 		{CodeHoldUnreleased, "OX009"},
+		{CodeSecretReveal, "OX010"},
 	}
 	for _, c := range codes {
 		if c.got != c.want {

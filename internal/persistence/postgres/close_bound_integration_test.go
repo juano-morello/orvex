@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
 )
 
 // Tests of migration 0009's schema objects (LBT-12 engineer addendum): the
@@ -28,13 +29,16 @@ func TestCloseBoundColumns(t *testing.T) {
 			(round_id, game, rules_version, schema_version, state_version, chain, created_at_unix_micro)
 			VALUES ($1, 'crash', 1, 1, 1, 'orvex/audit/v1', $2)`, round, baseTimeUnixMicro)
 	}
+	sealed := pgtest.Seal(t, round, []byte(`{}`))
 	insertSecret := func(offset int64) func(tx pgx.Tx) error {
 		return func(tx pgx.Tx) error {
 			if err := insertRound(tx); err != nil {
 				return err
 			}
-			return exec(tx, `INSERT INTO orvex.round_secrets (round_id, config_secret, close_offset_micros) VALUES ($1, $2, $3)`,
-				round, []byte(`{}`), offset)
+			return exec(tx, `INSERT INTO orvex.round_secrets
+				(round_id, secret_scheme, secret_key_id, secret_nonce, secret_ciphertext, close_offset_micros)
+				VALUES ($1, $2, $3, $4, $5, $6)`,
+				round, sealed.Scheme, sealed.KeyID, sealed.Nonce, sealed.Ciphertext, offset)
 		}
 	}
 	requireStmtCode(t, pool, insertSecret(-1), codeCheckViolation, "round_secrets_close_offset_check")
