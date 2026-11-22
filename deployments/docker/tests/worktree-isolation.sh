@@ -29,7 +29,8 @@ for label in a b; do
   mkdir -p "$dir/.devcontainer"
   cp "$root/.devcontainer/compose.yaml" "$dir/.devcontainer/"
   cp "$root/deployments/docker/"{compose.yaml,demo-credentials.py,unrevealed-rounds.sql} "$dir/deployments/docker/"
-  last=$(basename "$(ls "$dir"/migrations/*.up.sql | tail -1)")
+  migrations=("$dir"/migrations/*.up.sql)
+  last=${migrations[-1]##*/}
   printf -v version '%04d' "$((10#${last%%_*} + 1))"
   base="$dir/migrations/${version}_probe_$label"
   echo "CREATE TABLE orvex.probe_$label (id integer);" > "$base.up.sql"
@@ -50,7 +51,7 @@ want="$(id -u):$(id -g) 700"
 for label in a b; do
   got=$("$tmp/$label/workspace" exec stat -c '%u:%g %a' "$creds")
   [[ $got == "$want" ]] || { echo "$label credentials directory is $got, want $want" >&2; exit 1; }
-  "$tmp/$label/workspace" exec sh -c 'test "$(stat -c %a '"$creds"'/keyring)" = 600 && test -r '"$creds"'/keyring'
+  [[ $("$tmp/$label/workspace" exec stat -c %a "$creds/keyring") == 600 ]]
   fingerprint[$label]=$("$tmp/$label/workspace" exec sha256sum "$creds/keyring")
 done
 [[ ${fingerprint[a]} != "${fingerprint[b]}" ]] || { echo 'previews share a keyring' >&2; exit 1; }
