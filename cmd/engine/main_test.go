@@ -81,13 +81,6 @@ func TestRunWriteError(t *testing.T) {
 	}
 }
 
-func TestRunWithoutServer(t *testing.T) {
-	var stderr bytes.Buffer
-	if code := run(context.Background(), nil, lookupIn(nil), io.Discard, &stderr, nil); code != 1 || !strings.Contains(stderr.String(), "not linked") {
-		t.Errorf("exit code = %d, stderr %q; want 1 and not linked", code, stderr.String())
-	}
-}
-
 // writeFile writes content to a new file with mode perm and returns its
 // path.
 func writeFile(t *testing.T, name, content string, perm os.FileMode) string {

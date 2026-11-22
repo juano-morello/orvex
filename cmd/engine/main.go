@@ -28,6 +28,7 @@ import (
 	"github.com/juano-morello/orvex/internal/runtime/admission"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 	"github.com/juano-morello/orvex/internal/runtime/lifecycle"
+	"github.com/juano-morello/orvex/internal/transport/engineapi"
 )
 
 const name = "engine"
@@ -56,7 +57,7 @@ type serveFunc func(ctx context.Context, ln net.Listener, pool *pgxpool.Pool, se
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.LookupEnv, os.Stdout, os.Stderr, nil)
+	code := run(ctx, os.Args[1:], os.LookupEnv, os.Stdout, os.Stderr, engineapi.Serve)
 	stop()
 	os.Exit(code)
 }
@@ -87,9 +88,6 @@ func run(ctx context.Context, args []string, lookup func(string) (string, bool),
 	fail := func(code int, msg string) int {
 		_, _ = fmt.Fprintf(stderr, "%s: %s\n", name, msg)
 		return code
-	}
-	if serve == nil {
-		return fail(exitFailed, "the engine API server is not linked into this build")
 	}
 
 	cfg, err := loadConfig(lookup)
