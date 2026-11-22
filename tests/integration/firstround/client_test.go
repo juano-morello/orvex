@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -23,6 +24,40 @@ import (
 // the bearer token's, never a body field.
 
 const requestTimeout = 15 * time.Second
+
+// wireContract is the gateway contract the client checks.
+type wireContract struct {
+	name string
+	// receiptStatus is the status of every 202 receipt, new or duplicate.
+	receiptStatus string
+	// finalNoContent: a subscription at a round's final cursor answers 204
+	// before any stream starts. Otherwise it is a 200 stream whose first
+	// event is "end".
+	finalNoContent bool
+}
+
+// wireContractEnv selects the contract: unset is the repaired contract of
+// PR 23, and "baseline" is the 11db2aa gateway's, so that the same client
+// can measure that revision.
+const wireContractEnv = "ORVEX_ACCEPTANCE_WIRE"
+
+var (
+	currentContract  = wireContract{name: "current", receiptStatus: "admitted", finalNoContent: true}
+	baselineContract = wireContract{name: "baseline", receiptStatus: "pending", finalNoContent: false}
+)
+
+func contract(t *testing.T) wireContract {
+	t.Helper()
+	switch v := os.Getenv(wireContractEnv); v {
+	case "":
+		return currentContract
+	case baselineContract.name:
+		return baselineContract
+	default:
+		t.Fatalf("%s=%q: want unset or %q", wireContractEnv, v, baselineContract.name)
+		return wireContract{}
+	}
+}
 
 // wireInt is an int64 sent as a decimal JSON string.
 type wireInt int64
@@ -49,6 +84,7 @@ type receipt struct {
 	Sequence               wireInt `json:"sequence"`
 	EffectiveTimeUnixMicro wireInt `json:"effectiveTimeUnixMicro"`
 	Duplicate              bool    `json:"duplicate"`
+	Status                 string  `json:"status"`
 }
 
 // commandStatus is the body of GET /v1/commands/{clientCommandId}.
@@ -195,6 +231,10 @@ func decodeReceipt(t *testing.T, who, round string, b []byte) receipt {
 	if r.RoundID != round || r.Sequence < 1 || r.EffectiveTimeUnixMicro <= 0 {
 		t.Fatalf("%s: receipt %s, want round %s, a sequence >= 1 and an effective time", who, b, round)
 	}
+	if c := contract(t); r.Status != c.receiptStatus {
+		t.Fatalf("%s: receipt %s, want status %q of the %s contract (%s=%s selects the 11db2aa gateway's %q)",
+			who, b, c.receiptStatus, c.name, wireContractEnv, baselineContract.name, baselineContract.receiptStatus)
+	}
 	return r
 }
 
@@ -248,4 +288,65 @@ func (p *player) waitCurrentRound(t *testing.T, timeout time.Duration, accept fu
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// retryWait spaces identical resubmissions and lookups.
+const retryWait = 200 * time.Millisecond
+
+// submitDefinite submits body until the gateway answers definitely. A
+// transport error or a 503 leaves the outcome open, since the command may
+// have been admitted, so it resubmits the identical request: the recovery
+// the gateway protocol prescribes. It returns the definite answer and how
+// many requests it sent.
+func (p *player) submitDefinite(t *testing.T, round string, body []byte, timeout time.Duration) (int, []byte, int) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for n := 1; ; n++ {
+		status, b, err := p.call(http.MethodPost, "/v1/rounds/"+round+"/commands", body)
+		if err == nil && status != http.StatusServiceUnavailable {
+			return status, b, n
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: submit %s to round %s: no definite answer in %d requests within %v; last: %d %s %v", p.name, body, round, n, timeout, status, b, err)
+		}
+		time.Sleep(retryWait)
+	}
+}
+
+// awaitOutcome polls the lookup of clientID until execution decided the
+// command, and returns that status: accepted or rejected. A 404 is not
+// definitive while the command may still be being admitted.
+func (p *player) awaitOutcome(t *testing.T, clientID string, timeout time.Duration) commandStatus {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		status, b, err := p.call(http.MethodGet, "/v1/commands/"+clientID, nil)
+		switch {
+		case err != nil, status == http.StatusNotFound, status == http.StatusServiceUnavailable:
+		case status == http.StatusOK:
+			var s commandStatus
+			if err := json.Unmarshal(b, &s); err != nil {
+				t.Fatalf("%s: lookup %s: %s: %v", p.name, clientID, b, err)
+			}
+			switch s.Status {
+			case "accepted", "rejected":
+				return s
+			case "pending":
+			default:
+				t.Fatalf("%s: lookup %s: status %q, want pending, accepted or rejected", p.name, clientID, s.Status)
+			}
+		default:
+			t.Fatalf("%s: lookup %s = %d %s", p.name, clientID, status, b)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: command %s undecided after %v; last lookup: %d %s %v", p.name, clientID, timeout, status, b, err)
+		}
+		time.Sleep(retryWait / 4)
+	}
+}
+
+func errorCode(b []byte) string {
+	var e wireError
+	_ = json.Unmarshal(b, &e)
+	return e.Code
 }

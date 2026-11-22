@@ -37,6 +37,8 @@ type controlledRound struct {
 	seed [32]byte
 	// d is the crash deadline offset D in microseconds.
 	d int64
+	// created is the round's created_at, on the database clock.
+	created int64
 }
 
 // createControlledRound creates the round in the test process, sealed with
@@ -45,7 +47,13 @@ type controlledRound struct {
 // adopts the round from the database.
 func createControlledRound(t *testing.T, p *platform, minD, maxD time.Duration) controlledRound {
 	t.Helper()
-	id := randomID(t)
+	return createRoundWithID(t, p, randomID(t), minD, maxD)
+}
+
+// createRoundWithID is createControlledRound for round ID id. The seed
+// depends only on id, minD and maxD.
+func createRoundWithID(t *testing.T, p *platform, id [16]byte, minD, maxD time.Duration) controlledRound {
+	t.Helper()
 	seed := roundtest.SeedWithDeadline(t, id, minD, maxD)
 	cfg := v1.Config{RoundID: id, Seed: seed, MinBetCredits: 1, MaxBetCredits: 1_000_000_000, MaxBets: 100}
 	state, err := v1.Rules{}.InitialState(cfg)
@@ -53,13 +61,14 @@ func createControlledRound(t *testing.T, p *platform, minD, maxD time.Duration) 
 		t.Fatal(err)
 	}
 	x := roundtest.NewExecutor(t, p.obs.db, nil, nil)
+	created := p.obs.now()
 	if _, err := x.CreateRound(context.Background(), execution.NewRound{
 		RoundID: id, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber,
-		Config: cfg, CreatedAtUnixMicro: p.obs.now(),
+		Config: cfg, CreatedAtUnixMicro: created,
 	}); err != nil {
 		t.Fatalf("CreateRound: %v", err)
 	}
-	return controlledRound{id: id, text: string(canonjson.UUID(id)), seed: seed, d: state.CrashDeadlineOffsetMicros}
+	return controlledRound{id: id, text: string(canonjson.UUID(id)), seed: seed, d: state.CrashDeadlineOffsetMicros, created: created}
 }
 
 // requireAdmission requires the receipt to name a stored admission of want
@@ -172,7 +181,6 @@ func TestLostCashOutResponsePaysOnce(t *testing.T) {
 	if t0 == 0 {
 		t.Fatal("RoundStarted streamed but no StartRound record is stored")
 	}
-	preReveal := engine.log.String() + gw.log.String()
 	if p.obs.settled(r.id) {
 		t.Fatal("round settled right after it started")
 	}
@@ -306,17 +314,18 @@ func TestLostCashOutResponsePaysOnce(t *testing.T) {
 	p.obs.requirePlayer("bob", 1000-200, 0)
 	p.obs.requireSettledLedger([][16]byte{r.id}, 300-payout)
 
-	report := p.auditV2(r.id, records)
+	report, export := p.auditV2(r.id, records)
 	if want := "decision-replay ok commands 6 accepted 6 rejected 0 "; !strings.Contains(report, want) {
 		t.Errorf("verify report:\n%s\nwant %q", report, want)
+	}
+	seed := seedSecret("the round's seed", r.seed)
+	if got := findLeaks([]output{{"the v2 export", string(export)}}, []secret{seed}); got == nil {
+		t.Error("the v2 export does not reveal the seed of the settled round")
 	}
 
 	requireCleanStop(t, gw)
 	requireCleanStop(t, engine)
-	p.requireNoSecretsInOutput()
-	if strings.Contains(preReveal, seedHex) {
-		t.Error("a service logged the round's seed before settlement")
-	}
+	p.requireNoSecretsInOutput(seed)
 	reconnects, repeats := aliceStream.stats()
 	t.Logf("round %s: T0 %d, D %dµs, cash-out at +%dµs paid %d; alice's stream reconnected %d times, %d repeated frames",
 		r.text, t0, r.d, int64(lost.EffectiveTimeUnixMicro)-t0, payout, reconnects, repeats)

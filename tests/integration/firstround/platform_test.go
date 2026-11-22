@@ -3,10 +3,10 @@
 package firstround
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -54,7 +55,13 @@ type platform struct {
 // may contain.
 func newPlatform(t *testing.T, players ...string) *platform {
 	t.Helper()
-	p := &platform{t: t, bin: builtBinaries(t), tokens: map[string]string{}}
+	return newPlatformFrom(t, builtBinaries(t), players...)
+}
+
+// newPlatformFrom is newPlatform with the services in bin.
+func newPlatformFrom(t *testing.T, bin binaries, players ...string) *platform {
+	t.Helper()
+	p := &platform{t: t, bin: bin, tokens: map[string]string{}}
 	requireVersion(t, p.bin.engine, "engine")
 	requireVersion(t, p.bin.gateway, "gateway")
 	requireVersion(t, p.bin.crashctl, "crashctl")
@@ -225,6 +232,9 @@ type engineConfig struct {
 	bettingWindow time.Duration
 	// addr is the listen address; empty means 127.0.0.1:0.
 	addr string
+	// poolMaxConns sets pool_max_conns in the engine's database URL; 0
+	// leaves pgxpool's default.
+	poolMaxConns int
 }
 
 func (p *platform) startEngine(cfg engineConfig) *service {
@@ -233,8 +243,19 @@ func (p *platform) startEngine(cfg engineConfig) *service {
 	if addr == "" {
 		addr = "127.0.0.1:0"
 	}
+	dsn := p.engineDSN
+	if cfg.poolMaxConns > 0 {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			p.t.Fatal(err)
+		}
+		q := u.Query()
+		q.Set("pool_max_conns", strconv.Itoa(cfg.poolMaxConns))
+		u.RawQuery = q.Encode()
+		dsn = u.String()
+	}
 	s := startService(p.t, "engine", p.bin.engine, []string{
-		"ORVEX_DATABASE_URL=" + p.engineDSN,
+		"ORVEX_DATABASE_URL=" + dsn,
 		"ORVEX_SECRET_KEYRING_FILE=" + p.keyringFile,
 		"ORVEX_ENGINE_ADDR=" + addr,
 		"ORVEX_GATEWAY_TOKEN_FILE=" + p.tokenFile,
@@ -268,25 +289,64 @@ func (p *platform) player(name string, gateway *service) *player {
 	return newPlayer(name, tok, "http://"+gateway.addr)
 }
 
-// requireNoSecretsInOutput requires that no service log and no crashctl
-// output carries a password, key, token, or any extra value given.
-func (p *platform) requireNoSecretsInOutput(extra ...string) {
-	p.t.Helper()
-	outputs := append([]string{}, p.cli...)
-	names := make([]string, 0, len(p.cli)+len(p.services))
-	for range p.cli {
-		names = append(names, "crashctl")
-	}
-	for _, s := range p.services {
-		outputs = append(outputs, s.log.String())
-		names = append(names, s.name)
-	}
-	for i, out := range outputs {
-		for _, secret := range append(append([]string{}, p.secrets...), extra...) {
-			if strings.Contains(out, secret) {
-				p.t.Errorf("%s output carries a secret value (%d bytes)", names[i], len(secret))
+// secret is a value no output may carry, in each text form it could take.
+type secret struct {
+	name  string
+	forms []string
+}
+
+// seedSecret is a round seed as a secret: lowercase and uppercase hex and
+// standard and URL-safe base64.
+func seedSecret(name string, seed [32]byte) secret {
+	h := hex.EncodeToString(seed[:])
+	return secret{name, []string{h, strings.ToUpper(h), base64.StdEncoding.EncodeToString(seed[:]), base64.RawURLEncoding.EncodeToString(seed[:])}}
+}
+
+// output is one process's complete output.
+type output struct{ name, text string }
+
+// findLeaks returns "<output> carries <secret>" for each output that holds
+// a form of a secret.
+func findLeaks(outputs []output, secrets []secret) []string {
+	var found []string
+	for _, o := range outputs {
+		for _, s := range secrets {
+			if slices.ContainsFunc(s.forms, func(f string) bool { return f != "" && strings.Contains(o.text, f) }) {
+				found = append(found, o.name+" carries "+s.name)
 			}
 		}
+	}
+	return found
+}
+
+// outputs returns every crashctl output and the complete log of each
+// service, which requires every service to have exited.
+func (p *platform) outputs() []output {
+	p.t.Helper()
+	var out []output
+	for _, c := range p.cli {
+		out = append(out, output{"crashctl", c})
+	}
+	for i, s := range p.services {
+		if !s.stopped() {
+			p.t.Fatalf("%s is still running, so its log is incomplete: stop every service before checking for secrets", s.name)
+		}
+		out = append(out, output{fmt.Sprintf("%s #%d", s.name, i), s.log.String()})
+	}
+	return out
+}
+
+// requireNoSecretsInOutput requires that no service log, from start
+// through shutdown, and no crashctl output carries a password, key, token,
+// or any extra secret given. Call it after stopping every service.
+func (p *platform) requireNoSecretsInOutput(extra ...secret) {
+	p.t.Helper()
+	secrets := slices.Clone(extra)
+	for i, v := range p.secrets {
+		secrets = append(secrets, secret{fmt.Sprintf("credential %d (%d bytes)", i, len(v)), []string{v}})
+	}
+	for _, leak := range findLeaks(p.outputs(), secrets) {
+		p.t.Errorf("%s", leak)
 	}
 }
 
@@ -307,8 +367,8 @@ var exportRecords = regexp.MustCompile(`(?m)^records (\d+) of (\d+) head ([0-9a-
 // auditV2 exports the settled round as orvex/audit-history/v2 with an
 // auditor role and no keyring, verifies the file with -expect-head set to
 // the head the export printed, and requires that head to be the round's
-// newest chain record. It returns the verifier report.
-func (p *platform) auditV2(round [16]byte, records []storedRecord) string {
+// newest chain record. It returns the verifier report and the export.
+func (p *platform) auditV2(round [16]byte, records []storedRecord) (string, []byte) {
 	p.t.Helper()
 	password := randomHex(p.t)
 	p.secrets = append(p.secrets, password)
@@ -328,15 +388,11 @@ func (p *platform) auditV2(round [16]byte, records []storedRecord) string {
 		p.t.Fatalf("export: %s records head %s; database: %d records head %s", m[1], head, len(records), last.Hash)
 	}
 
-	f, err := os.Open(file) //nolint:gosec // G304: file is the export this test wrote
+	export, err := os.ReadFile(file) //nolint:gosec // G304: file is the export this test wrote
 	if err != nil {
 		p.t.Fatal(err)
 	}
-	firstLine, err := bufio.NewReader(f).ReadBytes('\n')
-	_ = f.Close()
-	if err != nil {
-		p.t.Fatal(err)
-	}
+	firstLine, _, _ := bytes.Cut(export, []byte("\n"))
 	var header struct {
 		Format string `json:"format"`
 	}
@@ -357,5 +413,5 @@ func (p *platform) auditV2(round [16]byte, records []storedRecord) string {
 	if !strings.HasSuffix(ver.stdout, "\nok\n") {
 		p.t.Errorf("verify report:\n%s\nwant it to end with ok", ver.stdout)
 	}
-	return ver.stdout
+	return ver.stdout, export
 }

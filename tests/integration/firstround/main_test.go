@@ -8,10 +8,10 @@
 // the controlled round, and reads it to check what a client cannot see:
 // admissions, chain records and the ledger.
 //
-// The services are never stubbed. Until they are implemented the scenarios
-// fail; they never skip. The TestHarness* self-tests check the proxy, the
-// stream reader, the process supervisor and the database checks without
-// them.
+// The services are never stubbed and a scenario never skips: without a
+// Docker daemon or a build of the services it fails. The TestHarness*
+// self-tests check the proxy, the stream reader, the smoke bet, the secret
+// check, the process supervisor and the database checks without them.
 package firstround
 
 import (

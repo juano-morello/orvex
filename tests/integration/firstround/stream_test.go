@@ -197,6 +197,13 @@ func (w *watcher) session(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNoContent {
+		// The cursor is the round's last record: nothing more will come.
+		if cursor < 0 {
+			return violationf("stream answered 204 to a subscription from genesis")
+		}
+		return errEnded
+	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("stream answered %d %s", resp.StatusCode, b)
@@ -304,6 +311,42 @@ func (w *watcher) stats() (reconnects, repeats int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.reconnects, w.repeats
+}
+
+// requireFinalCursorStops subscribes to round with Last-Event-ID last, the
+// round's final record, and requires the stream to stop without a frame:
+// 204 under the current contract, a 200 stream whose first event is "end"
+// under the baseline one.
+func requireFinalCursorStops(t *testing.T, p *player, round string, last int64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+"/v1/rounds/"+round+"/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Last-Event-ID", strconv.FormatInt(last, 10))
+	resp, err := p.http.Do(req)
+	if err != nil {
+		t.Fatalf("subscribe to round %s at its final cursor %d: %v", round, last, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	c := contract(t)
+	switch {
+	case c.finalNoContent && resp.StatusCode == http.StatusNoContent:
+		return
+	case !c.finalNoContent && resp.StatusCode == http.StatusOK:
+		var first sseEvent
+		_ = readSSE(resp.Body, func(ev sseEvent) error { first = ev; return errEnded })
+		if first.event != "end" {
+			t.Fatalf("subscription at the final cursor %d of round %s: first event %+v, want end", last, round, first)
+		}
+	default:
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		t.Fatalf("subscription at the final cursor %d of round %s = %d %s, want the %s contract's stop (204: %v)",
+			last, round, resp.StatusCode, b, c.name, c.finalNoContent)
+	}
 }
 
 func describeFrames(fs []frame) string {

@@ -130,11 +130,20 @@ func (l *serviceLog) String() string {
 }
 
 // lineWriter splits one stream into lines. os/exec copies each stream on
-// its own goroutine, so partial is never shared.
+// its own goroutine, so partial is never shared until Wait returns.
 type lineWriter struct {
 	log     *serviceLog
 	stream  string
 	partial []byte
+}
+
+// flush records a last line the child wrote without a newline. Call it
+// only after the command's Wait returned.
+func (w *lineWriter) flush() {
+	if len(w.partial) > 0 {
+		w.log.line(w.stream, string(w.partial))
+		w.partial = nil
+	}
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
@@ -165,15 +174,19 @@ func launch(name, bin string, args, env []string, timeout time.Duration) (*servi
 	log := newServiceLog()
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: bin is a binary this test built
 	cmd.Env = env
-	cmd.Stdout = &lineWriter{log: log, stream: "stdout"}
-	cmd.Stderr = &lineWriter{log: log, stream: "stderr"}
+	stdout, stderr := &lineWriter{log: log, stream: "stdout"}, &lineWriter{log: log, stream: "stderr"}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", name, err)
 	}
 	s := &service{name: name, cmd: cmd, log: log, exited: make(chan struct{})}
 	go func() {
+		// Wait returns after both streams reached EOF, so the log is
+		// complete once exited is closed.
 		_ = cmd.Wait()
+		stdout.flush()
+		stderr.flush()
 		close(s.exited)
 	}()
 	timer := time.NewTimer(timeout)
@@ -230,6 +243,17 @@ func (s *service) stop() (int, error) {
 		_ = syscall.Kill(pgid, syscall.SIGKILL)
 		<-s.exited
 		return s.cmd.ProcessState.ExitCode(), errors.New("did not exit within " + stopGrace.String() + " of SIGTERM")
+	}
+}
+
+// stopped reports whether the service exited, so that its log holds
+// everything it wrote.
+func (s *service) stopped() bool {
+	select {
+	case <-s.exited:
+		return true
+	default:
+		return false
 	}
 }
 

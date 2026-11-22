@@ -14,6 +14,8 @@ import (
 	"github.com/juano-morello/orvex/internal/audit/chain"
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
+	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest"
+	"github.com/juano-morello/orvex/internal/persistence/sealing"
 )
 
 // observer reads what no client can see. It never writes.
@@ -251,4 +253,30 @@ func (o observer) payoutsTo(round [16]byte, name string) []int64 {
 		o.t.Fatal(err)
 	}
 	return out
+}
+
+// seed unseals the round's secret config with the test keyring, which
+// sealed it, and returns its seed whether or not settlement revealed it.
+// The seed must match the genesis commitment.
+func (o observer) seed(round [16]byte) [32]byte {
+	o.t.Helper()
+	var sealed sealing.Sealed
+	if err := o.db.QueryRow(context.Background(),
+		`SELECT secret_scheme, secret_key_id, secret_nonce, secret_ciphertext FROM orvex.round_secrets WHERE round_id = $1`, round).
+		Scan(&sealed.Scheme, &sealed.KeyID, &sealed.Nonce, &sealed.Ciphertext); err != nil {
+		o.t.Fatalf("sealed secret of round %x: %v", round, err)
+	}
+	plain, err := pgtest.Keyring().Open(round, sealed)
+	if err != nil {
+		o.t.Fatalf("unseal the secret of round %x: %v", round, err)
+	}
+	records := o.records(round)
+	if len(records) == 0 || records[0].Genesis == nil {
+		o.t.Fatalf("round %x has no genesis record", round)
+	}
+	cfg, err := v1.Codec{}.DecodeConfig(round, records[0].Genesis.Config, plain)
+	if err != nil {
+		o.t.Fatalf("secret config of round %x: %v", round, err)
+	}
+	return cfg.Seed
 }
