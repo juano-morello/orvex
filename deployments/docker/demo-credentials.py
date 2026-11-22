@@ -93,7 +93,8 @@ def ensure(directory: Path, unrevealed: int) -> int:
             print(
                 f"keyring: missing, and the database holds {unrevealed} unrevealed sealed "
                 "round(s) that only the original key can open. Restore the original "
-                "keyring, or discard the preview database. Nothing was written.",
+                "keyring (in a preview: ./workspace restore-keyring FILE), or discard "
+                "the database (./workspace dispose). Nothing was written.",
                 file=sys.stderr,
             )
             return EXIT_KEY_MISSING
