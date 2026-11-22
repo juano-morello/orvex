@@ -68,9 +68,13 @@ type trialMetrics struct {
 	Receipts     map[string]int `json:"receipts"`
 	// DeadlineMisses are cash-outs sent before T0 + D and admitted at or
 	// after it; DeadlineLost are those sent before it and not admitted.
-	DeadlineMisses int            `json:"deadlineMisses"`
-	DeadlineLost   int            `json:"deadlineLost"`
-	Results        map[string]int `json:"results"`
+	DeadlineMisses int `json:"deadlineMisses"`
+	DeadlineLost   int `json:"deadlineLost"`
+	// MarginMin is the least time from an admitted cash-out's effective
+	// time to its round's crash deadline, in ms: what a late cash-out has
+	// left.
+	MarginMin float64        `json:"cashOutMarginMinMs"`
+	Results   map[string]int `json:"results"`
 
 	PoolAcquires     int64   `json:"poolAcquires"`
 	PoolEmpty        int64   `json:"poolEmptyAcquires"`
@@ -92,8 +96,13 @@ type trialMetrics struct {
 	Connect   dist `json:"connect"`
 	Reconnect dist `json:"reconnect"`
 
-	Views         int     `json:"views"`
-	Incomplete    int     `json:"incomplete"`
+	Views      int `json:"views"`
+	Incomplete int `json:"incomplete"`
+	// Healthy counts the healthy spectators' views of measured rounds and
+	// HealthyDone those that reached the round's end with every record.
+	Healthy       int     `json:"healthyViews"`
+	HealthyDone   int     `json:"healthyComplete"`
+	Refusals      int     `json:"refusals"`
 	Violations    int     `json:"violations"`
 	Repeats       int     `json:"repeats"`
 	StalledOpen   int     `json:"stalledOpen"`
@@ -187,6 +196,7 @@ func metricsOf(rec trialRecord) trialMetrics {
 		m.StartSeenMax = max(m.StartSeenMax, float64(r.StartSeen-r.Start)/1000)
 	}
 	var adm, bet, cash, pre, gen, execLag, pubLag []int64
+	m.MarginMin = math.Inf(1)
 	for _, s := range rec.Requests {
 		r := rounds[s.Round]
 		if !r.Measured {
@@ -216,6 +226,7 @@ func metricsOf(rec trialRecord) trialMetrics {
 			if s.Sent < deadline && s.Effective >= deadline {
 				m.DeadlineMisses++
 			}
+			m.MarginMin = min(m.MarginMin, float64(deadline-s.Effective)/1000)
 		}
 	}
 	for _, r := range rec.Rounds {
@@ -223,6 +234,9 @@ func metricsOf(rec trialRecord) trialMetrics {
 			execLag = append(execLag, r.ExecLag...)
 			pubLag = append(pubLag, r.PubLag...)
 		}
+	}
+	if math.IsInf(m.MarginMin, 1) {
+		m.MarginMin = 0
 	}
 	m.Admission, m.Bet, m.CashOut, m.PreAdmission, m.GeneratorLag = distOf(adm), distOf(bet), distOf(cash), distOf(pre), distOf(gen)
 	m.ExecLag, m.PubLag = distOf(execLag), distOf(pubLag)
@@ -240,8 +254,16 @@ func metricsOf(rec trialRecord) trialMetrics {
 			continue
 		}
 		m.Views++
-		if !v.Ended || v.Frames != r.Records {
+		complete := v.Ended && v.Frames == r.Records
+		if !complete {
 			m.Incomplete++
+		}
+		m.Refusals += v.Refused
+		if v.Kind == "healthy" {
+			m.Healthy++
+			if complete {
+				m.HealthyDone++
+			}
 		}
 		if v.Violation != "" {
 			m.Violations++
@@ -494,6 +516,37 @@ func writeSummary(t *testing.T, dir string) {
 				col(func(m trialMetrics) float64 { return m.CPU.Other }),
 				col(func(m trialMetrics) float64 { return float64(m.Stalled) }),
 				col(func(m trialMetrics) float64 { return m.StartLateMax }))
+		}
+		fmt.Fprintf(&md, "\nStreams and the pool, per trial: healthy views of measured rounds that reached the end with every record, refused stream responses (any status but 200 and 204), time to stream headers, the least cash-out margin to the crash deadline, and the engine pool.\n\n")
+		fmt.Fprintf(&md, "| arm | healthy complete / views | refused | connect p99 | reconnect p99 | cash-out margin min | pool acquires | mean acquire | empty-pool wait total | pool max |\n|---|---|---|---|---|---|---|---|---|---|\n")
+		for _, arm := range arms {
+			var sel []trialMetrics
+			for _, m := range ms {
+				if !m.Warmup && m.Source == src && m.Arm == arm {
+					sel = append(sel, m)
+				}
+			}
+			if len(sel) == 0 {
+				continue
+			}
+			col := func(f func(trialMetrics) float64) string {
+				var v []float64
+				for _, m := range sel {
+					v = append(v, f(m))
+				}
+				return spread(v)
+			}
+			fmt.Fprintf(&md, "| %s | %s / %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", arm,
+				col(func(m trialMetrics) float64 { return float64(m.HealthyDone) }),
+				col(func(m trialMetrics) float64 { return float64(m.Healthy) }),
+				col(func(m trialMetrics) float64 { return float64(m.Refusals) }),
+				col(func(m trialMetrics) float64 { return m.Connect.P99 }),
+				col(func(m trialMetrics) float64 { return m.Reconnect.P99 }),
+				col(func(m trialMetrics) float64 { return m.MarginMin }),
+				col(func(m trialMetrics) float64 { return float64(m.PoolAcquires) }),
+				col(func(m trialMetrics) float64 { return m.PoolMeanAcqMS }),
+				col(func(m trialMetrics) float64 { return m.PoolEmptyWaitMS }),
+				col(func(m trialMetrics) float64 { return float64(m.PoolMax) }))
 		}
 		decisions := decide(ms, src, ws)
 		sum.Decisions = append(sum.Decisions, decisions...)
