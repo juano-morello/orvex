@@ -571,7 +571,7 @@ func TestSettlementResolvesEarlierCommands(t *testing.T) {
 	setup := func(t *testing.T, x *execution.Executor, pool *pgxpool.Pool) ([16]byte, int64) {
 		t.Helper()
 		round := newRoundID()
-		seed30 := seedWithDeadline(t, round, 30_000_000_000, 150_000_000_000)
+		seed30 := roundtest.SeedWithDeadline(t, round, 30_000_000_000, 150_000_000_000)
 		cfg := createRound(t, x, round, seed30, 1_000_000_000, 100)
 		s, err := v1.Rules{}.InitialState(cfg)
 		if err != nil {

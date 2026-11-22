@@ -28,7 +28,7 @@ func TestCloseBoundRefusesEarlyCloseAndSettles(t *testing.T) {
 
 	// 1. The round stores D; no bound yet.
 	round := newRoundID()
-	cfg := createRound(t, x, round, seedWithDeadline(t, round, 30*time.Second, 150*time.Second), 1_000_000_000, 10)
+	cfg := createRound(t, x, round, roundtest.SeedWithDeadline(t, round, 30*time.Second, 150*time.Second), 1_000_000_000, 10)
 	initial, err := v1.Rules{}.InitialState(cfg)
 	if err != nil {
 		t.Fatal(err)

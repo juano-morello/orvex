@@ -497,7 +497,7 @@ func TestDuplicatePayoutImpossible(t *testing.T) {
 	round := newRoundID()
 	a := roundtest.NewExecutor(t, pool, nil, nil)
 	b := roundtest.NewExecutor(t, pool, nil, nil)
-	createRound(t, a, round, seedWithDeadline(t, round, 30_000_000_000, 150_000_000_000), 1_000_000_000, 100)
+	createRound(t, a, round, roundtest.SeedWithDeadline(t, round, 30_000_000_000, 150_000_000_000), 1_000_000_000, 100)
 	roundtest.FundPlayer(t, pool, "zara", 100)
 	seed(t, pool, round, 1, placeBet("zara", 100), 1_000)
 	seed(t, pool, round, 2, startRound, 2_000)

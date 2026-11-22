@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -64,6 +65,27 @@ func NewExecutor(t testing.TB, db execution.DB, mutate func(*execution.Config), 
 		t.Fatal(err)
 	}
 	return x
+}
+
+// SeedWithDeadline scans 32-byte big-endian counters from 1 (the all-zero
+// seed is invalid) until crash/v1 gives roundID a crash deadline offset D
+// with minD <= D <= maxD. D depends only on the seed and the round ID.
+func SeedWithDeadline(t testing.TB, roundID [16]byte, minD, maxD time.Duration) [32]byte {
+	t.Helper()
+	for n := uint64(1); n <= 100_000; n++ {
+		var seed [32]byte
+		binary.BigEndian.PutUint64(seed[24:], n)
+		cfg := crashv1.Config{RoundID: roundID, Seed: seed, MinBetCredits: 1, MaxBetCredits: 1_000_000_000, MaxBets: 100}
+		s, err := crashv1.Rules{}.InitialState(cfg)
+		if err != nil {
+			continue
+		}
+		if d := s.CrashDeadlineOffsetMicros; d >= minD.Microseconds() && d <= maxD.Microseconds() {
+			return seed
+		}
+	}
+	t.Fatalf("roundtest: no seed with D in [%v, %v]", minD, maxD)
+	return [32]byte{}
 }
 
 var grantIDs atomic.Uint64

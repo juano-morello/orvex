@@ -37,7 +37,7 @@ func TestAdmitAndExecuteRound(t *testing.T) {
 	x := roundtest.NewExecutor(t, pool, nil, nil)
 	s := newSequencer(t, pool)
 	round := newRoundID()
-	cfg := createRound(t, x, round, seedWithDeadline(t, round, 500*time.Millisecond, 2*time.Second), 1_000_000_000, 100)
+	cfg := createRound(t, x, round, roundtest.SeedWithDeadline(t, round, 500*time.Millisecond, 2*time.Second), 1_000_000_000, 100)
 	initial, err := v1.Rules{}.InitialState(cfg)
 	if err != nil {
 		t.Fatal(err)
