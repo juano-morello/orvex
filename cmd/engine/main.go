@@ -28,6 +28,7 @@ import (
 	"github.com/juano-morello/orvex/internal/runtime/admission"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 	"github.com/juano-morello/orvex/internal/runtime/lifecycle"
+	"github.com/juano-morello/orvex/internal/runtime/sessions"
 	"github.com/juano-morello/orvex/internal/transport/engineapi"
 )
 
@@ -37,7 +38,7 @@ const usage = `usage: engine [-version]
 Environment:
   ORVEX_DATABASE_URL         the database (a PostgreSQL URL or key=value connection string)
   ORVEX_SECRET_KEYRING_FILE  the round secret keyring (LBT-21)
-  ORVEX_ENGINE_ADDR          the engine API listen address, such as 127.0.0.1:0
+  ORVEX_ENGINE_ADDR          the engine API loopback listen address, such as 127.0.0.1:7001
   ORVEX_GATEWAY_TOKEN_FILE   the file holding the token the gateway presents
   ORVEX_BETTING_WINDOW       time from a round's creation to its start, a Go duration (default 10s)
   ORVEX_CREATE_ROUNDS        create rounds when none is unsettled (default true); false only drives the unsettled ones
@@ -102,9 +103,9 @@ func run(ctx context.Context, args []string, lookup func(string) (string, bool),
 		}
 		return fail(exitUsage, keyringFileEnv+": "+reason)
 	}
-	token, err := readToken(cfg.tokenFile)
+	token, err := sessions.LoadServiceTokenFile(cfg.tokenFile)
 	if err != nil {
-		return fail(exitUsage, err.Error())
+		return fail(exitUsage, tokenFileEnv+": "+err.Error())
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg.pool)

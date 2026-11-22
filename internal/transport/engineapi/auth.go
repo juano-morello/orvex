@@ -75,17 +75,23 @@ type Client struct {
 	conn *grpc.ClientConn
 }
 
-// Dial returns a client of the engine at addr, a host:port whose host is
-// "localhost" or a loopback IP: the connection is plaintext, so the
-// service token must not leave the machine. Every call carries token. Dial
-// does not connect; the first call does.
-func Dial(addr, token string) (*Client, error) {
+// CheckAddress restricts the plaintext engine transport to this host.
+func CheckAddress(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return nil, fmt.Errorf("engineapi: engine address: %w", err)
+		return errors.New("engineapi: the engine address must have a host and port")
 	}
 	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		return nil, errors.New("engineapi: the engine address must be a loopback host; the connection is plaintext")
+		return errors.New("engineapi: the plaintext engine connection requires a loopback host")
+	}
+	return nil
+}
+
+// Dial creates a loopback client that presents token on each call. It
+// connects on the first call.
+func Dial(addr, token string) (*Client, error) {
+	if err := CheckAddress(addr); err != nil {
+		return nil, err
 	}
 	if !sessions.ValidServiceToken(token) {
 		return nil, fmt.Errorf("engineapi: the gateway token is not %d to 512 bytes of printable ASCII without spaces",

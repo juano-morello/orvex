@@ -3,16 +3,14 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/juano-morello/orvex/internal/persistence/sealing"
 	"github.com/juano-morello/orvex/internal/runtime/lifecycle"
+	"github.com/juano-morello/orvex/internal/transport/engineapi"
 )
 
 // Environment variables the engine reads.
@@ -30,7 +28,6 @@ const (
 const (
 	defaultBettingWindow  = 10 * time.Second
 	defaultConnectTimeout = 10 * time.Second
-	maxTokenFileBytes     = 4 << 10
 )
 
 // config is the engine's validated environment.
@@ -71,6 +68,9 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 	if c.addr, err = required(addrEnv); err != nil {
 		return config{}, err
 	}
+	if err := engineapi.CheckAddress(c.addr); err != nil {
+		return config{}, fmt.Errorf("%s: %w", addrEnv, err)
+	}
 	if c.tokenFile, err = required(tokenFileEnv); err != nil {
 		return config{}, err
 	}
@@ -95,53 +95,4 @@ func loadConfig(lookup func(string) (string, bool)) (config, error) {
 		c.createRounds = b
 	}
 	return c, nil
-}
-
-// readToken reads the gateway token file: a regular file of at most 4 KiB
-// that grants no group write and nothing to others (the keyring rule,
-// LBT-21 K-2), holding one token of printable ASCII without spaces;
-// surrounding whitespace is ignored. Errors name the variable and the rule,
-// never the path or the content.
-func readToken(path string) (string, error) {
-	fail := func(reason string) (string, error) {
-		return "", errors.New(tokenFileEnv + ": " + reason)
-	}
-	// Stat before opening, so that a FIFO or a device never blocks the open.
-	before, err := os.Stat(path)
-	if err != nil {
-		return fail("unreadable")
-	}
-	if !before.Mode().IsRegular() {
-		return fail("not a regular file")
-	}
-	f, err := os.Open(path) //nolint:gosec // G304: ORVEX_GATEWAY_TOKEN_FILE names the operator's own token file; mode and size are checked on the opened file
-	if err != nil {
-		return fail("unreadable")
-	}
-	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	switch {
-	case err != nil:
-		return fail("unreadable")
-	case !os.SameFile(before, info) || !info.Mode().IsRegular():
-		return fail("not a regular file")
-	case info.Mode().Perm()&0o027 != 0:
-		return fail(fmt.Sprintf("permissions too open (%04o)", uint32(info.Mode().Perm())))
-	case info.Size() > maxTokenFileBytes:
-		return fail("larger than 4 KiB")
-	}
-	b, err := io.ReadAll(io.LimitReader(f, maxTokenFileBytes+1))
-	if err != nil || len(b) > maxTokenFileBytes {
-		return fail("unreadable")
-	}
-	token := strings.TrimSpace(string(b))
-	if token == "" {
-		return fail("empty")
-	}
-	for i := range len(token) {
-		if token[i] < '!' || token[i] > '~' {
-			return fail("the token must be printable ASCII without spaces")
-		}
-	}
-	return token, nil
 }

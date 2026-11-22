@@ -103,7 +103,7 @@ func chmod(t *testing.T, path string, perm os.FileMode) {
 
 const (
 	testDSN   = "postgres://engine:s3cret-pass@127.0.0.1:1/orvex?sslmode=disable&connect_timeout=2" //nolint:gosec // G101: a fake password the tests require never to be printed
-	testToken = "gateway-token-0123456789"
+	testToken = "gateway-token-012345678901234567890123456789"
 )
 
 // validEnv returns an environment that passes every check before the
@@ -131,18 +131,19 @@ func TestRunRejectsConfig(t *testing.T) {
 		"no keyring":       {func(_ *testing.T, e map[string]string) { delete(e, keyringFileEnv) }, "ORVEX_SECRET_KEYRING_FILE is not set"},
 		"keyring too open": {func(t *testing.T, e map[string]string) { chmod(t, e[keyringFileEnv], 0o644) }, "ORVEX_SECRET_KEYRING_FILE: permissions too open"},
 		"no address":       {func(_ *testing.T, e map[string]string) { e[addrEnv] = "" }, "ORVEX_ENGINE_ADDR is not set"},
+		"wildcard address": {func(_ *testing.T, e map[string]string) { e[addrEnv] = "0.0.0.0:7001" }, "requires a loopback host"},
 		"no token file":    {func(_ *testing.T, e map[string]string) { delete(e, tokenFileEnv) }, "ORVEX_GATEWAY_TOKEN_FILE is not set"},
-		"token too open":   {func(t *testing.T, e map[string]string) { chmod(t, e[tokenFileEnv], 0o604) }, "ORVEX_GATEWAY_TOKEN_FILE: permissions too open"},
+		"token too open":   {func(t *testing.T, e map[string]string) { chmod(t, e[tokenFileEnv], 0o604) }, "permissions too open"},
 		"token missing": {func(t *testing.T, e map[string]string) {
 			e[tokenFileEnv] = filepath.Join(t.TempDir(), "absent")
-		}, "ORVEX_GATEWAY_TOKEN_FILE: unreadable"},
+		}, "credentials file is unreadable"},
 		"token empty": {func(t *testing.T, e map[string]string) {
 			e[tokenFileEnv] = writeFile(t, "empty", " \n", 0o600)
-		}, "ORVEX_GATEWAY_TOKEN_FILE: empty"},
+		}, "service token is not 32 to 512 bytes"},
 		"token with space": {func(t *testing.T, e map[string]string) {
 			e[tokenFileEnv] = writeFile(t, "spaced", "two words\n", 0o600)
-		}, "ORVEX_GATEWAY_TOKEN_FILE: the token must be printable ASCII"},
-		"token directory": {func(t *testing.T, e map[string]string) { e[tokenFileEnv] = t.TempDir() }, "ORVEX_GATEWAY_TOKEN_FILE: not a regular file"},
+		}, "service token is not 32 to 512 bytes"},
+		"token directory": {func(t *testing.T, e map[string]string) { e[tokenFileEnv] = t.TempDir() }, "not a regular file"},
 		"bad window":      {func(_ *testing.T, e map[string]string) { e[bettingWindowEnv] = "ten" }, "ORVEX_BETTING_WINDOW is not a Go duration"},
 		"negative window": {func(_ *testing.T, e map[string]string) { e[bettingWindowEnv] = "-1s" }, "ORVEX_BETTING_WINDOW is outside"},
 		"long window":     {func(_ *testing.T, e map[string]string) { e[bettingWindowEnv] = "2h" }, "ORVEX_BETTING_WINDOW is outside"},
