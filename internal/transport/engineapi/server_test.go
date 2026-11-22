@@ -98,7 +98,10 @@ func TestSubmitMapsAdmissionResults(t *testing.T) {
 	retry := func(r orvexv1.RetryReason) *orvexv1.SubmitCommandResponse {
 		return &orvexv1.SubmitCommandResponse{Result: &orvexv1.SubmitCommandResponse_Retry{Retry: &orvexv1.Retry{Reason: r}}}
 	}
-	notAdmitted := fmt.Errorf("admission: not admitted: %w", context.DeadlineExceeded)
+	// S-12 classifies only Admit's last attempt: ErrBusy, ErrUnavailable or
+	// a context error can follow an earlier ambiguous COMMIT that admitted
+	// the command.
+	notAdmitted := fmt.Errorf("admission: not admitted: %w", context.Canceled)
 	for name, tc := range map[string]struct {
 		dup  bool
 		err  error
@@ -112,9 +115,10 @@ func TestSubmitMapsAdmissionResults(t *testing.T) {
 		"insufficient credits": {err: fmt.Errorf("%w: %w", &admission.RejectedError{Reason: admission.ReasonInsufficientCredits}, errors.New("pg")), want: rejected(orvexv1.RejectionReason_REJECTION_REASON_INSUFFICIENT_CREDITS)},
 		"command id reused":    {err: fmt.Errorf("%w: %w", admission.ErrCommandIDReused, errors.New("23505")), want: rejected(orvexv1.RejectionReason_REJECTION_REASON_COMMAND_ID_REUSED)},
 		"round not found":      {err: admission.ErrRoundNotFound, want: rejected(orvexv1.RejectionReason_REJECTION_REASON_ROUND_NOT_FOUND)},
-		"busy":                 {err: fmt.Errorf("%w: lock", admission.ErrBusy), want: retry(orvexv1.RetryReason_RETRY_REASON_NOT_ADMITTED)},
-		"unavailable":          {err: fmt.Errorf("%w: down", admission.ErrUnavailable), want: retry(orvexv1.RetryReason_RETRY_REASON_NOT_ADMITTED)},
-		"context before send":  {err: notAdmitted, want: retry(orvexv1.RetryReason_RETRY_REASON_NOT_ADMITTED)},
+		"busy":                 {err: fmt.Errorf("%w: lock", admission.ErrBusy), want: retry(orvexv1.RetryReason_RETRY_REASON_OUTCOME_UNKNOWN)},
+		"unavailable":          {err: fmt.Errorf("%w: down", admission.ErrUnavailable), want: retry(orvexv1.RetryReason_RETRY_REASON_OUTCOME_UNKNOWN)},
+		"canceled attempt":     {err: notAdmitted, want: retry(orvexv1.RetryReason_RETRY_REASON_OUTCOME_UNKNOWN)},
+		"deadline":             {err: context.DeadlineExceeded, want: retry(orvexv1.RetryReason_RETRY_REASON_OUTCOME_UNKNOWN)},
 		"outcome unknown":      {err: fmt.Errorf("%w: %w", admission.ErrOutcomeUnknown, context.Canceled), want: retry(orvexv1.RetryReason_RETRY_REASON_OUTCOME_UNKNOWN)},
 		"invalid command":      {err: fmt.Errorf("%w: nul", admission.ErrInvalidCommand), code: codes.InvalidArgument},
 		"rules mismatch":       {err: fmt.Errorf("%w: rules", admission.ErrInvalidRequest), code: codes.InvalidArgument},

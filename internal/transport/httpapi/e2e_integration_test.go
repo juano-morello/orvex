@@ -46,6 +46,7 @@ const (
 	aliceToken   = "alice-token-0001"
 	bobToken     = "bob-token-000001"
 	carolToken   = "carol-token-0001"
+	daveToken    = "dave-token-00001"
 )
 
 // stack is the whole path a player uses: an httptest server running the
@@ -53,11 +54,12 @@ const (
 // migrated database. The test plays the scheduler and the execution
 // driver itself.
 type stack struct {
-	pool  *pgxpool.Pool
-	x     *execution.Executor
-	seq   *admission.Sequencer
-	url   string
-	lossy *lossyEngine
+	pool   *pgxpool.Pool
+	x      *execution.Executor
+	seq    *admission.Sequencer
+	url    string
+	lossy  *lossyEngine
+	faults *faultDB
 }
 
 // lossyEngine loses the response of the next SubmitCommand after the
@@ -80,7 +82,8 @@ func newStack(t *testing.T) *stack {
 	pool := pgtest.Pool(t, pgtest.MigratedDatabase(t))
 	reg := roundtest.Registry(t)
 	x := roundtest.NewExecutor(t, pool, nil, reg)
-	seq, err := admission.New(pool, reg, admission.DefaultConfig(), admission.CrashV1Policy())
+	faults := &faultDB{db: pool}
+	seq, err := admission.New(faults, reg, admission.DefaultConfig(), admission.CrashV1Policy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +98,7 @@ func newStack(t *testing.T) *stack {
 	if err != nil {
 		t.Fatal(err)
 	}
-	players, err := sessions.ParsePlayers([]byte(`{"` + aliceToken + `":"alice","` + bobToken + `":"bob","` + carolToken + `":"carol"}`))
+	players, err := sessions.ParsePlayers([]byte(`{"` + aliceToken + `":"alice","` + bobToken + `":"bob","` + carolToken + `":"carol","` + daveToken + `":"dave"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +114,7 @@ func newStack(t *testing.T) *stack {
 			t.Errorf("Serve: %v", err)
 		}
 	})
-	return &stack{pool: pool, x: x, seq: seq, url: ts.URL, lossy: lossy}
+	return &stack{pool: pool, x: x, seq: seq, url: ts.URL, lossy: lossy, faults: faults}
 }
 
 func randomUUID(t *testing.T) [16]byte {
