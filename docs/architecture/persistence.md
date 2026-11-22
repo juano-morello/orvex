@@ -540,8 +540,8 @@ crashctl audit export [-unsettled] [-format NAME] ROUND_ID FILE
 ```
 
 - `ROUND_ID` is canonical lowercase UUID text, never the nil UUID. `FILE` `-` writes the history to
-  standard output and the report to standard error. `-format` accepts only `orvex/audit-history/v1`,
-  its default; a well-formed later version is exit 3.
+  standard output and the report to standard error. The default is `orvex/audit-history/v1`.
+  Select `-format orvex/audit-history/v2` to include the ledger. An unsupported version is exit 3.
 - `ORVEX_DATABASE_URL` is read as `crashctl migrate` reads it: a 10 s connect timeout unless the DSN
   sets one. crashctl never prints any part of it (LBT-21 K-12): it prints no driver, network or server
   text, only SQLSTATE codes, constraint names and the messages of class-`OX` errors, which Orvex
@@ -650,6 +650,18 @@ GRANT SELECT (round_id, config_secret, secret_scheme, secret_key_id, secret_nonc
 verifier's ledger stage. The normative design is [the LBT-18 spec](../specs/ac81f88f_audit-ledger-stage.md)
 (decisions L-1 to L-14), built per [the implementation plan](../specs/f4d371a8_audit-ledger-implementation.md).
 `ExportHistory` is unchanged and keeps writing format v1 with the same bytes.
+
+For a v2 export, supplement the §14 auditor grants with read access to the ledger columns the
+exporter uses:
+
+```sql
+GRANT SELECT (round_id, sequence, account_id, amount) ON orvex.ledger_holds TO orvex_auditor;
+GRANT SELECT (round_id, sequence, account_id) ON orvex.ledger_hold_releases TO orvex_auditor;
+GRANT SELECT (round_id, sequence, transaction_id, kind) ON orvex.ledger_transactions TO orvex_auditor;
+GRANT SELECT (transaction_id, posting_index, debit_account_id, credit_account_id, amount, event_sequence)
+    ON orvex.ledger_postings TO orvex_auditor;
+GRANT SELECT (account_id, kind, player_id, name, round_id) ON orvex.ledger_accounts TO orvex_auditor;
+```
 
 ### What it reads
 

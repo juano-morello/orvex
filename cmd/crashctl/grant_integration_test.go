@@ -21,7 +21,6 @@ import (
 	"github.com/juano-morello/orvex/internal/canonjson"
 	crashv1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/ledger"
-	"github.com/juano-morello/orvex/internal/persistence/eventstore"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 	"github.com/juano-morello/orvex/internal/runtime/grant"
@@ -301,11 +300,11 @@ func TestGrantFundsRound(t *testing.T) {
 
 	exportV2 := func() []byte {
 		t.Helper()
-		var buf bytes.Buffer
-		if _, err := eventstore.ExportHistoryV2(ctx, pool, g.RoundID, &buf, eventstore.Options{}); err != nil {
-			t.Fatalf("ExportHistoryV2: %v", err)
+		code, history, report := exportCmd(t, "-format", "orvex/audit-history/v2", g.UUID(), "-")
+		if code != exitOK {
+			t.Fatalf("audit export v2: exit %d, report %q", code, report)
 		}
-		return buf.Bytes()
+		return []byte(history)
 	}
 	v2 := exportV2()
 	v2Path := filepath.Join(dir, "round-v2.jsonl")

@@ -47,8 +47,11 @@ func (v settledVerdict) String() string {
 // exporter writes one round's history in one format.
 type exporter func(ctx context.Context, db eventstore.TxBeginner, roundID [16]byte, w io.Writer, opts eventstore.Options) (eventstore.Export, error)
 
-// exporters maps -format values to writers (X-10); LBT-18 adds v2 here.
-var exporters = map[string]exporter{verification.Format: eventstore.ExportHistory}
+// exporters maps each supported audit format to its writer.
+var exporters = map[string]exporter{
+	verification.Format:   eventstore.ExportHistory,
+	verification.FormatV2: eventstore.ExportHistoryV2,
+}
 
 // historyFormatName matches a well-formed history format name: one this
 // build does not write is unsupported (exit 3), anything else a usage error.
@@ -104,7 +107,7 @@ func runExport(args []string, stdout, stderr io.Writer) int {
 	export, ok := exporters[*format]
 	if !ok {
 		if historyFormatName.MatchString(*format) {
-			_, _ = fmt.Fprintf(stderr, "%sformat %s unsupported: this build writes %s\n", prefix, *format, verification.Format)
+			_, _ = fmt.Fprintf(stderr, "%sformat %s unsupported: this build writes %s and %s\n", prefix, *format, verification.Format, verification.FormatV2)
 			return exportExitCode(errFormatUnsupported)
 		}
 		_, _ = fmt.Fprintf(stderr, "%s-format must be a history format such as %s\n", prefix, verification.Format)

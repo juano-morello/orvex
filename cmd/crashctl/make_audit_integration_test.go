@@ -304,6 +304,15 @@ func TestMakeAuditFormat(t *testing.T) {
 		requireVerified(t, res.stdout, wantExportReport(g.UUID(), r.s, r.n, r.head, settledYes), g.UUID(), r.s+1, r.head)
 		requireEmptyDir(t, tmp)
 	})
+	t.Run("v2", func(t *testing.T) {
+		tmp := t.TempDir()
+		res := makeAudit(t, binDir, tmp, env, "ROUND_ID="+g.UUID(), "AUDIT_FORMAT="+verification.FormatV2)
+		requireMakeSuccess(t, res)
+		if !strings.Contains(res.stdout, "\nledger ok ") {
+			t.Fatalf("audit output lacks the ledger verification result: %s", res.stdout)
+		}
+		requireEmptyDir(t, tmp)
+	})
 	t.Run("unsupported", func(t *testing.T) {
 		tmp := t.TempDir()
 		res := makeAudit(t, binDir, tmp, env, "ROUND_ID="+g.UUID(), "AUDIT_FORMAT=orvex/audit-history/v99")
