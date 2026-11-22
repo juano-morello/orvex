@@ -500,3 +500,34 @@ func TestSubscribeWhileTheDatabaseIsDown(t *testing.T) {
 	resumed.wait(t).check(t, r.committed(t, round)[2:], codes.OK)
 	eventually(t, "subscriptions still running after the round completed", func() bool { return r.active.Load() == 0 })
 }
+
+// TestSubscribeReconnectsWithoutReads resubscribes one by one at cursors
+// up to the head of a followed live round, as a reconnect burst does. The
+// feed's newest read accepts them all, so they read nothing.
+func TestSubscribeReconnectsWithoutReads(t *testing.T) {
+	const subscribers = 100
+	r := newRig(t)
+	round := r.round(t, 3, false)
+	first := r.follow(t, round, nil)
+	eventually(t, "the first subscriber did not reach the head", func() bool { return first.frames.Load() == 3 })
+
+	before := r.reads.Load()
+	start := time.Now()
+	for i := range subscribers {
+		f := r.follow(t, round, proto.Uint64(uint64(i%3))) //nolint:gosec // G115: i >= 0
+		select {
+		case <-f.header:
+		case res := <-f.done:
+			t.Fatalf("subscriber %d refused: %v", i, res.err)
+		case <-time.After(15 * time.Second):
+			t.Fatalf("subscriber %d was not accepted", i)
+		}
+		f.cancel()
+	}
+	polls := int64(time.Since(start)/pollInterval) + 1
+	if reads := r.reads.Load() - before; reads > polls {
+		t.Errorf("%d subscribers at or below the head took %d reads, want only the feed's %d polls", subscribers, reads, polls)
+	}
+	first.cancel()
+	eventually(t, "subscriptions still running after they were cancelled", func() bool { return r.active.Load() == 0 })
+}

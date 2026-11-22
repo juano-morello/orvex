@@ -324,37 +324,55 @@ func (s *server) SubscribeRound(req *orvexv1.SubscribeRoundRequest, stream grpc.
 	}
 }
 
-// accept checks the round and the cursor against a read of the feed that
-// began after the call, unless the round is complete, then sends the
-// stream headers. It answers NOT_FOUND for an unknown round,
-// FAILED_PRECONDITION for a cursor above the execution head and
-// OUT_OF_RANGE for a cursor at the last record of a complete round,
-// before any header.
+// accept answers a new subscriber before any header: NOT_FOUND for an
+// unknown round, FAILED_PRECONDITION for a cursor above the execution head
+// and OUT_OF_RANGE for a cursor at the last record of a complete round. It
+// sends the headers if it accepts. When the feed's newest read succeeded,
+// that read settles every answer but FAILED_PRECONDITION, since heads only
+// grow and a complete round stays complete: a reconnect at or below the
+// head costs no read. Otherwise it judges on a read that began after the
+// call.
 func (s *server) accept(stream grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse], f *feed, next uint64) error {
 	ctx := stream.Context()
-	n := f.request()
-	for {
-		st, ok, changed := f.state(n)
-		if !ok {
-			if err := s.await(ctx, changed); err != nil {
-				return err
+	st, ok := f.cached()
+	refusal := st.judge(next)
+	if !ok || status.Code(refusal) == codes.FailedPrecondition {
+		n := f.request()
+		for {
+			st, ok, changed := f.state(n)
+			if !ok {
+				if err := s.await(ctx, changed); err != nil {
+					return err
+				}
+				continue
 			}
-			continue
+			if st.err != nil {
+				return s.subscribeError(ctx, st.err)
+			}
+			refusal = st.judge(next)
+			break
 		}
-		switch {
-		case st.err != nil:
-			return s.subscribeError(ctx, st.err)
-		case st.game != v1.GameID || st.rules != v1.RulesVersionNumber:
-			return status.Error(codes.NotFound, "round not found")
-		case next > st.head+1:
-			return status.Error(codes.FailedPrecondition, "invalid cursor")
-		case st.final && next == st.head+1:
-			return status.Error(codes.OutOfRange, "the cursor is the round's last record")
-		}
-		// The headers tell the gateway the subscription is accepted before
-		// any record exists to send.
-		return stream.SendHeader(metadata.MD{})
 	}
+	if refusal != nil {
+		return refusal
+	}
+	// The headers tell the gateway the subscription is accepted before any
+	// record exists to send.
+	return stream.SendHeader(metadata.MD{})
+}
+
+// judge returns nil to accept a subscriber whose next sequence is next,
+// or the status that refuses it.
+func (st roundState) judge(next uint64) error {
+	switch {
+	case st.game != v1.GameID || st.rules != v1.RulesVersionNumber:
+		return status.Error(codes.NotFound, "round not found")
+	case next > st.head+1:
+		return status.Error(codes.FailedPrecondition, "invalid cursor")
+	case st.final && next == st.head+1:
+		return status.Error(codes.OutOfRange, "the cursor is the round's last record")
+	}
+	return nil
 }
 
 // catchUp sends, from this subscriber's own read, one batch of the round's

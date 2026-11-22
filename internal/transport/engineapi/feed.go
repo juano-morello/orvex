@@ -184,6 +184,14 @@ type roundState struct {
 	err   error
 }
 
+// cached returns the round as of the newest read, and whether that read
+// succeeded.
+func (f *feed) cached() (roundState, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return roundState{game: f.game, rules: f.rules, head: f.head, final: f.final}, f.done > 0 && f.err == nil
+}
+
 // state returns the round as of read n or a later one, or false and a
 // channel closed by the next read. A complete round's state is final, so
 // it needs no new read.
