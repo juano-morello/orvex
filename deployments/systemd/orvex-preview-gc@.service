@@ -1,0 +1,8 @@
+[Unit]
+Description=Collect removed Orvex worktree previews for %f
+ConditionPathExists=%f/workspace
+
+[Service]
+Type=oneshot
+WorkingDirectory=%f
+ExecStart=/usr/bin/env ./workspace gc

@@ -1,0 +1,9 @@
+{
+  "name": "Orvex worktree",
+  "dockerComposeFile": ["../deployments/docker/compose.yaml", "compose.yaml"],
+  "service": "dev",
+  "runServices": ["dev"],
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "none",
+  "updateRemoteUserUID": false
+}
