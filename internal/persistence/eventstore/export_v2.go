@@ -32,6 +32,10 @@ func ExportHistoryV2(ctx context.Context, db TxBeginner, roundID [16]byte, w io.
 		return Export{}, err
 	}
 	last := cps[len(cps)-1].Sequence
+	roundRecords, err := readRoundRecords(ctx, tx, roundID, last)
+	if err != nil {
+		return Export{}, err
+	}
 
 	rows, err := readLedger(ctx, tx, roundID, last)
 	if err != nil {
@@ -62,7 +66,23 @@ func ExportHistoryV2(ctx context.Context, db TxBeginner, roundID [16]byte, w io.
 	if err := bw.Flush(); err != nil {
 		return Export{}, fmt.Errorf("eventstore: write: %w", err)
 	}
-	return Export{RoundID: roundID, Records: int(n), Head: head, Checkpoints: cps}, nil //nolint:gosec // G115: n is one round's record count (last + 1), as in ExportHistory's int(n)
+	return Export{RoundID: roundID, Records: int(n), RoundRecords: roundRecords, Head: head, Checkpoints: cps}, nil //nolint:gosec // G115: n is one round's record count (last + 1), as in ExportHistory's int(n)
+}
+
+// readRoundRecords returns Export.RoundRecords, the round's newest chain
+// record sequence + 1 in the snapshot, with ExportHistory's checks.
+func readRoundRecords(ctx context.Context, tx pgx.Tx, roundID [16]byte, last uint64) (int, error) {
+	var newest *int64
+	err := tx.QueryRow(ctx, `SELECT max(sequence) FROM orvex.chain_records WHERE round_id = $1`, roundID).Scan(&newest)
+	switch {
+	case err != nil:
+		return 0, fmt.Errorf("eventstore: read record count: %w", err)
+	case newest == nil:
+		return 0, fmt.Errorf("%w: round has no chain records", ErrCorrupt)
+	case *newest < int64(last): //nolint:gosec // G115: last is a snapshot sequence scanned from bigint and checked >= 0 by readExportBase
+		return 0, fmt.Errorf("%w: newest record %d before snapshot %d", ErrCorrupt, *newest, last)
+	}
+	return int(*newest) + 1, nil
 }
 
 // readExportBase reads the round's secret config (readSecret), its
