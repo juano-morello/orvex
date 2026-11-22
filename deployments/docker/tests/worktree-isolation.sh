@@ -20,7 +20,7 @@ git clone --quiet --no-hardlinks "$source_root" "$root"
 cp "$source_root/workspace" "$root/"
 mkdir -p "$root/.devcontainer"
 cp "$source_root/.devcontainer/compose.yaml" "$root/.devcontainer/"
-cp "$source_root/deployments/docker/compose.yaml" "$source_root/deployments/docker/demo-credentials.py" "$root/deployments/docker/"
+cp "$source_root/deployments/docker/"{compose.yaml,demo-credentials.py,unrevealed-rounds.sql} "$root/deployments/docker/"
 for label in a b; do
   dir=$tmp/$label
   git -C "$root" worktree add --quiet --detach "$dir" HEAD
@@ -28,7 +28,7 @@ for label in a b; do
   cp "$root/workspace" "$dir/"
   mkdir -p "$dir/.devcontainer"
   cp "$root/.devcontainer/compose.yaml" "$dir/.devcontainer/"
-  cp "$root/deployments/docker/compose.yaml" "$root/deployments/docker/demo-credentials.py" "$dir/deployments/docker/"
+  cp "$root/deployments/docker/"{compose.yaml,demo-credentials.py,unrevealed-rounds.sql} "$dir/deployments/docker/"
   last=$(basename "$(ls "$dir"/migrations/*.up.sql | tail -1)")
   printf -v version '%04d' "$((10#${last%%_*} + 1))"
   base="$dir/migrations/${version}_probe_$label"
@@ -54,8 +54,54 @@ for label in a b; do
   fingerprint[$label]=$("$tmp/$label/workspace" exec sha256sum "$creds/keyring")
 done
 [[ ${fingerprint[a]} != "${fingerprint[b]}" ]] || { echo 'previews share a keyring' >&2; exit 1; }
+# An old dev container has no credentials mount. Recovery must write to its
+# project's volume without replacing the container that may still hold a key.
+(
+  cd "$tmp/b"
+  umask 077
+  ./workspace exec cat "$creds/keyring" > "$tmp/original-keyring"
+  ./workspace exec rm "$creds/keyring"
+  sql=deployments/docker/unrevealed-rounds.sql
+  cp "$sql" "$tmp/original-query"
+  echo 'SELECT 1 / 0;' > "$sql"
+  if ./workspace preview > "$tmp/query-failure.log" 2>&1; then
+    echo 'preview created credentials after the database check failed' >&2
+    exit 1
+  fi
+  ./workspace exec test ! -e "$creds/keyring"
+  mv "$tmp/original-query" "$sql"
+  ./workspace exec rm "$creds/gateway-token"
+  export ORVEX_WORKSPACE_ID ORVEX_UID ORVEX_GID
+  ORVEX_WORKSPACE_ID=$(basename "$(git rev-parse --absolute-git-dir)"/orvex-wt-*)
+  ORVEX_UID=$(id -u)
+  ORVEX_GID=$(id -g)
+  cat > "$tmp/legacy.yaml" <<'EOF'
+services:
+  dev:
+    volumes: !override ["../..:/workspace"]
+    depends_on: !reset {}
+EOF
+  compose=(docker compose -p "$ORVEX_WORKSPACE_ID" -f deployments/docker/compose.yaml -f .devcontainer/compose.yaml)
+  "${compose[@]}" -f "$tmp/legacy.yaml" up -d --no-deps --force-recreate dev
+  old_dev=$("${compose[@]}" ps -q dev)
+  docker exec "$old_dev" python3 -c 'import secrets
+from pathlib import Path
+p = Path("/tmp/.local/state/orvex-demo/gateway-token")
+p.parent.mkdir(mode=0o700, parents=True)
+p.write_text(secrets.token_hex(32) + "\n")
+p.chmod(0o600)'
+  docker exec "$old_dev" cat /tmp/.local/state/orvex-demo/gateway-token | sha256sum > "$tmp/token-before"
+  ./workspace restore-keyring "$tmp/original-keyring"
+  [[ $("${compose[@]}" ps -q dev) == "$old_dev" ]]
+  if ./workspace restore-keyring "$tmp/original-keyring"; then
+    echo 'restore overwrote the stored keyring' >&2
+    exit 1
+  fi
+)
 # Recreating the development container and repeating the preview keep the key.
 "$tmp/b/workspace" recreate
+"$tmp/b/workspace" exec cat "$creds/gateway-token" | sha256sum > "$tmp/token-after"
+cmp "$tmp/token-before" "$tmp/token-after"
 "$tmp/b/workspace" preview > "$tmp/b2.log"
 [[ $("$tmp/b/workspace" exec sha256sum "$creds/keyring") == "${fingerprint[b]}" ]] || { echo 'recreate changed the keyring' >&2; exit 1; }
 project=$(basename "$(git -C "$tmp/a" rev-parse --absolute-git-dir)"/orvex-wt-*)

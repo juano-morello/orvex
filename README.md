@@ -76,10 +76,19 @@ export ORVEX_DATABASE_URL='postgres://orvex:orvex@127.0.0.1:55432/orvex?sslmode=
 make build
 ./bin/crashctl migrate up
 demo_dir="${XDG_STATE_HOME:-$HOME/.local/state}/orvex-demo"
-python3 deployments/docker/demo-credentials.py ensure "$demo_dir"
+unrevealed=$(docker compose -f deployments/docker/compose.yaml exec -T postgres \
+  psql -XqAt -v ON_ERROR_STOP=1 -U orvex -d orvex < deployments/docker/unrevealed-rounds.sql) &&
+  python3 deployments/docker/demo-credentials.py ensure "$demo_dir" --unrevealed "$unrevealed"
 ```
 
-In the preview container, run `demo_dir=/var/lib/orvex-preview` instead. `ensure` creates the keyring, the gateway token and the players file with mode 0600 in a 0700 directory. It never overwrites a file, so repeating it is safe, and it prints only file names. Players `alice` and `bob` get one random bearer token each.
+Inside the preview shell, build the binaries and select the credentials prepared by `./workspace preview`.
+
+```sh
+make build
+demo_dir=/var/lib/orvex-preview
+```
+
+The credential helper creates a keyring, a gateway token and a players file with mode 0600 in a 0700 directory. It keeps existing files on repeated runs. Players `alice` and `bob` each get a random bearer token.
 
 The keyring holds the key that seals each round's secret config until the round settles. The engine needs the original key to resume an unsettled round, so keep the directory with the database (a preview keeps both in Docker volumes that share a lifetime). If the key is lost, restore it from a backup kept apart from database backups, or discard the database and start fresh.
 
@@ -203,8 +212,14 @@ stops and leaves the container in place so you can copy the file out.
 Back up the keyring apart from database backups, and restore it after a loss:
 
 ```sh
-(umask 077; ./workspace exec cat /var/lib/orvex-preview/keyring > keyring.backup)
-./workspace restore-keyring keyring.backup
+backup=$(mktemp -d "${XDG_STATE_HOME:-$HOME}/orvex-backup.XXXXXXXX")
+(umask 077; ./workspace exec cat /var/lib/orvex-preview/keyring > "$backup/keyring")
+```
+
+To restore that backup, run this from the same preview's worktree.
+
+```sh
+./workspace restore-keyring "$backup/keyring"
 ```
 
 Without the original key, a round that has not settled can never be loaded or

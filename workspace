@@ -78,31 +78,34 @@ credentials_exist() {
 # Sealed round secrets whose rounds have not settled. Only the original
 # keyring opens them (LBT-21 K-4).
 unrevealed_rounds() {
-  local psql=("${compose[@]}" exec -T postgres psql -U orvex -d orvex -qAt)
-  [[ $("${psql[@]}" -c "SELECT to_regclass('orvex.round_secret_reveals') IS NOT NULL") == t ]] || { echo 0; return; }
-  "${psql[@]}" -c "SELECT count(*) FROM orvex.round_secrets s WHERE s.secret_ciphertext IS NOT NULL AND NOT EXISTS (SELECT 1 FROM orvex.round_secret_reveals v WHERE v.round_id = s.round_id)"
+  "${compose[@]}" exec -T postgres psql -XqAt -v ON_ERROR_STOP=1 -U orvex -d orvex \
+    < deployments/docker/unrevealed-rounds.sql
 }
-# Replace a dev container from before the credentials volume, carrying its
-# credentials over first. Stops without recreating it when its keyring is
-# not at the default place and an unsettled round still needs one.
-adopt_earlier_preview() {
-  local cid
-  cid=$(dev_container)
-  [[ -n $cid ]] && ! has_credentials_volume "$cid" || return 0
+# Preserve credentials before replacing a dev container with ephemeral storage.
+adopt_earlier_credentials() {
+  local cid=$1 count
   "${compose[@]}" up -d --wait --no-deps postgres
   "${compose[@]}" run --rm -T --no-deps credentials
-  if credentials_exist; then
-    :
-  elif docker cp "$cid:$legacy/keyring" - >/dev/null 2>&1; then
+  if docker cp "$cid:$legacy" - >/dev/null 2>&1; then
     docker cp "$cid:$legacy" - |
-      "${compose[@]}" run --rm -T --no-deps --entrypoint sh credentials \
-        -c 'tar -x --no-same-owner --skip-old-files -C /credentials --strip-components=1'
-    "${compose[@]}" run --rm -T --no-deps credentials
-    echo 'Kept the earlier preview credentials.'
-  elif [[ $(unrevealed_rounds) != 0 ]]; then
-    echo 'This preview has an unsettled round, and its keyring is not in the old dev container at '"$legacy"'.' >&2
-    echo 'Copy the keyring out of the container, then run ./workspace restore-keyring FILE. The dev container was left in place.' >&2
-    exit 3
+      "${compose[@]}" run --rm -T --no-deps dev python3 deployments/docker/demo-credentials.py adopt "$creds"
+  fi
+  if ! credentials_exist; then
+    count=$(unrevealed_rounds) || return 1
+    if [[ $count != 0 ]]; then
+      echo 'This preview has an unsettled round, and its keyring is not in the old dev container at '"$legacy"'.' >&2
+      echo 'Copy the keyring out of the container, then run ./workspace restore-keyring FILE. The dev container was left in place.' >&2
+      exit 3
+    fi
+  fi
+}
+prepare_dev() {
+  local cid
+  cid=$(dev_container)
+  if [[ -n $cid ]] && ! has_credentials_volume "$cid"; then
+    adopt_earlier_credentials "$cid"
+  elif [[ ${1:-} != recreate ]]; then
+    return 0
   fi
   "${compose[@]}" up -d --force-recreate dev
 }
@@ -128,24 +131,24 @@ case "${1:-}" in
     exec "${compose[@]}" exec -T dev "$@"
     ;;
   preview)
-    adopt_earlier_preview
+    prepare_dev
     "${compose[@]}" up -d --wait --no-recreate dev postgres
     "${compose[@]}" exec -T dev make build-crashctl
     "${compose[@]}" exec -T dev ./bin/crashctl migrate up
-    "${compose[@]}" exec -T dev python3 deployments/docker/demo-credentials.py ensure "$creds" --unrevealed "$(unrevealed_rounds)"
+    count=$(unrevealed_rounds)
+    "${compose[@]}" exec -T dev python3 deployments/docker/demo-credentials.py ensure "$creds" --unrevealed "$count"
     exec "${compose[@]}" exec -T dev ./bin/crashctl migrate status
     ;;
   recreate)
-    adopt_earlier_preview
-    "${compose[@]}" up -d --force-recreate dev
+    prepare_dev recreate
     ;;
   restore-keyring)
     [[ -f ${2:-} ]] || { echo 'usage: ./workspace restore-keyring FILE' >&2; exit 2; }
-    "${compose[@]}" up -d --no-recreate dev
-    exec "${compose[@]}" exec -T dev sh -c 'umask 077 && set -C && cat > "$1"' sh "$creds/keyring" < "$2"
+    "${compose[@]}" run --rm -T --no-deps credentials
+    exec "${compose[@]}" run --rm -T --no-deps dev python3 deployments/docker/demo-credentials.py restore "$creds" < "$2"
     ;;
   devcontainer)
-    adopt_earlier_preview
+    prepare_dev
     exec devcontainer up --workspace-folder "$PWD"
     ;;
   stop) exec "${compose[@]}" stop ;;
