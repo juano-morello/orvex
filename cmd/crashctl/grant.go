@@ -38,9 +38,13 @@ func runLedger(args []string, stdout, stderr io.Writer) int {
 // it credits CREDITS from the global faucet account to PLAYER_ID's account
 // in one ledger transaction whose ID the grant key names (package grant).
 // Exit codes: 0 the grant is stored (applied now or existing), 1 the stored
-// transaction with the grant's ID is not a grant, 2 usage, 4 any database
-// error, 7 the grant key names a grant to another player or of other
-// credits. Operands are validated before connecting. Database errors print
+// transaction with the grant's ID is not a grant, 2 usage or a new grant
+// key whose player ID the gateway cannot authenticate (nothing written), 4
+// any database error, 7 the grant key names a grant to another player or of
+// other credits. Operands are validated before connecting, except that a
+// player ID outside the gateway's rule is only refused once the database
+// shows its grant key is new: a grant stored under the former rules must
+// stay retryable. Database errors print
 // under the K-12 rule: no part of ORVEX_DATABASE_URL ever appears in the
 // output.
 func runGrant(args []string, stdout, stderr io.Writer) int {
@@ -82,6 +86,9 @@ func runGrant(args []string, stdout, stderr io.Writer) int {
 	_ = conn.Close(ctx)
 	var reused *grant.KeyReusedError
 	switch {
+	case errors.Is(err, grant.ErrInvalid):
+		_, _ = fmt.Fprintln(stderr, prefix+err.Error())
+		return exitUsage
 	case errors.As(err, &reused):
 		_, _ = fmt.Fprintln(stderr, prefix+redact(cfg, fmt.Sprintf(
 			"grant key %s was used for player %q, credits %d; choose a new grant key for another grant",

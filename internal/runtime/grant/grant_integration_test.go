@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -533,5 +534,201 @@ func TestApplyKeepsLegacyFaucet(t *testing.T) {
 		t.Errorf("faucet %+v, want the legacy faucet %x with debits 500", f, legacy)
 	}
 	requireCredits(t, pool, "alice", 500)
+	requireBalanced(t, pool)
+}
+
+// legacyPlayers are IDs the former rules accepted (1 to 256 bytes of UTF-8
+// without control characters) that sessions.ParsePlayerID refuses, so the
+// gateway can never authenticate them.
+var legacyPlayers = []string{"Alice", "Bob Smith ✓", "ünï", "a.b", "al:ice", strings.Repeat("x", 65), strings.Repeat("é", 128)}
+
+// seedLegacyGrant stores a grant the way the former Apply did, whatever the
+// spelling of the player: the transaction row, the accounts if absent, one
+// faucet-to-player posting.
+func seedLegacyGrant(t *testing.T, db *pgxpool.Pool, key, player string, credits int64) {
+	t.Helper()
+	txID := ledger.GrantTransactionID(key)
+	mustExec(t, db, `INSERT INTO orvex.ledger_transactions (transaction_id, kind) VALUES ($1, 'grant')`, txID)
+	mustExec(t, db, `INSERT INTO orvex.ledger_accounts (account_id, kind, name, floor_enforced)
+		SELECT $1::uuid, 'system', 'faucet', false
+		WHERE NOT EXISTS (SELECT 1 FROM orvex.ledger_accounts WHERE kind = 'system' AND name = 'faucet' AND round_id IS NULL)`,
+		ledger.FaucetAccountID())
+	mustExec(t, db, `INSERT INTO orvex.ledger_accounts (account_id, kind, player_id, floor_enforced)
+		SELECT gen_random_uuid(), 'player', $1::text, true
+		WHERE NOT EXISTS (SELECT 1 FROM orvex.ledger_accounts WHERE player_id = $1::text)`, player)
+	mustExec(t, db, `INSERT INTO orvex.ledger_postings (transaction_id, posting_index, debit_account_id, credit_account_id, amount)
+		SELECT $1, 0, f.account_id, p.account_id, $3
+		FROM orvex.ledger_accounts f, orvex.ledger_accounts p
+		WHERE f.kind = 'system' AND f.name = 'faucet' AND p.player_id = $2`, txID, player, credits)
+}
+
+func TestApplyRefusesNewUnplayablePlayer(t *testing.T) {
+	_, pool := newDB(t)
+	mustApply(t, pool, mustParse(t, "alice-1", "alice", 500), grant.Applied)
+	before := ledgerDump(t, pool)
+	for i, p := range legacyPlayers {
+		g := mustParse(t, fmt.Sprintf("new-%d", i), p, 5)
+		if _, err := grant.Apply(ctx, pool, g); !errors.Is(err, grant.ErrInvalid) {
+			t.Errorf("Apply(%q) = %v, want ErrInvalid", p, err)
+		}
+		if _, ok := playerAccount(t, pool, p); ok {
+			t.Errorf("a refused grant created the account of %q", p)
+		}
+	}
+	if after := ledgerDump(t, pool); after != before {
+		t.Errorf("a refused grant wrote:\nbefore\n%s\nafter\n%s", before, after)
+	}
+	// The same key still funds a playable ID: nothing was reserved. So does
+	// the longest playable ID, which the validator takes from the gateway.
+	mustApply(t, pool, mustParse(t, "new-0", "alice", 5), grant.Applied)
+	mustApply(t, pool, mustParse(t, "new-max", strings.Repeat("a", 64), 5), grant.Applied)
+}
+
+// TestApplyRefusesUnplayableOnEmptyLedger: not even the faucet is created.
+func TestApplyRefusesUnplayableOnEmptyLedger(t *testing.T) {
+	_, pool := newDB(t)
+	if _, err := grant.Apply(ctx, pool, mustParse(t, "k", "Alice", 5)); !errors.Is(err, grant.ErrInvalid) {
+		t.Fatalf("Apply = %v, want ErrInvalid", err)
+	}
+	if n := count(t, pool, `SELECT (SELECT count(*) FROM orvex.ledger_accounts) + (SELECT count(*) FROM orvex.ledger_transactions)
+		+ (SELECT count(*) FROM orvex.ledger_postings)`); n != 0 {
+		t.Errorf("%d ledger rows after a refused grant, want 0", n)
+	}
+}
+
+func TestApplyLegacyGrantRetries(t *testing.T) {
+	_, pool := newDB(t)
+	for i, p := range legacyPlayers {
+		seedLegacyGrant(t, pool, fmt.Sprintf("legacy-%d", i), p, 500)
+	}
+	// A playable account beside them, so ID spellings can be told apart.
+	mustApply(t, pool, mustParse(t, "alice-1", "alice", 7), grant.Applied)
+	before := ledgerDump(t, pool)
+
+	for i, p := range legacyPlayers {
+		key := fmt.Sprintf("legacy-%d", i)
+		first, err := grant.Apply(ctx, pool, mustParse(t, key, p, 500))
+		if err != nil || first.Status != grant.Existing {
+			t.Fatalf("retry of %s for %q = %+v, %v; want existing", key, p, first, err)
+		}
+		a, ok := playerAccount(t, pool, p)
+		if !ok || first.AccountID != a.ID {
+			t.Errorf("retry of %s answered account %x, want the legacy account of %q", key, first.AccountID, p)
+		}
+		for _, other := range []grant.Grant{
+			mustParse(t, key, p, 501),                                       // other credits
+			mustParse(t, key, "alice", 500),                                 // a playable player
+			mustParse(t, key, legacyPlayers[(i+1)%len(legacyPlayers)], 500), // another legacy spelling
+			mustParse(t, key, strings.ToLower(p), 500),                      // the folded spelling
+		} {
+			if strings.ToLower(other.Player()) == p && other.Credits() == 500 {
+				continue // lowercase of an already-lower ID is the same payload
+			}
+			_, err := grant.Apply(ctx, pool, other)
+			var reused *grant.KeyReusedError
+			if !errors.As(err, &reused) || *reused != (grant.KeyReusedError{Key: key, Player: p, Credits: 500}) {
+				t.Errorf("Apply(%s, %q, %d) = %v, want KeyReusedError naming %q, 500", key, other.Player(), other.Credits(), err, p)
+			}
+		}
+	}
+	if after := ledgerDump(t, pool); after != before {
+		t.Errorf("legacy retries wrote:\nbefore\n%s\nafter\n%s", before, after)
+	}
+}
+
+// TestApplyLegacySpellingNeverFolded: an old grant to "Alice" and a new
+// grant to "alice" are two accounts; a new grant to "Alice" is refused.
+func TestApplyLegacySpellingNeverFolded(t *testing.T) {
+	_, pool := newDB(t)
+	seedLegacyGrant(t, pool, "legacy", "Alice", 500)
+	if _, err := grant.Apply(ctx, pool, mustParse(t, "again", "Alice", 5)); !errors.Is(err, grant.ErrInvalid) {
+		t.Fatalf("a new grant to the undeliverable spelling = %v, want ErrInvalid", err)
+	}
+	mustApply(t, pool, mustParse(t, "fresh", "alice", 9), grant.Applied)
+	upper, _ := playerAccount(t, pool, "Alice")
+	if upper.Credits != 500 {
+		t.Errorf("Alice credits %d, want 500", upper.Credits)
+	}
+	requireCredits(t, pool, "alice", 9)
+	if n := count(t, pool, `SELECT count(*) FROM orvex.ledger_accounts WHERE kind = 'player'`); n != 2 {
+		t.Errorf("%d player accounts, want 2", n)
+	}
+	mustApply(t, pool, mustParse(t, "legacy", "Alice", 500), grant.Existing)
+}
+
+// TestApplyConcurrentLegacyAndUnplayable: concurrent callers of a stored
+// legacy key and of a new unsupported one, released at once.
+func TestApplyConcurrentLegacyAndUnplayable(t *testing.T) {
+	_, pool := newDB(t)
+	seedLegacyGrant(t, pool, "legacy", "Bob Smith", 500)
+	before := ledgerDump(t, pool)
+	var grants []grant.Grant
+	for i := range 12 {
+		switch i % 3 {
+		case 0:
+			grants = append(grants, mustParse(t, "legacy", "Bob Smith", 500))
+		case 1:
+			grants = append(grants, mustParse(t, "legacy", "Bob Smith", 501))
+		default:
+			grants = append(grants, mustParse(t, "brand-new", "Bob Smith", 500))
+		}
+	}
+	results, errs := applyAll(t, pool, grants)
+	for i, err := range errs {
+		var reused *grant.KeyReusedError
+		switch i % 3 {
+		case 0:
+			if err != nil || results[i].Status != grant.Existing {
+				t.Errorf("call %d = %+v, %v; want existing", i, results[i], err)
+			}
+		case 1:
+			if !errors.As(err, &reused) {
+				t.Errorf("call %d = %v, want KeyReusedError", i, err)
+			}
+		default:
+			if !errors.Is(err, grant.ErrInvalid) {
+				t.Errorf("call %d = %v, want ErrInvalid", i, err)
+			}
+		}
+	}
+	if after := ledgerDump(t, pool); after != before {
+		t.Errorf("concurrent calls wrote:\nbefore\n%s\nafter\n%s", before, after)
+	}
+}
+
+// TestApplyConcurrentPlayableAndUnplayableSameKey: one new key raced by a
+// playable payload and an unsupported one. The playable payload is stored
+// once; the unsupported one never writes, and answers ErrInvalid if it ran
+// first and KeyReusedError if it ran after.
+func TestApplyConcurrentPlayableAndUnplayableSameKey(t *testing.T) {
+	_, pool := newDB(t)
+	var grants []grant.Grant
+	for i := range 10 {
+		if i%2 == 0 {
+			grants = append(grants, mustParse(t, "k", "alice", 100))
+		} else {
+			grants = append(grants, mustParse(t, "k", "Alice", 100))
+		}
+	}
+	results, errs := applyAll(t, pool, grants)
+	applied := 0
+	for i, err := range errs {
+		var reused *grant.KeyReusedError
+		switch {
+		case i%2 == 0 && err == nil && results[i].Status == grant.Applied:
+			applied++
+		case i%2 == 0 && err == nil && results[i].Status == grant.Existing:
+		case i%2 == 1 && (errors.Is(err, grant.ErrInvalid) || errors.As(err, &reused)):
+		default:
+			t.Errorf("call %d (%q) = %+v, %v", i, grants[i].Player(), results[i], err)
+		}
+	}
+	if applied != 1 {
+		t.Errorf("%d calls applied, want 1", applied)
+	}
+	requireCredits(t, pool, "alice", 100)
+	if _, ok := playerAccount(t, pool, "Alice"); ok {
+		t.Error("the unsupported payload created an account")
+	}
 	requireBalanced(t, pool)
 }

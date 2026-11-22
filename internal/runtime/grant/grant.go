@@ -13,6 +13,15 @@
 // commits the whole grant, so rerunning it is always safe and credits land
 // exactly once.
 //
+// A new grant may fund only a player ID the gateway can authenticate:
+// sessions.ParsePlayerID, the same rule the engine applies to a command's
+// player. Parse cannot know whether its key is new, and a key stored under
+// the former, wider rules (any 1 to MaxPlayerBytes bytes of UTF-8 without
+// control characters) must stay retryable, so Parse keeps those rules and
+// Apply enforces the playable rule on the first write of a key. A stored
+// grant is compared as written: the same payload is Existing, another is
+// *KeyReusedError, and no ID is ever folded or renamed.
+//
 // Grants are not part of any round's chain or audit file: a round's v2
 // export reads only the ledger transactions of its own records.
 package grant
@@ -32,6 +41,7 @@ import (
 	"github.com/juano-morello/orvex/internal/canonjson"
 	"github.com/juano-morello/orvex/internal/ledger"
 	"github.com/juano-morello/orvex/internal/persistence/postgres"
+	"github.com/juano-morello/orvex/internal/runtime/sessions"
 )
 
 const (
@@ -55,7 +65,8 @@ var (
 )
 
 var (
-	// ErrInvalid: Parse rejected an operand. Nothing was read or written.
+	// ErrInvalid: Parse rejected an operand, or Apply found a new grant key
+	// whose player ID the gateway cannot authenticate. Nothing was written.
 	ErrInvalid = errors.New("invalid grant")
 	// ErrCorrupt: the stored ledger transaction with the grant's ID is not
 	// a grant of one posting from the faucet to a player. Nothing was
@@ -95,6 +106,10 @@ func (g Grant) Credits() int64 { return g.credits }
 // ^[a-z0-9][a-z0-9._:-]{0,127}$; a player ID of 1 to MaxPlayerBytes bytes
 // of valid UTF-8 without control characters; credits in canonical decimal
 // from 1 to MaxCredits. Errors wrap ErrInvalid.
+//
+// The player rule is the former, wider one, so that a grant already stored
+// under it can be retried. Parse does not make the grant playable: Apply
+// refuses a new key whose player does not satisfy sessions.ParsePlayerID.
 func Parse(key, player, credits string) (Grant, error) {
 	if !keyPattern.MatchString(key) {
 		return Grant{}, fmt.Errorf("%w: the grant key must be 1 to 128 characters of a-z, 0-9, '.', '_', ':' and '-', starting with a letter or digit", ErrInvalid)
@@ -161,8 +176,10 @@ type DB interface {
 // on its primary key holding no account lock; then the faucet and player
 // accounts if absent; then the one posting, whose trigger updates both
 // accounts in ascending account_id. A stored grant of the same key is
-// compared, never rewritten. Errors other than *KeyReusedError and
-// ErrCorrupt wrap the database or context error; after any of them the
+// compared, never rewritten, whatever its player's spelling. A key not yet
+// stored with a player ID that sessions.ParsePlayerID refuses fails with
+// ErrInvalid before any write. Errors other than *KeyReusedError, ErrCorrupt
+// and ErrInvalid wrap the database or context error; after any of them the
 // grant is stored exactly once or not at all.
 func Apply(ctx context.Context, db DB, g Grant) (Result, error) {
 	txID := ledger.GrantTransactionID(g.key)
@@ -171,6 +188,10 @@ func Apply(ctx context.Context, db DB, g Grant) (Result, error) {
 		return Result{}, fmt.Errorf("grant: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, playable := sessions.ParsePlayerID(g.player); !playable {
+		return storedOrUnplayable(ctx, tx, txID, g)
+	}
 
 	tag, err := tx.Exec(ctx, `INSERT INTO orvex.ledger_transactions (transaction_id, kind) VALUES ($1, $2)
 		ON CONFLICT (transaction_id) DO NOTHING`, txID, ledger.KindGrant)
@@ -215,6 +236,24 @@ func Apply(ctx context.Context, db DB, g Grant) (Result, error) {
 		return Result{}, fmt.Errorf("grant: commit: %w", err)
 	}
 	return Result{TransactionID: txID, AccountID: account, Status: Applied}, nil
+}
+
+// storedOrUnplayable handles a grant whose player ID is not playable: it
+// compares the grant stored under txID, if any, and otherwise refuses g
+// without writing. The existence read takes no lock; a concurrent Apply of a
+// playable payload under the same key either committed first, so this call
+// compares against it, or commits after, as if this call had run first.
+func storedOrUnplayable(ctx context.Context, tx pgx.Tx, txID [16]byte, g Grant) (Result, error) {
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM orvex.ledger_transactions WHERE transaction_id = $1)`,
+		txID).Scan(&exists); err != nil {
+		return Result{}, fmt.Errorf("grant: read stored grant: %w", err)
+	}
+	if exists {
+		return stored(ctx, tx, txID, g)
+	}
+	return Result{}, fmt.Errorf("%w: the player ID must be 1 to 64 characters of a-z, 0-9, '_' and '-', the IDs the gateway authenticates; "+
+		"only a grant already stored under another spelling can be retried unchanged", ErrInvalid)
 }
 
 // stored compares the committed grant with ID txID to g. It writes nothing;

@@ -821,3 +821,75 @@ Grants: nothing beyond §13. Discovery reads `rounds` and `round_secret_reveals`
 known gap of this milestone: a leader whose session drops while its `CreateRound` commits can race the
 next leader's discovery and leave two unsettled rounds; both are then driven to settlement. Residual
 risk R-1 (§6, §16) is unchanged: `D` and `T0 + D` stay plaintext at rest until LBT-26.
+
+## 18. Operator credit grants (`crashctl ledger grant`)
+
+`crashctl ledger grant GRANT_KEY PLAYER_ID CREDITS` funds a player's account with simulated credits
+(ADR-004). The code is `internal/runtime/grant`.
+
+- **Faucet.** The credits come from one global system account, `kind = 'system'`, `name = 'faucet'`,
+  `round_id` NULL, floor not enforced, ID `ledger.FaucetAccountID()`. The first grant creates it. A
+  faucet created earlier under a random ID is kept and used. Its `debits_posted` is the total ever
+  granted and its balance goes negative; that is the simulated-credit supply, not a fault.
+- **One balanced transaction.** A grant is one `ledger_transactions` row of kind `grant` with `round_id`
+  and `sequence` NULL, and one `ledger_postings` row (`posting_index` 0, faucet → player, `amount` =
+  CREDITS) with `round_id` and `event_sequence` NULL. The posting trigger adds the amount to both
+  accounts in ascending `account_id` (§4). The player account is created if absent
+  (`floor_enforced`, random ID). A grant takes no admission, writes no chain record and holds nothing.
+- **Idempotency.** The transaction ID is `ledger.GrantTransactionID(GRANT_KEY)`, so its primary key is the
+  serialization point: one key names one grant across all players and all time. The same key, player and
+  credits again is `existing` and writes nothing; another player or credits exits 7 and writes nothing;
+  a stored transaction of that ID that is not a faucet-to-player grant exits 1. A grant that fails or
+  loses its commit response stored the whole grant or nothing, so rerunning the same command is safe.
+- **Which IDs a new grant may fund.** A new grant funds only a player ID that
+  `sessions.ParsePlayerID` accepts, `^[a-z0-9_-]{1,64}$`: the rule the gateway applies when it
+  authenticates a player and the engine applies to a command's player. An account under any other
+  spelling can never bet. A new key with another spelling exits 2 and writes nothing, not even the
+  faucet. Grants stored under the earlier rules (1 to 256 bytes of UTF-8 without control characters,
+  for example `Alice` or `Bob Smith`) stay as written: an exact retry with the same key, player and
+  credits is `existing`, any other payload under that key exits 7, and no ID is lowercased or renamed.
+  `Alice` and `alice` are two accounts; crediting `Alice` credits no one the gateway can authenticate.
+  The key decides which case applies, so `crashctl` can tell only after it reads the ledger: an
+  unsupported ID reaches the database, and with the database down it exits 4, not 2.
+- **Round-less rows.** The grant's NULL `round_id` and `sequence` keep it out of every round: it has no
+  chain record, so it is not in a round's v1 history, and the v2 export reads ledger rows by
+  `(round_id, sequence)` and lists only accounts that a hold, release or posting of the round
+  references. It never carries the faucet, a grant transaction or any account total. An export is
+  therefore byte-identical before and after a grant (`TestGrantFundsRound`). The audit verifier cannot
+  prove that a grant funded a hold: cross-round balances and funding are outside the ledger stage
+  (L-5, spec `ac81f88f`). The database's floor (`debits_posted + held <= credits_posted`) is what
+  enforces funding, and the live ledger is the only record of a grant.
+- **Concurrency.** `Apply` runs one `READ COMMITTED` transaction with `lock_timeout` 3 s. It inserts the
+  transaction row first, so a concurrent call of the same key waits on the primary key while holding no
+  account lock, then finds the faucet and player accounts, then posts. A lock wait over 3 s is
+  `55P03`, exit 4, nothing written. A new unsupported ID takes no lock at all: it reads whether the key
+  is stored and, if not, returns without writing.
+
+### Grants the operator role needs
+
+`TestGrantCLIRoles` and `TestGrantCLIRolePrivileges` (`cmd/crashctl`, `-tags integration`) run
+`crashctl ledger grant` as a role with exactly these grants:
+
+```sql
+GRANT CONNECT ON DATABASE orvex TO orvex_operator;
+GRANT USAGE ON SCHEMA orvex TO orvex_operator;
+GRANT SELECT, INSERT ON orvex.ledger_accounts, orvex.ledger_transactions, orvex.ledger_postings
+    TO orvex_operator;
+GRANT UPDATE (debits_posted, credits_posted) ON orvex.ledger_accounts TO orvex_operator;
+```
+
+The posting trigger runs as the invoking role, which is why `UPDATE` of the two totals is needed. The role
+has nothing on rounds, secrets, admissions, heads, holds, releases or the outbox, and holds no keyring.
+`TestGrantCLIRolePrivileges` removes one privilege at a time from a ledger that already holds a grant:
+
+| Without | New grant | Retry of a stored grant |
+|---|---|---|
+| `SELECT` on `ledger_accounts` or `ledger_transactions` | 42501 | 42501 |
+| `SELECT` on `ledger_postings` | applies | 42501 (the comparison reads the posting) |
+| `INSERT` on `ledger_transactions` | 42501 | 42501 (the idempotency insert runs first) |
+| `INSERT` on `ledger_accounts` or `ledger_postings` | 42501 | `existing` |
+| `UPDATE` of `debits_posted`, `credits_posted` | 42501 | `existing` |
+
+`TestGrantCLIRoles` also runs a role with only `SELECT` and no `INSERT`: a new grant is refused. A refused grant is exit 4 with `SQLSTATE 42501`, nothing written and no role, host, database or password in
+the output (LBT-21 K-12). `SELECT` on `ledger_postings` is the one grant a first application does not use;
+keep it, since every rerun needs it.

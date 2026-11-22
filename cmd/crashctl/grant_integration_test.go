@@ -131,9 +131,79 @@ func TestGrantCLI(t *testing.T) {
 	}
 
 	requireGranted(t, pool, "alice-2", "alice", 250, "applied")
-	requireGranted(t, pool, "bob-1", "Bob Smith ✓", 100, "applied")
+	requireGranted(t, pool, "bob-1", "bob_2-x", 100, "applied")
 	if a, _ := ledgerAccountOf(t, pool, "alice"); a.Credits != 750 {
 		t.Errorf("alice credits %d after two grants, want 750", a.Credits)
+	}
+}
+
+// seedLegacyGrant stores a grant as the former ledger grant did, whatever
+// the spelling of the player.
+func seedLegacyGrant(t *testing.T, pool *pgxpool.Pool, key, player string, credits int64) {
+	t.Helper()
+	execOrFatal(t, pool, `INSERT INTO orvex.ledger_transactions (transaction_id, kind) VALUES ($1, 'grant')`, ledger.GrantTransactionID(key))
+	execOrFatal(t, pool, `INSERT INTO orvex.ledger_accounts (account_id, kind, name, floor_enforced)
+		SELECT $1::uuid, 'system', 'faucet', false
+		WHERE NOT EXISTS (SELECT 1 FROM orvex.ledger_accounts WHERE kind = 'system' AND name = 'faucet' AND round_id IS NULL)`,
+		ledger.FaucetAccountID())
+	execOrFatal(t, pool, `INSERT INTO orvex.ledger_accounts (account_id, kind, player_id, floor_enforced)
+		SELECT gen_random_uuid(), 'player', $1::text, true
+		WHERE NOT EXISTS (SELECT 1 FROM orvex.ledger_accounts WHERE player_id = $1::text)`, player)
+	execOrFatal(t, pool, `INSERT INTO orvex.ledger_postings (transaction_id, posting_index, debit_account_id, credit_account_id, amount)
+		SELECT $1, 0, f.account_id, p.account_id, $3
+		FROM orvex.ledger_accounts f, orvex.ledger_accounts p
+		WHERE f.kind = 'system' AND f.name = 'faucet' AND p.player_id = $2`, ledger.GrantTransactionID(key), player, credits)
+}
+
+const unplayableGrant = "crashctl: ledger grant: invalid grant: the player ID must be 1 to 64 characters of a-z, 0-9, '_' and '-', " +
+	"the IDs the gateway authenticates; only a grant already stored under another spelling can be retried unchanged\n"
+
+// requireGrantRefused runs ledger grant and requires the given exit code,
+// empty stdout, the stderr, and no write.
+func requireGrantRefused(t *testing.T, pool *pgxpool.Pool, code int, stderr string, args ...string) {
+	t.Helper()
+	before := ledgerRows(t, pool)
+	gotCode, stdout, gotStderr := grantCmd(args...)
+	if gotCode != code || stdout != "" || gotStderr != stderr {
+		t.Errorf("ledger grant %v: exit %d, stdout %q, stderr %q; want %d, empty and %q", args, gotCode, stdout, gotStderr, code, stderr)
+	}
+	if after := ledgerRows(t, pool); after != before {
+		t.Errorf("ledger grant %v wrote:\nbefore\n%s\nafter\n%s", args, before, after)
+	}
+}
+
+// TestGrantCLIPlayerIDs: a new grant funds only a player ID the gateway
+// authenticates (exit 2 and no write otherwise), while a grant stored under
+// the former rules answers a retry as before: existing for the same
+// payload, exit 7 for another, and the old spelling is never folded.
+func TestGrantCLIPlayerIDs(t *testing.T) {
+	_, pool := exportDatabase(t)
+	seedLegacyGrant(t, pool, "legacy-1", "Bob Smith", 500)
+	seedLegacyGrant(t, pool, "legacy-2", "Alice", 20)
+	requireGranted(t, pool, "alice-1", "alice", 7, "applied")
+
+	for _, p := range []string{"Alice", "Bob Smith", "bob.smith", "ünï", strings.Repeat("x", 65)} {
+		requireGrantRefused(t, pool, exitUsage, unplayableGrant, "fresh-key", p, "5")
+	}
+	requireGranted(t, pool, "legacy-1", "Bob Smith", 500, "existing")
+	requireGranted(t, pool, "legacy-2", "Alice", 20, "existing")
+
+	reused := func(key, player string, credits int64) string {
+		return fmt.Sprintf("crashctl: ledger grant: grant key %s was used for player %q, credits %d; "+
+			"choose a new grant key for another grant\n", key, player, credits)
+	}
+	requireGrantRefused(t, pool, exitGrantKeyReused, reused("legacy-1", "Bob Smith", 500), "legacy-1", "Bob Smith", "501")
+	requireGrantRefused(t, pool, exitGrantKeyReused, reused("legacy-1", "Bob Smith", 500), "legacy-1", "bob-smith", "500")
+	requireGrantRefused(t, pool, exitGrantKeyReused, reused("legacy-1", "Bob Smith", 500), "legacy-1", "bob smith", "500")
+	requireGrantRefused(t, pool, exitGrantKeyReused, reused("legacy-2", "Alice", 20), "legacy-2", "alice", "20")
+	requireGrantRefused(t, pool, exitGrantKeyReused, reused("alice-1", "alice", 7), "alice-1", "Alice", "7")
+
+	requireGranted(t, pool, "alice-2", "alice", 3, "applied")
+	if a, _ := ledgerAccountOf(t, pool, "Alice"); a.Credits != 20 {
+		t.Errorf("Alice credits %d, want her legacy 20 untouched", a.Credits)
+	}
+	if a, _ := ledgerAccountOf(t, pool, "alice"); a.Credits != 10 {
+		t.Errorf("alice credits %d, want 10", a.Credits)
 	}
 }
 
@@ -207,7 +277,75 @@ func TestGrantCLIRoles(t *testing.T) {
 		if code, _, stderr := grantCmd("alice-1", "alice", "9"); code != exitGrantKeyReused {
 			t.Errorf("reused grant key: exit %d, stderr %q; want %d", code, stderr, exitGrantKeyReused)
 		}
+		// The playable-ID check needs nothing beyond the grants above.
+		requireGrantRefused(t, pool, exitUsage, unplayableGrant, "fresh", "Alice", "5")
 	})
+}
+
+// TestGrantCLIRolePrivileges ablates ledgerOperatorGrants one privilege at
+// a time against a ledger that already holds a grant. A new grant and the
+// retry of the stored one need different privileges: a retry reads the
+// grant's three tables and, for a playable player, first runs the INSERT
+// ... ON CONFLICT on ledger_transactions; a new grant inserts into all
+// three. Each refusal is exit 4 with SQLSTATE 42501 and no write.
+func TestGrantCLIRolePrivileges(t *testing.T) {
+	tests := []struct {
+		drop                     string
+		newRefused, retryRefused bool
+	}{
+		{"SELECT on ledger_accounts", true, true},
+		{"SELECT on ledger_transactions", true, true},
+		{"SELECT on ledger_postings", false, true},
+		{"INSERT on ledger_accounts", true, false},
+		{"INSERT on ledger_transactions", true, true},
+		{"INSERT on ledger_postings", true, false},
+		{"UPDATE of the posted totals", true, false},
+	}
+	for _, tt := range tests {
+		t.Run("without "+tt.drop, func(t *testing.T) {
+			dsn, pool := exportDatabase(t)
+			requireGranted(t, pool, "seed", "alice", 500, "applied")
+			var grants []string
+			grants = append(grants, ledgerOperatorGrants[:2]...)
+			for _, table := range []string{"ledger_accounts", "ledger_transactions", "ledger_postings"} {
+				var privs []string
+				for _, priv := range []string{"SELECT", "INSERT"} {
+					if priv+" on "+table != tt.drop {
+						privs = append(privs, priv)
+					}
+				}
+				if len(privs) > 0 {
+					grants = append(grants, fmt.Sprintf("GRANT %s ON orvex.%s TO %%[1]s", strings.Join(privs, ", "), table))
+				}
+			}
+			if tt.drop != "UPDATE of the posted totals" {
+				grants = append(grants, ledgerOperatorGrants[3])
+			}
+			t.Setenv(databaseURLEnv, restrictedRole(t, dsn, grants))
+
+			for _, c := range []struct {
+				name    string
+				args    []string
+				refused bool
+			}{
+				{"retry", []string{"seed", "alice", "500"}, tt.retryRefused},
+				{"new grant", []string{"fresh", "alice", "1"}, tt.newRefused},
+			} {
+				before := ledgerRows(t, pool)
+				code, stdout, stderr := grantCmd(c.args...)
+				if c.refused {
+					if code != exitIO || stdout != "" || !strings.Contains(stderr, "SQLSTATE 42501; rerunning the same command is safe\n") {
+						t.Errorf("%s: exit %d, stdout %q, stderr %q; want %d with SQLSTATE 42501", c.name, code, stdout, stderr, exitIO)
+					}
+					if after := ledgerRows(t, pool); after != before {
+						t.Errorf("%s: a refused grant wrote:\n%s", c.name, after)
+					}
+				} else if code != exitOK || stderr != "" {
+					t.Errorf("%s: exit %d, stderr %q; want 0", c.name, code, stderr)
+				}
+			}
+		})
+	}
 }
 
 // TestGrantFundsRound funds the worked-example round's players with ledger
