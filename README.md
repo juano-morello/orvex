@@ -2,12 +2,12 @@
 
 Orvex is a deterministic, audit-first multiplayer Crash game platform. It uses simulated credits only.
 
-Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-module-and-repository-conventions)), the game contract ([LBT-6](https://linear.app/lbtworks/issue/LBT-6/implement-generic-game-contract-and-versioned-adapter)), the frozen Crash v1 math ([LBT-7](https://linear.app/lbtworks/issue/LBT-7/freeze-crash-mathematical-specification-and-golden-vectors)), the Crash v1 round rules ([LBT-8](https://linear.app/lbtworks/issue/LBT-8/implement-crash-decideevolve-and-lifecycle-invariants)), the canonical codec, hash chain and audit CLI ([LBT-9](https://linear.app/lbtworks/issue/LBT-9/build-canonical-event-codec-and-audit-replay-cli)), the PostgreSQL schema and migration tooling ([LBT-10](https://linear.app/lbtworks/issue/LBT-10/implement-postgresql-schema-and-migration-tooling)), the durable per-round admission sequencer ([LBT-11](https://linear.app/lbtworks/issue/LBT-11/implement-durable-per-round-postgresql-admission-sequencer)), the atomic execution commit with the simulated-credit ledger, outbox and round creation ([LBT-12](https://linear.app/lbtworks/issue/LBT-12/implement-atomic-execution-commit-ledger-and-outbox)), the audit history export CLI ([LBT-19](https://linear.app/lbtworks/issue/LBT-19/crashctl-audit-export-round-id)) and the audit ledger stage with history format v2 ([LBT-18](https://linear.app/lbtworks/issue/LBT-18/audit-ledger-stage-history-format-v2)). No service wiring, leases, outbox relay or transport exists yet.
+Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-module-and-repository-conventions)), the game contract ([LBT-6](https://linear.app/lbtworks/issue/LBT-6/implement-generic-game-contract-and-versioned-adapter)), the frozen Crash v1 math ([LBT-7](https://linear.app/lbtworks/issue/LBT-7/freeze-crash-mathematical-specification-and-golden-vectors)), the Crash v1 round rules ([LBT-8](https://linear.app/lbtworks/issue/LBT-8/implement-crash-decideevolve-and-lifecycle-invariants)), the canonical codec, hash chain and audit CLI ([LBT-9](https://linear.app/lbtworks/issue/LBT-9/build-canonical-event-codec-and-audit-replay-cli)), the PostgreSQL schema and migration tooling ([LBT-10](https://linear.app/lbtworks/issue/LBT-10/implement-postgresql-schema-and-migration-tooling)), the durable per-round admission sequencer ([LBT-11](https://linear.app/lbtworks/issue/LBT-11/implement-durable-per-round-postgresql-admission-sequencer)), the atomic execution commit with the simulated-credit ledger, outbox and round creation ([LBT-12](https://linear.app/lbtworks/issue/LBT-12/implement-atomic-execution-commit-ledger-and-outbox)), the audit history export CLI ([LBT-19](https://linear.app/lbtworks/issue/LBT-19/crashctl-audit-export-round-id)) and the audit ledger stage with history format v2 ([LBT-18](https://linear.app/lbtworks/issue/LBT-18/audit-ledger-stage-history-format-v2)). The engine binary schedules rounds itself: it creates, starts, closes and settles them, and adopts unsettled rounds after a restart (`internal/runtime/lifecycle`). No outbox relay exists yet.
 
 ## Layout
 
 - `cmd/gateway`: client-facing gateway service (scaffold)
-- `cmd/engine`: game execution service (scaffold)
+- `cmd/engine`: game execution service: the round lifecycle scheduler and the engine API listener, configured by `ORVEX_*` variables (`engine -h`)
 - `cmd/crashctl`: replay/audit and operations CLI: `crashctl audit verify|replay|chain` (LBT-9), `crashctl audit export` (LBT-19), `crashctl migrate up|down|status` (LBT-10)
 - `internal/game/crash/v1`: Crash v1 rules: frozen arithmetic, fairness derivation and golden vectors (ADR-004, LBT-7); round lifecycle Decide/Evolve, command authority and public projection (ADR-003, LBT-8); canonical codec (ADR-001, LBT-9)
 - `internal/buildinfo`: build identifier stamped at link time
@@ -19,6 +19,7 @@ Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-mo
 - `internal/persistence/eventstore`: audit history export from the database (v1 LBT-10, v2 with ledger rows LBT-18)
 - `internal/runtime/admission`: durable per-round admission sequencer (Transaction A): dedupe, sequence and effective time, admission window and closure barrier, credit holds, crash/v1 admission policy (ADR-002, ADR-005, LBT-11)
 - `internal/runtime/execution`: per-round command executor (Transaction B): atomic commit of the chain record, events, ledger postings, hold releases, outbox message and snapshot under a compare-and-set and fencing token; cold load by chain replay; round creation; crash/v1 execution policy (ADR-005, LBT-12)
+- `internal/runtime/lifecycle`: the engine's crash/v1 round scheduler: advisory-lock leadership, discovery and adoption of unsettled rounds, lease claims, round creation with one plan per round, deterministic lifecycle command IDs
 - `internal/ledger`: pure simulated-credit posting rules and deterministic ledger IDs (ADR-004, LBT-12)
 - `internal/game`: typed game contract, canonical codec contract, deterministic input envelope, versioned adapter and rules registry (ADR-003)
 - `migrations`: embedded PostgreSQL schema migrations (immutable once merged)
@@ -80,7 +81,7 @@ still has its host permissions. Each project resolves its own database at
 `postgres:5432`. PostgreSQL has no published host port. The development
 container runs as the host user and has no host Docker socket. Testcontainers
 integration tests run separately in CI or on a Docker-enabled host.
-Gateway and engine currently have no serving entry points.
+The gateway has no serving entry point yet.
 
 Run `deployments/docker/tests/worktree-isolation.sh` from the repository to check
 concurrent previews. It uses a temporary clone, applies different migrations at
