@@ -1,0 +1,209 @@
+syntax = "proto3";
+
+package orvex.v1;
+
+option go_package = "github.com/juano-morello/orvex/proto/orvex/v1;orvexv1";
+
+// EngineService is the gateway-to-engine boundary. Only the gateway calls
+// it: every call carries the gateway's service token as
+// "authorization: Bearer <token>" metadata, and the engine trusts
+// Principal.player_id only because the token authenticated the caller.
+// No request carries a time (ADR-002), and the wire has no lifecycle
+// command, so no caller can start, close or settle a round.
+service EngineService {
+  // GetCurrentRound returns the newest crash/v1 round. NOT_FOUND when the
+  // engine has created none.
+  rpc GetCurrentRound(GetCurrentRoundRequest) returns (GetCurrentRoundResponse);
+  // SubmitCommand admits a player command durably. Domain outcomes travel
+  // in the response; a status error means the request itself is invalid
+  // (INVALID_ARGUMENT) or the engine failed (INTERNAL).
+  rpc SubmitCommand(SubmitCommandRequest) returns (SubmitCommandResponse);
+  // LookupCommand returns the admission and execution status of the
+  // principal's command. NOT_FOUND is not definitive for a command still
+  // being admitted; resubmitting the identical request is.
+  rpc LookupCommand(LookupCommandRequest) returns (LookupCommandResponse);
+  // SubscribeRound streams the round's public records in sequence order,
+  // gapless, starting after after_sequence (from genesis when unset). The
+  // stream ends with OK after the round's last record. NOT_FOUND for an
+  // unknown round, FAILED_PRECONDITION for a cursor above the execution
+  // head.
+  rpc SubscribeRound(SubscribeRoundRequest) returns (stream SubscribeRoundResponse);
+}
+
+// Principal is the authenticated player the gateway acts for.
+message Principal {
+  string player_id = 1;
+}
+
+message GetCurrentRoundRequest {}
+
+message GetCurrentRoundResponse {
+  bytes round_id = 1;
+  string game = 2;
+  uint32 rules_version = 3;
+}
+
+message SubmitCommandRequest {
+  Principal principal = 1;
+  // client_command_id is the client's 16-byte UUID. The engine derives the
+  // command ID from it and the principal, so two players never share one.
+  bytes client_command_id = 2;
+  bytes round_id = 3;
+  oneof command {
+    PlaceBet place_bet = 4;
+    CashOut cash_out = 5;
+  }
+}
+
+message PlaceBet {
+  int64 bet_credits = 1;
+}
+
+message CashOut {}
+
+// Admission is a durable admission receipt.
+message Admission {
+  bytes round_id = 1;
+  uint64 sequence = 2;
+  int64 effective_time_unix_micro = 3;
+  // duplicate reports that the command was already admitted; sequence and
+  // effective time are the original ones.
+  bool duplicate = 4;
+}
+
+enum RejectionReason {
+  REJECTION_REASON_UNSPECIFIED = 0;
+  REJECTION_REASON_ROUND_NOT_FOUND = 1;
+  REJECTION_REASON_ROUND_CLOSED = 2;
+  REJECTION_REASON_ROUND_SEALED = 3;
+  REJECTION_REASON_INSUFFICIENT_CREDITS = 4;
+  REJECTION_REASON_COMMAND_ID_REUSED = 5;
+}
+
+// Rejection is a definite rejection at admission: nothing was written.
+message Rejection {
+  RejectionReason reason = 1;
+}
+
+enum RetryReason {
+  RETRY_REASON_UNSPECIFIED = 0;
+  // Nothing was admitted.
+  RETRY_REASON_NOT_ADMITTED = 1;
+  // The admission may have committed.
+  RETRY_REASON_OUTCOME_UNKNOWN = 2;
+}
+
+// Retry asks the caller to resubmit the identical request.
+message Retry {
+  RetryReason reason = 1;
+}
+
+message SubmitCommandResponse {
+  oneof result {
+    Admission admitted = 1;
+    Rejection rejected = 2;
+    Retry retry = 3;
+  }
+}
+
+message LookupCommandRequest {
+  Principal principal = 1;
+  bytes client_command_id = 2;
+}
+
+enum Outcome {
+  OUTCOME_UNSPECIFIED = 0;
+  OUTCOME_PENDING = 1;
+  OUTCOME_ACCEPTED = 2;
+  OUTCOME_REJECTED = 3;
+}
+
+message LookupCommandResponse {
+  // admission.duplicate is always false.
+  Admission admission = 1;
+  Outcome outcome = 2;
+  // reason is the Decide rejection code; set only for OUTCOME_REJECTED.
+  string reason = 3;
+  // events are this command's own events, set only for OUTCOME_ACCEPTED.
+  repeated CrashEvent events = 4;
+}
+
+message SubscribeRoundRequest {
+  bytes round_id = 1;
+  optional uint64 after_sequence = 2;
+}
+
+// SubscribeRoundResponse is the public projection of one chain record. A
+// command record holds its accepted events; a rejected command holds none,
+// so sequences stay gapless.
+message SubscribeRoundResponse {
+  uint64 sequence = 1;
+  // For genesis, the round's creation time.
+  int64 effective_time_unix_micro = 2;
+  oneof body {
+    Genesis genesis = 3;
+    Events events = 4;
+  }
+}
+
+// Genesis is the round's public config: the seed commitment and limits.
+message Genesis {
+  bytes commitment = 1;
+  int64 min_bet_credits = 2;
+  int64 max_bet_credits = 3;
+  int64 max_bets = 4;
+}
+
+message Events {
+  repeated CrashEvent events = 1;
+}
+
+message CrashEvent {
+  oneof event {
+    BetPlaced bet_placed = 1;
+    RoundStarted round_started = 2;
+    BetCashedOut bet_cashed_out = 3;
+    RoundCrashed round_crashed = 4;
+    BetLost bet_lost = 5;
+    RoundSettled round_settled = 6;
+  }
+}
+
+message BetPlaced {
+  string player_id = 1;
+  int64 bet_credits = 2;
+  int64 placed_at_unix_micro = 3;
+}
+
+message RoundStarted {
+  int64 started_at_unix_micro = 1;
+}
+
+message BetCashedOut {
+  string player_id = 1;
+  int64 cashed_out_at_unix_micro = 2;
+  int64 cash_out_tick = 3;
+  int64 cash_out_multiplier_scaled = 4;
+  int64 payout_credits = 5;
+}
+
+message RoundCrashed {
+  int64 closed_at_unix_micro = 1;
+  int64 crash_point_scaled = 2;
+  int64 crash_tick = 3;
+  int64 crash_deadline_offset_micros = 4;
+  int64 crash_deadline_unix_micro = 5;
+}
+
+message BetLost {
+  string player_id = 1;
+  int64 bet_credits = 2;
+}
+
+message RoundSettled {
+  int64 settled_at_unix_micro = 1;
+  int64 bet_count = 2;
+  int64 total_bet_credits = 3;
+  int64 total_payout_credits = 4;
+  bytes seed = 5;
+}

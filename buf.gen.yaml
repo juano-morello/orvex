@@ -1,0 +1,10 @@
+version: v2
+# The plugin versions must match google.golang.org/protobuf and
+# google.golang.org/grpc in go.mod (ADR-007: pinned dependencies).
+plugins:
+  - local: ["go", "run", "google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12"]
+    out: proto
+    opt: paths=source_relative
+  - local: ["go", "run", "google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2"]
+    out: proto
+    opt: paths=source_relative
