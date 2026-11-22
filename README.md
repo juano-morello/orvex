@@ -58,3 +58,53 @@ See [AGENTS.md](AGENTS.md) for contributor and agent guidance and [docs/adr/](do
 - A missing `ROUND_ID` or `ORVEX_DATABASE_URL`, or an `AUDIT_UNSETTLED` other than `1`, stops before the build with an `audit:` message. A failed step prints `audit: crashctl audit export failed with exit code N` (or `verify`); make reports `Error N` and exits 2. `N` is `crashctl`'s code: 1 failed, 2 usage or a keyring problem, 3 unsupported, 4 I/O or database, 5 round not found, 6 round not settled or its secret config not revealed.
 - The expected head comes from the same database as the file, so the run checks the export end to end but is not an independent anchor (ADR-001). Keep the printed head elsewhere to anchor it.
 - Local Compose database: `ORVEX_DATABASE_URL='postgres://orvex:orvex@127.0.0.1:55432/orvex?sslmode=disable' make audit ROUND_ID=<uuid>`.
+
+### Parallel worktree previews
+
+On a Linux Docker host, create a linked Git worktree for each requirement and run
+these commands from that checkout. The host launcher needs Bash, Git and Docker
+Compose with support for the `!reset` tag. Git operations stay on the host.
+
+| Command | Effect |
+|---|---|
+| `./workspace shell` | Open a shell in the worktree's Go development container. |
+| `./workspace exec make test` | Run a command in that same container. |
+| `./workspace devcontainer` | Start it through the optional Dev Container CLI and report its container ID for attachment. |
+| `./workspace preview` | Start private PostgreSQL, build this checkout's crashctl, apply its migrations and show schema status. |
+| `./workspace stop` | Stop this project's containers and retain the database. |
+| `./workspace dispose` | Remove this project's containers, network and database volume immediately. |
+
+Run the agent's editing and shell tools inside the development container to
+scope its file access to the mounted checkout. A host agent using a worktree
+still has its host permissions. Each project resolves its own database at
+`postgres:5432`. PostgreSQL has no published host port. The development
+container runs as the host user and has no host Docker socket. Testcontainers
+integration tests run separately in CI or on a Docker-enabled host.
+Gateway and engine currently have no serving entry points.
+
+Run `deployments/docker/tests/worktree-isolation.sh` from the repository to check
+concurrent previews. It uses a temporary clone, applies different migrations at
+the same version, removes one worktree, runs collection twice, and checks
+both the removed resources and the surviving deployment.
+
+#### Cleanup after worktree removal
+
+Run `./workspace gc` from the primary checkout after `git worktree remove`.
+If a tool deletes just the directory, Git must first prune the worktree
+registration. A merged branch with a registered worktree retains its preview.
+Each registered deployment belongs to its original Docker engine. Collection
+removes its containers, network and database volume once its registration is
+gone. A failed teardown remains eligible for retry.
+
+For automatic cleanup on a Linux development host with a systemd user manager,
+run this once from the primary checkout using the same user's Docker context:
+
+```sh
+systemctl --user link "$PWD"/deployments/systemd/orvex-preview-gc@.{service,timer}
+timer=$(systemd-escape --path --template=orvex-preview-gc@.timer "$PWD")
+systemctl --user enable --now "$timer"
+```
+
+The timer checks every five minutes while the user manager is running. Use
+`systemctl --user disable --now "$timer"` to stop it. The primary checkout
+must remain at its configured path.

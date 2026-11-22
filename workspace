@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "$0")"
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+registry="$common/orvex-previews"
+mkdir -p -- "$registry"
+export ORVEX_UID=$(id -u) ORVEX_GID=$(id -g)
+
+# Git removes its link when the worktree registration goes away. The other
+# link keeps the project identity and Docker engine ID available for cleanup.
+exec 8<"$registry"
+if [[ ${1:-} == gc ]]; then
+  shopt -s nullglob
+  for receipt in "$registry"/orvex-wt-*; do
+    (
+      flock 8
+      [[ -f $receipt && ! -L $receipt ]] || exit 0
+      exec 9<"$receipt"
+      flock -n 9 || exit 0
+      [[ $(stat -c %h "$receipt") == 1 ]] || exit 0
+      exec 8<&-
+      project=${receipt##*/}
+      [[ $project =~ ^orvex-wt-[0-9a-f-]{36}$ ]] || exit 1
+      engine=$(docker info --format '{{.ID}}')
+      [[ $engine == "$(<"$receipt")" ]] || exit 0
+      export ORVEX_WORKSPACE_ID=$project
+      docker compose -p "$project" -f deployments/docker/compose.yaml \
+        -f .devcontainer/compose.yaml down --volumes --remove-orphans
+      rm -- "$receipt"
+      echo "Removed preview $project"
+    ) 8<"$registry"
+  done
+  exit 0
+fi
+if [[ ! -f .git ]]; then
+  echo 'Run ./workspace from a linked Git worktree so shared Git metadata stays outside the container.' >&2
+  exit 2
+fi
+git_dir=$(git rev-parse --absolute-git-dir)
+flock 8
+shopt -s nullglob
+markers=("$git_dir"/orvex-wt-*)
+if (( ${#markers[@]} == 0 )); then
+  project="orvex-wt-$(cat /proc/sys/kernel/random/uuid)"
+  marker="$git_dir/$project"
+  engine=$(docker info --format '{{.ID}}')
+  printf '%s\n' "$engine" > "$marker"
+else
+  marker=${markers[0]}
+  project=${marker##*/}
+  engine=$(docker info --format '{{.ID}}')
+  [[ $engine == "$(<"$marker")" ]] || { echo 'Switch back to the Docker engine that owns this preview.' >&2; exit 1; }
+fi
+receipt="$registry/$project"
+[[ -f $receipt ]] || ln -- "$marker" "$receipt"
+exec 9<"$receipt"
+flock -s 9
+exec 8<&-
+export ORVEX_WORKSPACE_ID=$project COMPOSE_PROJECT_NAME=$project
+compose=(docker compose -p "$ORVEX_WORKSPACE_ID" -f deployments/docker/compose.yaml -f .devcontainer/compose.yaml)
+case "${1:-}" in
+  shell|exec)
+    mode=$1
+    shift
+    "${compose[@]}" up -d --no-recreate dev
+    exec 9<&-
+    if [[ $mode == shell ]]; then
+      exec "${compose[@]}" exec dev bash
+    fi
+    exec "${compose[@]}" exec -T dev "$@"
+    ;;
+  preview)
+    "${compose[@]}" up -d --wait --no-recreate dev postgres
+    "${compose[@]}" exec -T dev make build-crashctl
+    "${compose[@]}" exec -T dev ./bin/crashctl migrate up
+    exec "${compose[@]}" exec -T dev ./bin/crashctl migrate status
+    ;;
+  devcontainer) exec devcontainer up --workspace-folder "$root" ;;
+  stop) exec "${compose[@]}" stop ;;
+  dispose) exec "${compose[@]}" down --volumes ;;
+  *) echo 'usage: ./workspace shell | exec COMMAND... | preview | devcontainer | stop | dispose | gc' >&2
+     exit 2 ;;
+esac

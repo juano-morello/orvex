@@ -1,0 +1,20 @@
+# Paths are relative to deployments/docker/compose.yaml (the first file).
+name: ${ORVEX_WORKSPACE_ID:?launch with ./workspace}
+services:
+  dev:
+    image: golang:1.26-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
+    working_dir: /workspace
+    init: true
+    user: "${ORVEX_UID:?}:${ORVEX_GID:?}"
+    command: ["sleep", "infinity"]
+    environment:
+      HOME: /tmp
+      GOPATH: /tmp/go
+      ORVEX_DATABASE_URL: postgres://orvex:orvex@postgres:5432/orvex?sslmode=disable
+    volumes:
+      - ../..:/workspace
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+  postgres:
+    ports: !reset []
