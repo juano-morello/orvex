@@ -15,6 +15,28 @@ func TestHouseAccountID(t *testing.T) {
 	}
 }
 
+func TestFaucetAccountID(t *testing.T) {
+	if got := uuidText(FaucetAccountID()); got != "aaeb433a-e909-8dae-95fd-f1d64f9e40f3" {
+		t.Errorf("FaucetAccountID = %s", got)
+	}
+}
+
+func TestGrantTransactionID(t *testing.T) {
+	for _, c := range []struct {
+		key  string
+		want string
+	}{
+		{"a", "b54483d0-b1ad-88aa-964c-3a1408358956"},
+		{"bob-1", "ac538930-8952-8c7b-a462-5f08b0b8809f"},
+		{"alice-2026-11-22", "f93fbbec-4b3a-89e7-a493-4512bdcb461f"},
+		{"demo:alice.1_x-9", "1ea50446-26ce-895c-b444-bedc0a18aad7"},
+	} {
+		if got := uuidText(GrantTransactionID(c.key)); got != c.want {
+			t.Errorf("GrantTransactionID(%q) = %s, want %s", c.key, got, c.want)
+		}
+	}
+}
+
 func TestRoundAccountID(t *testing.T) {
 	if got := uuidText(workedRoundID); got != "0190f3a8-7b3c-7d4e-8f00-000000000001" {
 		t.Fatalf("uuidText = %s", got)
@@ -49,12 +71,14 @@ func TestIDsAreUUIDv8(t *testing.T) {
 		}
 	}
 	check("house", HouseAccountID())
+	check("faucet", FaucetAccountID())
 	for range 1000 {
 		var round [16]byte
 		binary.BigEndian.PutUint64(round[:8], r.Uint64())
 		binary.BigEndian.PutUint64(round[8:], r.Uint64())
 		check("round account", RoundAccountID(round))
 		check("transaction", TransactionID(round, r.Uint64()))
+		check("grant", GrantTransactionID(strconv.FormatUint(r.Uint64(), 36)))
 	}
 }
 
@@ -70,11 +94,17 @@ func TestIDsDistinct(t *testing.T) {
 		ids[id] = what
 	}
 	add("house", HouseAccountID())
+	add("faucet", FaucetAccountID())
 	add("round account", RoundAccountID(workedRoundID))
 	add("other round account", RoundAccountID(other))
 	for k := range uint64(50) {
 		add("transaction worked/"+strconv.FormatUint(k, 10), TransactionID(workedRoundID, k))
 		add("transaction other/"+strconv.FormatUint(k, 10), TransactionID(other, k))
+		add("grant "+strconv.FormatUint(k, 10), GrantTransactionID(strconv.FormatUint(k, 10)))
+	}
+	// A grant key spelled like a transaction suffix still names another ID.
+	if GrantTransactionID(uuidText(workedRoundID)+"/1") == TransactionID(workedRoundID, 1) {
+		t.Error("the grant prefix does not separate grant IDs from transaction IDs")
 	}
 	if uuid8("orvex/ledger/v1/account:global/"+RoundAccountName) == HouseAccountID() {
 		t.Error("account names do not separate IDs")

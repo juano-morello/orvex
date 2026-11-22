@@ -10,12 +10,19 @@ import (
 const (
 	accountPrefix     = "orvex/ledger/v1/account:"
 	transactionPrefix = "orvex/ledger/v1/transaction:"
+	grantPrefix       = "orvex/ledger/v1/grant:"
 )
 
 // HouseAccountID returns the ID of the global house account:
 // uuid8("orvex/ledger/v1/account:global/house").
 func HouseAccountID() [16]byte {
 	return uuid8(accountPrefix + "global/" + HouseAccountName)
+}
+
+// FaucetAccountID returns the ID of the global faucet account that
+// operator grants debit: uuid8("orvex/ledger/v1/account:global/faucet").
+func FaucetAccountID() [16]byte {
+	return uuid8(accountPrefix + "global/" + FaucetAccountName)
 }
 
 // RoundAccountID returns the ID of round roundID's round_pool account:
@@ -28,6 +35,13 @@ func RoundAccountID(roundID [16]byte) [16]byte {
 // of round roundID: uuid8("orvex/ledger/v1/transaction:<round uuid>/<k>").
 func TransactionID(roundID [16]byte, sequence uint64) [16]byte {
 	return uuid8(transactionPrefix + uuidText(roundID) + "/" + strconv.FormatUint(sequence, 10))
+}
+
+// GrantTransactionID returns the ID of the ledger transaction of the operator
+// grant named by grantKey: uuid8("orvex/ledger/v1/grant:<grant key>"). One
+// grant key names one grant, whatever its player.
+func GrantTransactionID(grantKey string) [16]byte {
+	return uuid8(grantPrefix + grantKey)
 }
 
 // uuid8 returns the RFC 9562 UUIDv8 made of the first 16 bytes of SHA-256
