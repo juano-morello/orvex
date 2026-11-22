@@ -1,6 +1,9 @@
 version: v2
-# The plugin versions must match google.golang.org/protobuf and
-# google.golang.org/grpc in go.mod (ADR-007: pinned dependencies).
+# Pinned generators (ADR-007: pinned dependencies). protoc-gen-go must equal
+# the google.golang.org/protobuf runtime in go.mod. protoc-gen-go-grpc is a
+# separate module with its own version line, not the grpc runtime's: its
+# output needs grpc.SupportPackageIsVersion9, which the google.golang.org/grpc
+# runtime in go.mod provides. Change a generator with `make proto`.
 plugins:
   - local: ["go", "run", "google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12"]
     out: proto

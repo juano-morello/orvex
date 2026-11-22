@@ -1,8 +1,34 @@
 # Paths are relative to deployments/docker/compose.yaml (the first file).
+#
+# The credentials volume belongs to this project exactly as postgres-data
+# does: `down --volumes` (./workspace dispose and gc) removes both, and
+# `stop`, `down` and recreating dev keep both. The key in it seals the
+# round secrets stored in that database.
 name: ${ORVEX_WORKSPACE_ID:?launch with ./workspace}
+x-golang: &golang
+  image: golang:1.26-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
 services:
+  credentials:
+    <<: *golang
+    # Hand the volume to the development user. A new named volume is owned
+    # by root and dev runs as the host user. Re-run on every up, so a changed
+    # host UID reaches files that an earlier container created.
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    restart: "no"
+    command: ["sh", "-c", "chown -R \"$$ORVEX_UID:$$ORVEX_GID\" /credentials && chmod 0700 /credentials"]
+    environment:
+      ORVEX_UID: "${ORVEX_UID:?}"
+      ORVEX_GID: "${ORVEX_GID:?}"
+    volumes:
+      - credentials:/credentials
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
   dev:
-    image: golang:1.26-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0
+    <<: *golang
     working_dir: /workspace
     init: true
     user: "${ORVEX_UID:?}:${ORVEX_GID:?}"
@@ -11,10 +37,16 @@ services:
       HOME: /tmp
       GOPATH: /tmp/go
       ORVEX_DATABASE_URL: postgres://orvex:orvex@postgres:5432/orvex?sslmode=disable
+    depends_on:
+      credentials:
+        condition: service_completed_successfully
     volumes:
       - ../..:/workspace
+      - credentials:/var/lib/orvex-preview
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
   postgres:
     ports: !reset []
+volumes:
+  credentials:

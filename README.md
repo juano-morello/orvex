@@ -31,7 +31,9 @@ Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-mo
 
 ## Development
 
-Prerequisites: Go 1.26, golangci-lint v2.14.0, Python 3.11 or newer (standard library only; used by `make golden-check`) and a Docker-compatible daemon (used by `make test-integration`).
+Prerequisites: Go 1.26 (the module requires 1.26.0), golangci-lint v2.14.0, Python 3.11 or newer (standard library only; used by `make golden-check` and the demo credentials), a Docker-compatible daemon (used by `make test-integration`) and, for the demo round, `curl`.
+
+Buf needs a newer Go than the module. `make proto` and `make proto-check` run Buf v1.75.0, which declares Go 1.26.7, while `go.mod` keeps `go 1.26.0`. With the default `GOTOOLCHAIN=auto`, Go downloads a 1.26.7 or later toolchain for those targets, so they need network access on a host with an older 1.26.x; with `GOTOOLCHAIN=local`, install Go 1.26.7 or later. The generators in `buf.gen.yaml` are pinned independently: `protoc-gen-go` v1.36.12 matches the `google.golang.org/protobuf` runtime in `go.mod`, while `protoc-gen-go-grpc` v1.6.2 is a separate module with its own version line. Its output needs `grpc.SupportPackageIsVersion9`, which the `google.golang.org/grpc` runtime in `go.mod` provides. Change a generator or a runtime together with `make proto` and a commit of the regenerated files.
 
 - `make build`: build all binaries into `bin/` (or `make build-gateway`, `make build-engine`, `make build-crashctl`)
 - `make test`: run tests with the race detector
@@ -46,9 +48,9 @@ Prerequisites: Go 1.26, golangci-lint v2.14.0, Python 3.11 or newer (standard li
 - `make clean`: remove build output
 - `crashctl migrate up [-to N]`, `crashctl migrate down -to N`, `crashctl migrate status`: apply, revert or list schema migrations on the database named by `ORVEX_DATABASE_URL`
 - `crashctl audit export [-format NAME] [-unsettled] ROUND_ID FILE` exports v1 by default. Select `orvex/audit-history/v2` to include the ledger. An unsettled export requires access to `orvex.round_secrets` and the keyring named by `ORVEX_SECRET_KEYRING_FILE`.
-- `crashctl ledger grant GRANT_KEY PLAYER_ID CREDITS` adds up to 10¹² demo credits per grant. Retrying the same grant succeeds. Reusing a key with a different player or amount exits with code 7.
+- `crashctl ledger grant GRANT_KEY PLAYER_ID CREDITS` adds up to 10¹² demo credits per grant. A new grant accepts only player IDs of 1 to 64 characters of `a-z`, `0-9`, `_` and `-` (exit 2 otherwise, nothing written). Retrying the same grant succeeds, including one committed earlier under a former player ID spelling. Reusing a key with a different player or amount exits with code 7.
 
-Local PostgreSQL:
+Local PostgreSQL on the host (a worktree preview has its own database; see [Play a local round](#play-a-local-round)):
 
 - `docker compose -f deployments/docker/compose.yaml up -d --wait`
 - `export ORVEX_DATABASE_URL='postgres://orvex:orvex@127.0.0.1:55432/orvex?sslmode=disable'`, then `./bin/crashctl migrate up`
@@ -58,49 +60,44 @@ See [AGENTS.md](AGENTS.md) for contributor and agent guidance and [docs/adr/](do
 
 ## Play a local round
 
-Start the local PostgreSQL instance described above, set `ORVEX_DATABASE_URL`, then run:
+Run the round in one of two places. The steps are the same. Only the database URL and the credential directory differ.
+
+| | Host | Preview container |
+|---|---|---|
+| Start | `docker compose -f deployments/docker/compose.yaml up -d --wait` | `./workspace preview`, then `./workspace shell` (see [Parallel worktree previews](#parallel-worktree-previews)) |
+| `ORVEX_DATABASE_URL` | You export `postgres://orvex:orvex@127.0.0.1:55432/orvex?sslmode=disable`. The Compose file publishes the port on the host loopback only. | Already set to `postgres://orvex:orvex@postgres:5432/orvex?sslmode=disable`. Leave it alone: inside the container `127.0.0.1` is the container itself, and the preview publishes no host port. |
+| Credential directory (`demo_dir`) | `${XDG_STATE_HOME:-$HOME/.local/state}/orvex-demo` | `/var/lib/orvex-preview`, a Docker volume of this preview |
+| Migrations and credentials | You run them below. | `./workspace preview` has run them and built only `crashctl`; run `make build` in the container for the engine and gateway. |
+
+On the host, prepare the database and the credentials:
 
 ```sh
+export ORVEX_DATABASE_URL='postgres://orvex:orvex@127.0.0.1:55432/orvex?sslmode=disable'
 make build
 ./bin/crashctl migrate up
+demo_dir="${XDG_STATE_HOME:-$HOME/.local/state}/orvex-demo"
+python3 deployments/docker/demo-credentials.py ensure "$demo_dir"
+```
+
+In the preview container, run `demo_dir=/var/lib/orvex-preview` instead. `ensure` creates the keyring, the gateway token and the players file with mode 0600 in a 0700 directory. It never overwrites a file, so repeating it is safe, and it prints only file names. Players `alice` and `bob` get one random bearer token each.
+
+The keyring holds the key that seals each round's secret config until the round settles. The engine needs the original key to resume an unsettled round, so keep the directory with the database (a preview keeps both in Docker volumes that share a lifetime). If the key is lost, restore it from a backup kept apart from database backups, or discard the database and start fresh.
+
+Fund both players. A grant key makes the grant idempotent: retry the same key with the same player and amount and the command reports the existing grant. The same key with another player or amount exits with code 7.
+
+```sh
 ./bin/crashctl ledger grant demo-alice-1 alice 1000
 ./bin/crashctl ledger grant demo-bob-1 bob 1000
 ```
 
-Keep the keyring with the demo database across restarts. The engine needs the original key to
-resume an unsettled round. If the key is lost, restore it from backup or start a fresh demo
-database. The following commands reuse the credential files on later runs.
+A new grant accepts the player IDs that authentication accepts: 1 to 64 characters of `a-z`, `0-9`, `_` and `-`. Any other spelling exits with code 2 and writes nothing. A grant committed earlier under a former spelling keeps working when you retry it with its original key and arguments. Never rewrite an existing player ID to fit the rule: a different spelling is a different account.
+
+Start the engine and the gateway:
 
 ```sh
-demo_dir="${XDG_STATE_HOME:-$HOME/.local/state}/orvex-demo"
-mkdir -p -m 700 "$demo_dir"
 export ORVEX_SECRET_KEYRING_FILE="$demo_dir/keyring"
 export ORVEX_GATEWAY_TOKEN_FILE="$demo_dir/gateway-token"
 export ORVEX_PLAYERS_FILE="$demo_dir/players.json"
-(
-  umask 077
-  python3 - <<'PY'
-import base64
-import json
-import os
-import secrets
-from pathlib import Path
-
-key = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
-players = {secrets.token_hex(32): name for name in ("alice", "bob")}
-files = {
-    "ORVEX_SECRET_KEYRING_FILE": f"active local\nkey local {key}\n",
-    "ORVEX_GATEWAY_TOKEN_FILE": secrets.token_hex(32) + "\n",
-    "ORVEX_PLAYERS_FILE": json.dumps(players),
-}
-for variable, contents in files.items():
-    try:
-        with Path(os.environ[variable]).open("x", encoding="ascii") as file:
-            file.write(contents)
-    except FileExistsError:
-        pass
-PY
-)
 export ORVEX_ENGINE_ADDR=127.0.0.1:7070 ORVEX_GATEWAY_ADDR=127.0.0.1:8080
 export ORVEX_BETTING_WINDOW=30s
 ./bin/engine &
@@ -109,38 +106,45 @@ env -u ORVEX_DATABASE_URL -u ORVEX_SECRET_KEYRING_FILE ./bin/gateway &
 gateway_pid=$!
 ```
 
-After both services report ready, the following Bash commands place Alice's bet and follow the
-round. They use `curl`, `jq` and Python. Bob can use the same commands with his own token.
+In a preview, services started in a `./workspace shell` stop when that shell exits. Keep the shell open, or start them again as described under [Recreate and resume](#recreate-and-resume).
+
+After both services report ready, the following Bash commands place Alice's bet and follow the round. They use `curl` and Python. Bob can use the same commands with his own token.
 
 ```sh
-token=$(jq -r 'to_entries[] | select(.value == "alice") | .key' "$ORVEX_PLAYERS_FILE")
+token=$(python3 -c 'import json, os, sys
+players = json.load(open(os.environ["ORVEX_PLAYERS_FILE"]))
+print(next(token for token, player in players.items() if player == sys.argv[1]))' alice)
 api="http://$ORVEX_GATEWAY_ADDR/v1"
 auth="Authorization: Bearer $token"
-round=$(curl -fsS --retry 8 --retry-delay 1 --retry-all-errors "$api/rounds/current" | jq -er .roundId)
+round=$(curl -fsS --retry 8 --retry-delay 1 --retry-all-errors "$api/rounds/current" |
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["roundId"])')
 bet_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 curl -sS -H "$auth" -H 'Content-Type: application/json' \
   -d "{\"clientCommandId\":\"$bet_id\",\"placeBet\":{\"betCredits\":\"100\"}}" "$api/rounds/$round/commands"
+curl -sS -H "$auth" "$api/commands/$bet_id"
 curl -NsS "$api/rounds/$round/stream" &
 ```
 
-The stream prints `BetPlaced` when the engine accepts the bet. The current round can already
-be running. If the bet lookup returns `wrong_phase` or submission returns `round_closed` or
-`round_sealed`, wait for the next round ID and place a new bet.
+A submission that returns `202` with `"status":"admitted"` was durably admitted at the sequence and time it reports. A duplicate with the same command ID returns the same receipt with `"duplicate":true`. The `202` does not say the command ran. Ask the lookup, `GET /v1/commands/{clientCommandId}`, for the outcome: it returns `pending` until execution records the result, then `accepted` or `rejected`. A bet that the round turns down shows `rejected` with a reason such as `wrong_phase`.
 
-When the stream prints `RoundStarted`, submit a cash-out. Cash-outs must reach admission before
-the crash deadline. Keep the request body so a lost response can be retried with the same ID.
+The stream prints `BetPlaced` when the engine accepts the bet. The current round can already be running. If the bet lookup returns `wrong_phase` or submission returns `round_closed` or `round_sealed`, wait for the next round ID and place a new bet with a new command ID. After a lost response, retry with the same command ID and body.
+
+When the stream prints `RoundStarted`, submit a cash-out. Cash-outs must reach admission before the crash deadline. Keep the request body so a lost response can be retried with the same ID.
 
 ```sh
 cash_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-cash_body=$(jq -nc --arg id "$cash_id" '{clientCommandId:$id,cashOut:{}}')
+cash_body=$(python3 -c 'import json, sys
+print(json.dumps({"clientCommandId": sys.argv[1], "cashOut": {}}, separators=(",", ":")))' "$cash_id")
 curl -sS -H "$auth" -H 'Content-Type: application/json' \
   -d "$cash_body" "$api/rounds/$round/commands"
 curl -sS -H "$auth" "$api/commands/$cash_id"
 ```
 
-The lookup returns `pending` until execution records the outcome. After settlement,
-run `make audit ROUND_ID="$round" AUDIT_FORMAT=orvex/audit-history/v2` to include the ledger
-in verification. Stop the local services with `kill "$gateway_pid" "$engine_pid"`.
+After settlement, run `make audit ROUND_ID="$round" AUDIT_FORMAT=orvex/audit-history/v2` to include the ledger in verification. It reads the database in `ORVEX_DATABASE_URL`, which is the right one in either place. Stop the local services with `kill "$gateway_pid" "$engine_pid"`.
+
+### Recreate and resume
+
+A round that is not settled survives a restart of the services. Stop the engine and the gateway, or recreate the preview container with `./workspace recreate`, then repeat the steps from the credential directory onward in a new shell. `ensure` keeps the existing files, the engine reads the same keyring, adopts the unsettled round and settles it, and the stream and the audit work as before.
 
 ## Audit
 
@@ -161,23 +165,58 @@ Compose with support for the `!reset` tag. Git operations stay on the host.
 |---|---|
 | `./workspace shell` | Open a shell in the worktree's Go development container. |
 | `./workspace exec make test` | Run a command in that same container. |
-| `./workspace devcontainer` | Start it through the optional Dev Container CLI and report its container ID for attachment. |
-| `./workspace preview` | Start private PostgreSQL, build this checkout's crashctl, apply its migrations and show schema status. |
-| `./workspace stop` | Stop this project's containers and retain the database. |
-| `./workspace dispose` | Remove this project's containers, network and database volume immediately. |
+| `./workspace devcontainer` | Start it through the optional Dev Container CLI (which must be installed) and report its container ID for attachment. |
+| `./workspace preview` | Start private PostgreSQL, build this checkout's crashctl, apply its migrations, create the preview's demo credentials and show schema status. Run it again to upgrade an older preview. |
+| `./workspace recreate` | Replace only the development container. The database and the credentials stay. |
+| `./workspace restore-keyring FILE` | Copy a backed-up keyring into the preview. It refuses to overwrite one that exists. |
+| `./workspace stop` | Stop this project's containers and retain the database and the credentials. |
+| `./workspace dispose` | Remove this project's containers, network, database volume and credentials volume immediately. |
 
 Run the agent's editing and shell tools inside the development container to
 scope its file access to the mounted checkout. A host agent using a worktree
 still has its host permissions. Each project resolves its own database at
-`postgres:5432`. PostgreSQL has no published host port. The development
-container runs as the host user and has no host Docker socket. Testcontainers
-integration tests run separately in CI or on a Docker-enabled host.
-The preview starts the database and runs migrations. To play, start the engine and gateway as described in [Play a local round](#play-a-local-round).
+`postgres:5432`, and the container's `ORVEX_DATABASE_URL` already names it. The
+host's `127.0.0.1:55432` URL does not apply here. PostgreSQL has no published
+host port. The development container runs as the host user and has no host
+Docker socket. Testcontainers integration tests run separately in CI or on a
+Docker-enabled host. The preview starts the database and runs migrations. To
+play, follow [Play a local round](#play-a-local-round) in `./workspace shell`.
+
+#### Preview credentials
+
+The keyring, the gateway token and the players file live in a Docker volume of
+the preview, mounted at `/var/lib/orvex-preview` and outside the checkout. A
+one-shot container gives the volume to the host user's UID and GID with mode
+0700 on every start, and the files inside are mode 0600. The volume has the
+preview's lifetime, like its database. `stop`, `recreate` and removing the
+development container keep both. `dispose` and collection remove both. Two
+previews never share credentials.
+
+The keyring seals every unsettled round's secret config, so `./workspace
+preview` never replaces a missing one while the database holds a sealed round
+that has not settled. It exits with code 3 and writes nothing. An earlier
+preview kept its credentials in the development container's `/tmp`. Running
+`./workspace preview` or `./workspace recreate` on one copies them to the volume
+before it replaces the container. If that keyring is elsewhere, the command
+stops and leaves the container in place so you can copy the file out.
+
+Back up the keyring apart from database backups, and restore it after a loss:
+
+```sh
+(umask 077; ./workspace exec cat /var/lib/orvex-preview/keyring > keyring.backup)
+./workspace restore-keyring keyring.backup
+```
+
+Without the original key, a round that has not settled can never be loaded or
+exported, and settled rounds are unaffected. Either restore the key, or run
+`./workspace dispose` to discard the preview and its database and then
+`./workspace preview` for a fresh one.
 
 Run `deployments/docker/tests/worktree-isolation.sh` from the repository to check
 concurrent previews. It uses a temporary clone, applies different migrations at
-the same version, removes one worktree, runs collection twice, and checks
-both the removed resources and the surviving deployment.
+the same version, checks that each credentials volume has the host user's owner
+and mode and keeps its own key, removes one worktree, runs collection twice,
+and checks both the removed resources and the surviving deployment.
 
 #### Cleanup after worktree removal
 
