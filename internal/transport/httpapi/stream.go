@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -61,11 +62,7 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type received struct {
-		frame *orvexv1.SubscribeRoundResponse
-		err   error
-	}
-	frames := make(chan received)
+	frames := make(chan received, writeBatchFrames)
 	go func() {
 		for {
 			f, err := sub.Recv()
@@ -95,26 +92,59 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case got := <-frames:
-			if errors.Is(got.err, io.EOF) {
-				write("event: end\ndata: {}\n\n")
-				return
-			}
-			if got.err != nil {
-				if code := status.Code(got.err); code != codes.Canceled {
-					h.log.Warn("gateway: subscription ended", "code", code.String())
+			// Write every frame already received in one write and flush.
+			var b strings.Builder
+			ended := h.render(&b, got)
+		batch:
+			for !ended && b.Len() < writeBatchBytes {
+				select {
+				case got = <-frames:
+					ended = h.render(&b, got)
+				default:
+					break batch
 				}
-				return
 			}
-			data, err := frameJSON(got.frame)
-			if err != nil {
-				h.log.Error("gateway: engine sent a malformed record", "sequence", got.frame.GetSequence())
-				return
-			}
-			if !write(fmt.Sprintf("id: %d\nevent: record\ndata: %s\n\n", got.frame.GetSequence(), data)) {
+			if !write(b.String()) || ended {
 				return
 			}
 		}
 	}
+}
+
+// received is one result of the subscription's Recv.
+type received struct {
+	frame *orvexv1.SubscribeRoundResponse
+	err   error
+}
+
+// A write carries the frames already received, up to writeBatchFrames
+// frames or about writeBatchBytes.
+const (
+	writeBatchFrames = 64
+	writeBatchBytes  = 64 << 10
+)
+
+// render appends the event for got to b and reports whether the response
+// ends after it: at the round's end, which gets "end", or on a failure,
+// which ends it without "end".
+func (h *Handler) render(b *strings.Builder, got received) bool {
+	if errors.Is(got.err, io.EOF) {
+		b.WriteString("event: end\ndata: {}\n\n")
+		return true
+	}
+	if got.err != nil {
+		if code := status.Code(got.err); code != codes.Canceled {
+			h.log.Warn("gateway: subscription ended", "code", code.String())
+		}
+		return true
+	}
+	data, err := frameJSON(got.frame)
+	if err != nil {
+		h.log.Error("gateway: engine sent a malformed record", "sequence", got.frame.GetSequence())
+		return true
+	}
+	fmt.Fprintf(b, "id: %d\nevent: record\ndata: %s\n\n", got.frame.GetSequence(), data)
+	return false
 }
 
 // retryField sets EventSource's reconnection time.

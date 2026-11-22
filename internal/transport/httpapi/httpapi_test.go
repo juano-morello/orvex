@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -523,5 +524,96 @@ func TestStreamPingsAndCloseStreams(t *testing.T) {
 	h.CloseStreams()
 	if rest, err := io.ReadAll(r); err != nil || strings.Contains(string(rest), "event: end") {
 		t.Errorf("after CloseStreams: %q, %v; want the stream closed without end", rest, err)
+	}
+}
+
+// burstWriter is a ResponseWriter whose first write waits for hold. It
+// counts the writes that carry a record.
+type burstWriter struct {
+	hold    chan struct{}
+	header  http.Header
+	mu      sync.Mutex
+	held    bool
+	records int
+	writes  int
+	body    strings.Builder
+}
+
+func (w *burstWriter) Header() http.Header { return w.header }
+func (w *burstWriter) WriteHeader(int)     {}
+func (w *burstWriter) Flush()              {}
+
+func (w *burstWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	first := !w.held
+	w.held = true
+	w.mu.Unlock()
+	if first {
+		<-w.hold
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if n := strings.Count(string(b), "event: record\n"); n > 0 {
+		w.records += n
+		w.writes++
+	}
+	w.body.Write(b)
+	return len(b), nil
+}
+
+// TestStreamWritesAReceivedBurstAtOnce holds the stream's first write
+// while the engine sends a burst of records. The records the gateway has
+// already received when the write returns go out in one write, in order,
+// rather than one write and flush each.
+func TestStreamWritesAReceivedBurstAtOnce(t *testing.T) {
+	const burst = 50
+	sent := make(chan struct{})
+	_, h := newGateway(t, &fakeEngine{subscribe: func(_ *orvexv1.SubscribeRoundRequest, s grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse]) error {
+		if err := s.SendHeader(nil); err != nil {
+			return err
+		}
+		for seq := range uint64(burst) {
+			if err := s.Send(&orvexv1.SubscribeRoundResponse{Sequence: seq, Body: &orvexv1.SubscribeRoundResponse_Events{Events: &orvexv1.Events{}}}); err != nil {
+				return err
+			}
+		}
+		close(sent)
+		<-s.Context().Done()
+		return s.Context().Err()
+	}})
+	w := &burstWriter{hold: make(chan struct{}), header: http.Header{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/rounds/"+roundText+"/stream", nil))
+	}()
+	<-sent
+	time.Sleep(200 * time.Millisecond)
+	close(w.hold)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		w.mu.Lock()
+		n := w.records
+		w.mu.Unlock()
+		if n == burst {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d records written", n, burst)
+		}
+	}
+	cancel()
+	<-done
+	if w.writes > 2 {
+		t.Errorf("%d records already received took %d writes, want them together", burst, w.writes)
+	}
+	var want strings.Builder
+	want.WriteString(retryField)
+	for seq := range burst {
+		fmt.Fprintf(&want, "id: %d\nevent: record\ndata: {\"sequence\":\"%d\",\"effectiveTimeUnixMicro\":\"0\",\"events\":[]}\n\n", seq, seq)
+	}
+	if got := w.body.String(); got != want.String() {
+		t.Errorf("body = %q\nwant %q", got, want.String())
 	}
 }
