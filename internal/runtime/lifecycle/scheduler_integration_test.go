@@ -3,6 +3,7 @@
 package lifecycle
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"strconv"
@@ -101,13 +102,16 @@ func TestCreateRetriesSamePlan(t *testing.T) {
 // discovery and adopts it instead of creating another.
 func TestLostPlanAdoptedOnRestart(t *testing.T) {
 	e := newEnv(t)
-	var first *running
+	first, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	db := &lostCommitDB{Pool: e.pool}
-	db.afterCommit = loseFirstCommit(func() { first.cancel() })
+	db.afterCommit = loseFirstCommit(cancel)
 	a := e.scheduler(Config{BettingWindow: time.Hour, CreateRounds: true}, db, func(c *execution.Config) { c.MaxAttempts = 1 })
-	first = run(a)
-	if err := <-first.done; err != nil {
+	if err := a.Run(first); err != nil {
 		t.Fatalf("first engine Run: %v", err)
+	}
+	if !errors.Is(first.Err(), context.Canceled) {
+		t.Fatalf("first engine stopped with %v, want cancellation at commit", first.Err())
 	}
 	if n := e.rounds(); n != 1 {
 		t.Fatalf("%d rounds after the lost commit, want 1", n)

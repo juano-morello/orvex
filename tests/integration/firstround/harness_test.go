@@ -161,7 +161,7 @@ func recordFrame(seq int, events string) string {
 func TestHarnessStreamResumes(t *testing.T) {
 	srv, seen := sseServer(t,
 		func(string) string {
-			return recordFrame(0, "") + recordFrame(1, `{"type":"BetPlaced","player":"alice","betCredits":"100"}`) + recordFrame(2, "")
+			return recordFrame(0, "") + recordFrame(1, `{"type":"BetPlaced","playerId":"alice","betCredits":"100"}`) + recordFrame(2, "")
 		},
 		func(string) string {
 			return ": ping\n\n" + recordFrame(1, "") + recordFrame(2, "") + recordFrame(3, `{"type":"RoundSettled"}`) + "event: end\ndata: {}\n\n"

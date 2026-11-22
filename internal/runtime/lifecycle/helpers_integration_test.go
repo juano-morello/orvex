@@ -96,7 +96,7 @@ func (e *env) scheduler(cfg Config, db execution.DB, mutate func(*execution.Conf
 		e.t.Fatal(err)
 	}
 	s.timing = testTiming
-	s.seed = func(id [16]byte) [32]byte { return seedWithDeadline(e.t, id, time.Second, 2*time.Second) }
+	s.seed = func(id [16]byte) [32]byte { return roundtest.SeedWithDeadline(e.t, id, time.Second, 2*time.Second) }
 	return s
 }
 
@@ -273,7 +273,7 @@ func (e *env) createRound(x *execution.Executor, createdAt int64) [16]byte {
 	if _, err := x.CreateRound(ctx, execution.NewRound{
 		RoundID: id, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber,
 		Config: v1.Config{
-			RoundID: id, Seed: seedWithDeadline(e.t, id, time.Second, 2*time.Second),
+			RoundID: id, Seed: roundtest.SeedWithDeadline(e.t, id, time.Second, 2*time.Second),
 			MinBetCredits: roundMinBetCredits, MaxBetCredits: roundMaxBetCredits, MaxBets: roundMaxBets,
 		},
 		CreatedAtUnixMicro: createdAt,
@@ -310,25 +310,6 @@ func playerCommandID(n uint64) [16]byte {
 	id[0], id[6] = 0x0c, 0x70
 	binary.BigEndian.PutUint64(id[8:], n)
 	return id
-}
-
-// seedWithDeadline scans 32-byte big-endian counters from 1 until
-// crash/v1 gives min <= D <= max for the round.
-func seedWithDeadline(t *testing.T, roundID [16]byte, minD, maxD time.Duration) [32]byte {
-	t.Helper()
-	for n := uint64(1); n <= 100_000; n++ {
-		var seed [32]byte
-		binary.BigEndian.PutUint64(seed[24:], n)
-		s, err := v1.Rules{}.InitialState(v1.Config{RoundID: roundID, Seed: seed, MinBetCredits: 1, MaxBetCredits: 1, MaxBets: 1})
-		if err != nil {
-			continue
-		}
-		if d := s.CrashDeadlineOffsetMicros; d >= minD.Microseconds() && d <= maxD.Microseconds() {
-			return seed
-		}
-	}
-	t.Fatalf("no seed with D in [%v, %v]", minD, maxD)
-	return [32]byte{}
 }
 
 // lostCommitDB wraps a pool; its read-write transactions run afterCommit

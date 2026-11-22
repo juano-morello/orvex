@@ -62,7 +62,7 @@ type commandStatus struct {
 // wireEvent holds the event fields the test reads; the rest are ignored.
 type wireEvent struct {
 	Type          string  `json:"type"`
-	Player        string  `json:"player"`
+	PlayerID      string  `json:"playerId"`
 	BetCredits    wireInt `json:"betCredits"`
 	PayoutCredits wireInt `json:"payoutCredits"`
 }

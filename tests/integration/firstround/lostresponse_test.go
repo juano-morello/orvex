@@ -215,7 +215,7 @@ func TestLostCashOutResponsePaysOnce(t *testing.T) {
 	}
 	var payout int64
 	for _, e := range outcome.Events {
-		if e.Type == "BetCashedOut" && e.Player == "alice" {
+		if e.Type == "BetCashedOut" && e.PlayerID == "alice" {
 			payout = int64(e.PayoutCredits)
 		}
 	}
@@ -249,7 +249,7 @@ func TestLostCashOutResponsePaysOnce(t *testing.T) {
 	}
 	for _, f := range aliceFrames {
 		for _, e := range f.Events {
-			if e.Type == "BetCashedOut" && (e.Player != "alice" || int64(e.PayoutCredits) != payout || f.Sequence != int64(lost.Sequence)) {
+			if e.Type == "BetCashedOut" && (e.PlayerID != "alice" || int64(e.PayoutCredits) != payout || f.Sequence != int64(lost.Sequence)) {
 				t.Errorf("frame %d BetCashedOut %+v, want alice paid %d at sequence %d", f.Sequence, e, payout, lost.Sequence)
 			}
 		}
