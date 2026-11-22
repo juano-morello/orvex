@@ -54,14 +54,19 @@ func TestParsePlayersRejects(t *testing.T) {
 		"empty player":     `{"alice-token-0001": ""}`,
 		"long player":      `{"alice-token-0001": "` + strings.Repeat("a", 65) + `"}`,
 		"nul player":       `{"alice-token-0001": "al\u0000ice"}`,
+		"repeated token":   `{"alice-token-0001": "alice", "alice-token-0001": "mallory"}`,
+		"repeated same":    `{"alice-token-0001": "alice", "alice-token-0001": "alice"}`,
+		"escaped repeat":   `{"alice-token-0001": "alice", "\u0061lice-token-0001": "mallory"}`,
+		"nested object":    `{"alice-token-0001": {"player": "alice"}}`,
+		"null":             `null`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := ParsePlayers([]byte(content))
 			if !errors.Is(err, ErrInvalid) {
 				t.Fatalf("ParsePlayers = %v, want ErrInvalid", err)
 			}
-			if strings.Contains(err.Error(), "alice-token") {
-				t.Errorf("error %q quotes a token", err)
+			if strings.Contains(err.Error(), "alice-token") || strings.Contains(err.Error(), "mallory") {
+				t.Errorf("error %q quotes the file's content", err)
 			}
 		})
 	}
