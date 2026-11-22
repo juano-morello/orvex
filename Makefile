@@ -173,3 +173,5 @@ fuzz-guard-check:
 
 clean:
 	rm -rf $(BIN_DIR)
+
+include proto/proto.mk

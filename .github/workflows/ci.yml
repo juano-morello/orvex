@@ -28,6 +28,7 @@ jobs:
           cache-dependency-path: go.mod
       - run: make test
       - run: make golden-check
+      - run: make proto-check
 
   integration:
     runs-on: ubuntu-latest
