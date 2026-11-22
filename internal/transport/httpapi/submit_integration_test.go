@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -152,7 +153,7 @@ func requireReceipt(t *testing.T, what string, r reply, round, client [16]byte, 
 		"sequence":               fmt.Sprint(a.sequence),
 		"effectiveTimeUnixMicro": fmt.Sprint(a.effTime),
 		"duplicate":              duplicate,
-		"status":                 r.body["status"],
+		"status":                 "admitted",
 	}
 	if r.status != 202 || !maps.Equal(r.body, want) {
 		t.Fatalf("%s = %d %v, want 202 %v", what, r.status, r.body, want)
@@ -284,4 +285,42 @@ func mustInt(t *testing.T, s string) int64 {
 		t.Fatalf("%q: %v", s, err)
 	}
 	return n
+}
+
+// TestSubmitMalformedWritesNothing sends refused submissions for a funded
+// player in an open round. None may reach admission: the round keeps no
+// admission and the player no hold, and the next valid bet is sequence 1.
+func TestSubmitMalformedWritesNothing(t *testing.T) {
+	s := newStack(t)
+	round, _, _ := s.createRound(t, time.Second, 3*time.Second)
+	roundtest.FundPlayer(t, s.pool, "alice", 1000)
+	path := "/v1/rounds/" + uuidText(round) + "/commands"
+	client := uuidText(randomUUID(t))
+	id := `"clientCommandId":"` + client + `"`
+	for _, tc := range []struct {
+		name, method, body string
+		status             int
+		code               string
+	}{
+		{"repeated id", "POST", `{` + id + `,"clientCommandId":"` + uuidText(randomUUID(t)) + `",` + placeBet("100") + `}`, 400, "invalid_request"},
+		{"repeated credits", "POST", `{` + id + `,"placeBet":{"betCredits":"1","betCredits":"100"}}`, 400, "invalid_request"},
+		{"mixed-case key", "POST", `{"ClientCommandId":"` + client + `",` + placeBet("100") + `}`, 400, "invalid_request"},
+		{"unknown nested field", "POST", `{` + id + `,"placeBet":{"betCredits":"100","player":"bob"}}`, 400, "invalid_request"},
+		{"oversized", "POST", `{` + id + `,` + placeBet("100") + strings.Repeat(" ", 5000) + `}`, 413, "request_too_large"},
+		{"wrong method", "PUT", `{` + id + `,` + placeBet("100") + `}`, 405, "method_not_allowed"},
+	} {
+		if r := s.call(t, tc.method, path, aliceToken, tc.body); r.status != tc.status || r.body["code"] != tc.code || len(r.body) != 1 {
+			t.Errorf("%s: %d %v, want %d %s", tc.name, r.status, r.body, tc.status, tc.code)
+		}
+	}
+	if n := len(s.admissions(t, round)); n != 0 {
+		t.Errorf("%d admissions after refused submissions, want 0", n)
+	}
+	if n := s.int(t, `SELECT count(*) FROM orvex.ledger_holds`); n != 0 {
+		t.Errorf("%d ledger holds after refused submissions, want 0", n)
+	}
+	bet := s.submit(t, aliceToken, round, randomUUID(t), placeBet("100"))
+	if bet.status != 202 || bet.body["sequence"] != "1" || bet.body["status"] != "admitted" || len(bet.body) != 6 {
+		t.Errorf("valid bet = %d %v, want the 202 receipt for admission 1", bet.status, bet.body)
+	}
 }

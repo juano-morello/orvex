@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,7 +30,10 @@ const (
 	clientText = "5d1f0c2e-7a3b-4c4d-9e8f-0a1b2c3d4ea1"
 )
 
-var roundBytes = []byte{0x0b, 0x7e, 0x6a, 0x1c, 0x3c, 0x2f, 0x4e, 0x0a, 0x9a, 0x51, 0x6d, 0x2f, 0x0c, 0x1e, 0x4b, 0x77}
+var (
+	roundBytes  = []byte{0x0b, 0x7e, 0x6a, 0x1c, 0x3c, 0x2f, 0x4e, 0x0a, 0x9a, 0x51, 0x6d, 0x2f, 0x0c, 0x1e, 0x4b, 0x77}
+	clientBytes = []byte{0x5d, 0x1f, 0x0c, 0x2e, 0x7a, 0x3b, 0x4c, 0x4d, 0x9e, 0x8f, 0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0xa1}
+)
 
 // fakeEngine answers with the functions a test sets and records requests.
 type fakeEngine struct {
@@ -134,19 +138,21 @@ func admitted(seq uint64, dup bool) func(*orvexv1.SubmitCommandRequest) (*orvexv
 const cashOutBody = `{"clientCommandId":"` + clientText + `","cashOut":{}}`
 
 func TestSubmitAdmitted(t *testing.T) {
-	engine := &fakeEngine{submit: admitted(5, true)}
-	ts, _ := newGateway(t, engine)
-	got := do(t, ts, "POST", "/v1/rounds/"+roundText+"/commands", aliceToken,
-		`{"clientCommandId":"`+clientText+`","placeBet":{"betCredits":"100"}}`)
-	want := `{"clientCommandId":"` + clientText + `","roundId":"` + roundText +
-		`","sequence":"5","effectiveTimeUnixMicro":"1763800006210000","duplicate":true,"status":"pending"}`
-	if got.status != http.StatusAccepted || got.body != want {
-		t.Fatalf("POST = %d %s, want 202 %s", got.status, got.body, want)
-	}
-	req := engine.submits[0]
-	if req.GetPrincipal().GetPlayerId() != "alice" || req.GetPlaceBet().GetBetCredits() != 100 ||
-		string(req.GetRoundId()) != string(roundBytes) || len(req.GetClientCommandId()) != 16 {
-		t.Errorf("engine got %v, want alice's 100-credit bet", req)
+	for _, dup := range []bool{false, true} {
+		engine := &fakeEngine{submit: admitted(5, dup)}
+		ts, _ := newGateway(t, engine)
+		got := do(t, ts, "POST", "/v1/rounds/"+roundText+"/commands", aliceToken,
+			`{"clientCommandId":"`+clientText+`","placeBet":{"betCredits":"100"}}`)
+		want := `{"clientCommandId":"` + clientText + `","roundId":"` + roundText +
+			`","sequence":"5","effectiveTimeUnixMicro":"1763800006210000","duplicate":` + strconv.FormatBool(dup) + `,"status":"admitted"}`
+		if got.status != http.StatusAccepted || got.body != want {
+			t.Fatalf("POST = %d %s, want 202 %s", got.status, got.body, want)
+		}
+		req := engine.submits[0]
+		if req.GetPrincipal().GetPlayerId() != "alice" || req.GetPlaceBet().GetBetCredits() != 100 ||
+			string(req.GetRoundId()) != string(roundBytes) || string(req.GetClientCommandId()) != string(clientBytes) {
+			t.Errorf("engine got %v, want alice's 100-credit bet", req)
+		}
 	}
 }
 
@@ -173,22 +179,41 @@ func TestSubmitRefusesMalformedBodies(t *testing.T) {
 	ts, _ := newGateway(t, engine)
 	id := `"clientCommandId":"` + clientText + `"`
 	for name, body := range map[string]string{
-		"names a player":     `{` + id + `,"player":"bob","cashOut":{}}`,
-		"names an authority": `{` + id + `,"cashOut":{},"authority":"system"}`,
-		"lifecycle command":  `{` + id + `,"startRound":{}}`,
-		"both commands":      `{` + id + `,"cashOut":{},"placeBet":{"betCredits":"1"}}`,
-		"no command":         `{` + id + `}`,
-		"numeric bet":        `{` + id + `,"placeBet":{"betCredits":100}}`,
-		"zero bet":           `{` + id + `,"placeBet":{"betCredits":"0"}}`,
-		"negative bet":       `{` + id + `,"placeBet":{"betCredits":"-1"}}`,
-		"leading zero bet":   `{` + id + `,"placeBet":{"betCredits":"0100"}}`,
-		"bet above int64":    `{` + id + `,"placeBet":{"betCredits":"9223372036854775808"}}`,
-		"uppercase uuid":     `{"clientCommandId":"` + strings.ToUpper(clientText) + `","cashOut":{}}`,
-		"nil uuid":           `{"clientCommandId":"00000000-0000-0000-0000-000000000000","cashOut":{}}`,
-		"trailing data":      cashOutBody + `{}`,
-		"trailing brace":     cashOutBody + `}`,
-		"not json":           `cashOut`,
-		"oversized":          `{` + id + `,"cashOut":{}` + strings.Repeat(" ", 5000) + `}`,
+		"names a player":         `{` + id + `,"player":"bob","cashOut":{}}`,
+		"names an authority":     `{` + id + `,"cashOut":{},"authority":"system"}`,
+		"lifecycle command":      `{` + id + `,"startRound":{}}`,
+		"both commands":          `{` + id + `,"cashOut":{},"placeBet":{"betCredits":"1"}}`,
+		"no command":             `{` + id + `}`,
+		"numeric bet":            `{` + id + `,"placeBet":{"betCredits":100}}`,
+		"zero bet":               `{` + id + `,"placeBet":{"betCredits":"0"}}`,
+		"negative bet":           `{` + id + `,"placeBet":{"betCredits":"-1"}}`,
+		"leading zero bet":       `{` + id + `,"placeBet":{"betCredits":"0100"}}`,
+		"bet above int64":        `{` + id + `,"placeBet":{"betCredits":"9223372036854775808"}}`,
+		"uppercase uuid":         `{"clientCommandId":"` + strings.ToUpper(clientText) + `","cashOut":{}}`,
+		"nil uuid":               `{"clientCommandId":"00000000-0000-0000-0000-000000000000","cashOut":{}}`,
+		"trailing data":          cashOutBody + `{}`,
+		"trailing brace":         cashOutBody + `}`,
+		"not json":               `cashOut`,
+		"array":                  `[` + cashOutBody + `]`,
+		"repeated id":            `{` + id + `,` + id + `,"cashOut":{}}`,
+		"repeated id differs":    `{"clientCommandId":"00000000-0000-0000-0000-000000000000",` + id + `,"cashOut":{}}`,
+		"repeated cash-out":      `{` + id + `,"cashOut":{},"cashOut":{}}`,
+		"repeated bet":           `{` + id + `,"placeBet":{"betCredits":"1"},"placeBet":{"betCredits":"2"}}`,
+		"repeated credits":       `{` + id + `,"placeBet":{"betCredits":"1","betCredits":"2"}}`,
+		"mixed-case id key":      `{"ClientCommandId":"` + clientText + `","cashOut":{}}`,
+		"lowercase id key":       `{"clientcommandid":"` + clientText + `","cashOut":{}}`,
+		"mixed-case command":     `{` + id + `,"CashOut":{}}`,
+		"mixed-case credits":     `{` + id + `,"placeBet":{"BetCredits":"1"}}`,
+		"unknown cash-out field": `{` + id + `,"cashOut":{"player":"bob"}}`,
+		"unknown bet field":      `{` + id + `,"placeBet":{"betCredits":"1","player":"bob"}}`,
+		"bet without credits":    `{` + id + `,"placeBet":{}}`,
+		"null cash-out":          `{` + id + `,"placeBet":{"betCredits":"1"},"cashOut":null}`,
+		"null bet":               `{` + id + `,"placeBet":null,"cashOut":{}}`,
+		"cash-out not object":    `{` + id + `,"cashOut":true}`,
+		"cash-out array":         `{` + id + `,"cashOut":[]}`,
+		"numeric id":             `{"clientCommandId":7,"cashOut":{}}`,
+		"null id":                `{"clientCommandId":null,"cashOut":{}}`,
+		"null credits":           `{` + id + `,"placeBet":{"betCredits":null}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := do(t, ts, "POST", "/v1/rounds/"+roundText+"/commands", aliceToken, body)
@@ -202,6 +227,63 @@ func TestSubmitRefusesMalformedBodies(t *testing.T) {
 	}
 	if len(engine.submits) != 0 {
 		t.Errorf("%d malformed submits reached the engine", len(engine.submits))
+	}
+}
+
+func TestSubmitRefusesOversizedBodies(t *testing.T) {
+	engine := &fakeEngine{submit: admitted(1, false)}
+	ts, _ := newGateway(t, engine)
+	path := "/v1/rounds/" + roundText + "/commands"
+	padded := `{"clientCommandId":"` + clientText + `","cashOut":{}` + strings.Repeat(" ", maxBodyBytes) + `}`
+	if got := do(t, ts, "POST", path, aliceToken, padded); got.status != http.StatusRequestEntityTooLarge || got.body != `{"code":"request_too_large"}` {
+		t.Errorf("oversized POST = %d %s, want 413 request_too_large", got.status, got.body)
+	}
+	if got := do(t, ts, "POST", path, "", padded); got.status != http.StatusUnauthorized {
+		t.Errorf("oversized POST without a token = %d %s, want 401", got.status, got.body)
+	}
+	if len(engine.submits) != 0 {
+		t.Errorf("%d oversized submits reached the engine", len(engine.submits))
+	}
+	fits := `{"clientCommandId":"` + clientText + `","cashOut":{}}`
+	fits += strings.Repeat(" ", maxBodyBytes-len(fits))
+	if got := do(t, ts, "POST", path, aliceToken, fits); got.status != http.StatusAccepted {
+		t.Errorf("POST of exactly %d bytes = %d %s, want 202", maxBodyBytes, got.status, got.body)
+	}
+}
+
+func TestRoutes(t *testing.T) {
+	engine := &fakeEngine{current: func() (*orvexv1.GetCurrentRoundResponse, error) {
+		return &orvexv1.GetCurrentRoundResponse{RoundId: roundBytes, Game: "crash", RulesVersion: 1}, nil
+	}}
+	ts, _ := newGateway(t, engine)
+	for _, tc := range []struct{ path, allow string }{
+		{"/v1/rounds/current", "GET, HEAD"},
+		{"/v1/rounds/" + roundText + "/commands", "POST"},
+		{"/v1/commands/" + clientText, "GET, HEAD"},
+		{"/v1/rounds/" + roundText + "/stream", "GET, HEAD"},
+	} {
+		for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+			if strings.Contains(tc.allow, method) {
+				continue
+			}
+			got := do(t, ts, method, tc.path, aliceToken, cashOutBody)
+			if got.status != http.StatusMethodNotAllowed || got.header.Get("Allow") != tc.allow || got.body != `{"code":"method_not_allowed"}` {
+				t.Errorf("%s %s = %d Allow %q %s, want 405 Allow %q method_not_allowed", method, tc.path, got.status, got.header.Get("Allow"), got.body, tc.allow)
+			}
+		}
+	}
+	for _, path := range []string{"/", "/v1", "/v1/rounds", "/v1/rounds/current/", "/v1/rounds/" + roundText, "/v1/rounds/" + roundText + "/commands/x", "/v1/commands", "/v2/rounds/current"} {
+		for _, method := range []string{"GET", "POST"} {
+			if got := do(t, ts, method, path, aliceToken, cashOutBody); got.status != http.StatusNotFound || got.body != `{"code":"not_found"}` {
+				t.Errorf("%s %s = %d %s, want 404 not_found", method, path, got.status, got.body)
+			}
+		}
+	}
+	if got := do(t, ts, "HEAD", "/v1/rounds/current", "", ""); got.status != http.StatusOK {
+		t.Errorf("HEAD /v1/rounds/current = %d, want 200", got.status)
+	}
+	if len(engine.submits)+len(engine.lookups)+len(engine.subs) != 0 {
+		t.Errorf("a refused route reached the engine: %d submits, %d lookups, %d subscriptions", len(engine.submits), len(engine.lookups), len(engine.subs))
 	}
 }
 
