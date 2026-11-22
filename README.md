@@ -2,13 +2,13 @@
 
 Orvex is a deterministic, audit-first multiplayer Crash game platform. It uses simulated credits only.
 
-Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-module-and-repository-conventions)), the game contract ([LBT-6](https://linear.app/lbtworks/issue/LBT-6/implement-generic-game-contract-and-versioned-adapter)), the frozen Crash v1 math ([LBT-7](https://linear.app/lbtworks/issue/LBT-7/freeze-crash-mathematical-specification-and-golden-vectors)), the Crash v1 round rules ([LBT-8](https://linear.app/lbtworks/issue/LBT-8/implement-crash-decideevolve-and-lifecycle-invariants)), the canonical codec, hash chain and audit CLI ([LBT-9](https://linear.app/lbtworks/issue/LBT-9/build-canonical-event-codec-and-audit-replay-cli)), the PostgreSQL schema and migration tooling ([LBT-10](https://linear.app/lbtworks/issue/LBT-10/implement-postgresql-schema-and-migration-tooling)), the durable per-round admission sequencer ([LBT-11](https://linear.app/lbtworks/issue/LBT-11/implement-durable-per-round-postgresql-admission-sequencer)), the atomic execution commit with the simulated-credit ledger, outbox and round creation ([LBT-12](https://linear.app/lbtworks/issue/LBT-12/implement-atomic-execution-commit-ledger-and-outbox)), the audit history export CLI ([LBT-19](https://linear.app/lbtworks/issue/LBT-19/crashctl-audit-export-round-id)) and the audit ledger stage with history format v2 ([LBT-18](https://linear.app/lbtworks/issue/LBT-18/audit-ledger-stage-history-format-v2)). The engine binary schedules rounds itself: it creates, starts, closes and settles them, and adopts unsettled rounds after a restart (`internal/runtime/lifecycle`). No outbox relay exists yet.
+Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-module-and-repository-conventions)), the game contract ([LBT-6](https://linear.app/lbtworks/issue/LBT-6/implement-generic-game-contract-and-versioned-adapter)), the frozen Crash v1 math ([LBT-7](https://linear.app/lbtworks/issue/LBT-7/freeze-crash-mathematical-specification-and-golden-vectors)), the Crash v1 round rules ([LBT-8](https://linear.app/lbtworks/issue/LBT-8/implement-crash-decideevolve-and-lifecycle-invariants)), the canonical codec, hash chain and audit CLI ([LBT-9](https://linear.app/lbtworks/issue/LBT-9/build-canonical-event-codec-and-audit-replay-cli)), the PostgreSQL schema and migration tooling ([LBT-10](https://linear.app/lbtworks/issue/LBT-10/implement-postgresql-schema-and-migration-tooling)), the durable per-round admission sequencer ([LBT-11](https://linear.app/lbtworks/issue/LBT-11/implement-durable-per-round-postgresql-admission-sequencer)), the atomic execution commit with the simulated-credit ledger, outbox and round creation ([LBT-12](https://linear.app/lbtworks/issue/LBT-12/implement-atomic-execution-commit-ledger-and-outbox)), the audit history export CLI ([LBT-19](https://linear.app/lbtworks/issue/LBT-19/crashctl-audit-export-round-id)) and the audit ledger stage with history format v2 ([LBT-18](https://linear.app/lbtworks/issue/LBT-18/audit-ledger-stage-history-format-v2)). The first playable milestone adds a single-engine round loop, a gRPC boundary, an HTTP gateway, and operator-issued demo credits.
 
 ## Layout
 
-- `cmd/gateway`: client-facing gateway service (scaffold)
-- `cmd/engine`: game execution service: the round lifecycle scheduler and the engine API listener, configured by `ORVEX_*` variables (`engine -h`)
-- `cmd/crashctl`: replay/audit and operations CLI: `crashctl audit verify|replay|chain` (LBT-9), `crashctl audit export` (LBT-19), `crashctl migrate up|down|status` (LBT-10)
+- `cmd/gateway`: client-facing HTTP gateway for commands, results and the public round stream
+- `cmd/engine`: game execution service and round scheduler
+- `cmd/crashctl` runs audit, migration and demo credit grant commands.
 - `internal/game/crash/v1`: Crash v1 rules: frozen arithmetic, fairness derivation and golden vectors (ADR-004, LBT-7); round lifecycle Decide/Evolve, command authority and public projection (ADR-003, LBT-8); canonical codec (ADR-001, LBT-9)
 - `internal/buildinfo`: build identifier stamped at link time
 - `internal/canonjson`: Orvex Canonical JSON (RFC 8785 subset): encoder and strict decoder (LBT-9)
@@ -18,8 +18,10 @@ Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-mo
 - `internal/persistence/postgres`: PostgreSQL migration runner, SQLSTATE constants and transaction options (ADR-005, LBT-10); `pgtest`: Testcontainers harness, catalog fingerprint and audit-history loader for integration tests; `pgtest/roundtest`: crash/v1 round and golden-history seeding through the executor for integration tests (LBT-24)
 - `internal/persistence/eventstore`: audit history export from the database (v1 LBT-10, v2 with ledger rows LBT-18)
 - `internal/runtime/admission`: durable per-round admission sequencer (Transaction A): dedupe, sequence and effective time, admission window and closure barrier, credit holds, crash/v1 admission policy (ADR-002, ADR-005, LBT-11)
+- `internal/runtime/lifecycle`: round creation, scheduling and restart recovery
+- `internal/runtime/relay`: transactional outbox notifications for live streams
+- `internal/transport`: [player HTTP/SSE and internal gRPC protocol](docs/architecture/gateway-protocol.md)
 - `internal/runtime/execution`: per-round command executor (Transaction B): atomic commit of the chain record, events, ledger postings, hold releases, outbox message and snapshot under a compare-and-set and fencing token; cold load by chain replay; round creation; crash/v1 execution policy (ADR-005, LBT-12)
-- `internal/runtime/lifecycle`: the engine's crash/v1 round scheduler: advisory-lock leadership, discovery and adoption of unsettled rounds, lease claims, round creation with one plan per round, deterministic lifecycle command IDs
 - `internal/ledger`: pure simulated-credit posting rules and deterministic ledger IDs (ADR-004, LBT-12)
 - `internal/game`: typed game contract, canonical codec contract, deterministic input envelope, versioned adapter and rules registry (ADR-003)
 - `migrations`: embedded PostgreSQL schema migrations (immutable once merged)
@@ -33,15 +35,18 @@ Prerequisites: Go 1.26, golangci-lint v2.14.0, Python 3.11 or newer (standard li
 
 - `make build`: build all binaries into `bin/` (or `make build-gateway`, `make build-engine`, `make build-crashctl`)
 - `make test`: run tests with the race detector
+- `make test-acceptance`: start PostgreSQL and the real services, play a two-player round, recover a lost cash-out receipt, and verify the settled v2 history. Requires Docker.
 - `make test-integration`: run the unit tests plus the PostgreSQL integration tests (Testcontainers, pinned PostgreSQL 18 image); fails without a Docker daemon. On hosts without cgo: `make test-integration GOTESTFLAGS=`
 - `make lint`: run golangci-lint
+- `make proto-check` checks the protobuf schema and verifies that regeneration reproduces the committed Go files.
 - `make golden-check`: regenerate the Crash v1 golden vectors and the audit golden histories with their independent Python oracles and compare them with the committed files
 - `make fuzz`: fuzz every Go fuzz target for `FUZZTIME` each (default `30s`), one target per `go test` run; `make fuzz-list` lists them, `make fuzz-one FUZZ_PKG=internal/canonjson FUZZ_TARGET=FuzzUnmarshal` runs one and `make fuzz-guard-check` checks that `fuzz-one` refuses unknown names; on Go 1.26.x a run can fail when `FUZZTIME` ends with only `context deadline exceeded` and no failing input (golang/go#75804, fixed in Go 1.27.0), so the nightly fuzz jobs use Go 1.27.x; locally, prefix the command with `GOTOOLCHAIN=go1.27.2`
 - `make test-repeat`: the specs' repeated PostgreSQL runs (`make test-repeat-admission`, `make test-repeat-execution`, `make test-repeat-export`); needs a Docker daemon
 - CI: `.github/workflows/ci.yml` on every push and pull request; `.github/workflows/nightly.yml` nightly and on demand (every fuzz target, on Go 1.27.x, and the repeat runs)
 - `make clean`: remove build output
 - `crashctl migrate up [-to N]`, `crashctl migrate down -to N`, `crashctl migrate status`: apply, revert or list schema migrations on the database named by `ORVEX_DATABASE_URL`
-- `crashctl audit export [-unsettled] ROUND_ID FILE`: write a settled round's audit history file from the database named by `ORVEX_DATABASE_URL`; for a round whose secret config is not yet revealed, `-unsettled` needs the privileged path: `SELECT` on `orvex.round_secrets` and the keyring named by `ORVEX_SECRET_KEYRING_FILE`
+- `crashctl audit export [-format NAME] [-unsettled] ROUND_ID FILE` exports v1 by default. Select `orvex/audit-history/v2` to include the ledger. An unsettled export requires access to `orvex.round_secrets` and the keyring named by `ORVEX_SECRET_KEYRING_FILE`.
+- `crashctl ledger grant GRANT_KEY PLAYER_ID CREDITS` adds up to 10¹² demo credits per grant. Retrying the same grant succeeds. Reusing a key with a different player or amount exits with code 7.
 
 Local PostgreSQL:
 
@@ -50,6 +55,92 @@ Local PostgreSQL:
 - `docker compose -f deployments/docker/compose.yaml down -v`
 
 See [AGENTS.md](AGENTS.md) for contributor and agent guidance and [docs/adr/](docs/adr/) for the architectural decisions.
+
+## Play a local round
+
+Start the local PostgreSQL instance described above, set `ORVEX_DATABASE_URL`, then run:
+
+```sh
+make build
+./bin/crashctl migrate up
+./bin/crashctl ledger grant demo-alice-1 alice 1000
+./bin/crashctl ledger grant demo-bob-1 bob 1000
+```
+
+Keep the keyring with the demo database across restarts. The engine needs the original key to
+resume an unsettled round. If the key is lost, restore it from backup or start a fresh demo
+database. The following commands reuse the credential files on later runs.
+
+```sh
+demo_dir="${XDG_STATE_HOME:-$HOME/.local/state}/orvex-demo"
+mkdir -p -m 700 "$demo_dir"
+export ORVEX_SECRET_KEYRING_FILE="$demo_dir/keyring"
+export ORVEX_GATEWAY_TOKEN_FILE="$demo_dir/gateway-token"
+export ORVEX_PLAYERS_FILE="$demo_dir/players.json"
+(
+  umask 077
+  python3 - <<'PY'
+import base64
+import json
+import os
+import secrets
+from pathlib import Path
+
+key = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+players = {secrets.token_hex(32): name for name in ("alice", "bob")}
+files = {
+    "ORVEX_SECRET_KEYRING_FILE": f"active local\nkey local {key}\n",
+    "ORVEX_GATEWAY_TOKEN_FILE": secrets.token_hex(32) + "\n",
+    "ORVEX_PLAYERS_FILE": json.dumps(players),
+}
+for variable, contents in files.items():
+    try:
+        with Path(os.environ[variable]).open("x", encoding="ascii") as file:
+            file.write(contents)
+    except FileExistsError:
+        pass
+PY
+)
+export ORVEX_ENGINE_ADDR=127.0.0.1:7070 ORVEX_GATEWAY_ADDR=127.0.0.1:8080
+export ORVEX_BETTING_WINDOW=30s
+./bin/engine &
+engine_pid=$!
+env -u ORVEX_DATABASE_URL -u ORVEX_SECRET_KEYRING_FILE ./bin/gateway &
+gateway_pid=$!
+```
+
+After both services report ready, the following Bash commands place Alice's bet and follow the
+round. They use `curl`, `jq` and Python. Bob can use the same commands with his own token.
+
+```sh
+token=$(jq -r 'to_entries[] | select(.value == "alice") | .key' "$ORVEX_PLAYERS_FILE")
+api="http://$ORVEX_GATEWAY_ADDR/v1"
+auth="Authorization: Bearer $token"
+round=$(curl -fsS --retry 8 --retry-delay 1 --retry-all-errors "$api/rounds/current" | jq -er .roundId)
+bet_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+curl -sS -H "$auth" -H 'Content-Type: application/json' \
+  -d "{\"clientCommandId\":\"$bet_id\",\"placeBet\":{\"betCredits\":\"100\"}}" "$api/rounds/$round/commands"
+curl -NsS "$api/rounds/$round/stream" &
+```
+
+The stream prints `BetPlaced` when the engine accepts the bet. The current round can already
+be running. If the bet lookup returns `wrong_phase` or submission returns `round_closed` or
+`round_sealed`, wait for the next round ID and place a new bet.
+
+When the stream prints `RoundStarted`, submit a cash-out. Cash-outs must reach admission before
+the crash deadline. Keep the request body so a lost response can be retried with the same ID.
+
+```sh
+cash_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+cash_body=$(jq -nc --arg id "$cash_id" '{clientCommandId:$id,cashOut:{}}')
+curl -sS -H "$auth" -H 'Content-Type: application/json' \
+  -d "$cash_body" "$api/rounds/$round/commands"
+curl -sS -H "$auth" "$api/commands/$cash_id"
+```
+
+The lookup returns `pending` until execution records the outcome. After settlement,
+run `make audit ROUND_ID="$round" AUDIT_FORMAT=orvex/audit-history/v2` to include the ledger
+in verification. Stop the local services with `kill "$gateway_pid" "$engine_pid"`.
 
 ## Audit
 
@@ -81,7 +172,7 @@ still has its host permissions. Each project resolves its own database at
 `postgres:5432`. PostgreSQL has no published host port. The development
 container runs as the host user and has no host Docker socket. Testcontainers
 integration tests run separately in CI or on a Docker-enabled host.
-The gateway has no serving entry point yet.
+The preview starts the database and runs migrations. To play, start the engine and gateway as described in [Play a local round](#play-a-local-round).
 
 Run `deployments/docker/tests/worktree-isolation.sh` from the repository to check
 concurrent previews. It uses a temporary clone, applies different migrations at

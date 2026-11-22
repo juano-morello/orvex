@@ -1,13 +1,13 @@
 # Gateway protocol
 
-The gateway (`cmd/gateway`) is the only process players talk to. It authenticates a player by bearer token, submits that player's commands to the engine over gRPC (`proto/orvex/v1/engine.proto`), and relays a round's public records as Server-Sent Events. The engine is the only writer (ADR-005). The code lives in `internal/transport/httpapi` (HTTP), `internal/transport/engineapi` (gRPC server and client), `internal/runtime/sessions` (credentials) and `internal/runtime/relay` (outbox relay and wakeups).
+Players reach the engine through the HTTP gateway. The gateway authenticates bearer tokens, submits commands to the engine over gRPC, and streams public round events over Server-Sent Events. The engine writes round data to PostgreSQL. Operators use `crashctl` to issue demo credit grants. The protocol is defined in `proto/orvex/v1/engine.proto`.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `ORVEX_GATEWAY_ADDR` | `127.0.0.1:8080` | HTTP listen address. |
-| `ORVEX_ENGINE_ADDR` | `127.0.0.1:7001` | Engine gRPC address. The host must be `localhost` or a loopback IP, because the connection is plaintext. |
+| `ORVEX_ENGINE_ADDR` | Gateway defaults to `127.0.0.1:7001`. The engine requires an explicit value. | Set both services to the same loopback address. The gRPC connection carries a bearer token over plaintext. |
 | `ORVEX_GATEWAY_TOKEN_FILE` | required | The service token shared with the engine: 32 to 512 printable ASCII bytes, no spaces. |
 | `ORVEX_PLAYERS_FILE` | required | A JSON object mapping each bearer token (16 to 512 bytes) to a player ID (`^[a-z0-9_-]{1,64}$`). |
 
@@ -17,7 +17,7 @@ Both files load like the round-secret keyring: a regular file with `perm & 0o027
 
 A player's identity comes only from `Authorization: Bearer <token>`. No request body names a player or an authority: the gateway refuses unknown JSON keys, so a body with `player` is a 400. The gateway sends the player to the engine as the call's principal, and the engine trusts it only because the call carries the service token (`authorization: Bearer <service token>` metadata, compared by SHA-256 digest in constant time). The engine builds every command itself with player authority, so the wire cannot express StartRound, CloseRound or SettleRound.
 
-The engine derives the admission command ID from the player and the client's command ID: the first 16 bytes of SHA-256(`"orvex/command-id/v1"` 0x00 player 0x00 client ID), as a version 8 UUID. Two players who pick the same `clientCommandId` get two commands, and a player can look up only their own. The derived ID never leaves the engine; `TestCommandIDGolden` freezes it.
+The engine takes the first 16 bytes of SHA-256(`"orvex/command-id/v1"` 0x00 player 0x00 client ID) and sets the RFC 9562 variant and version 8 bits. Two players who pick the same `clientCommandId` get separate admissions. Each can look up their own result. The gateway exposes the client ID. The audit record contains the derived ID, whose encoding is pinned by `TestCommandIDGolden`.
 
 ## Endpoints
 
@@ -25,7 +25,7 @@ JSON is camelCase. Every 64-bit integer is a decimal string. UUIDs are canonical
 
 | Request | Auth | Success |
 |---|---|---|
-| `GET /v1/rounds/current[?game=crash]` | none | 200 `{"roundId","game":"crash","rulesVersion":"1"}`, the newest crash/v1 round |
+| `GET /v1/rounds/current[?game=crash]` | none | 200 `{"roundId","game":"crash","rulesVersion":"1"}`, the newest crash/v1 round in any phase |
 | `POST /v1/rounds/{roundId}/commands` | bearer | 202 admission receipt |
 | `GET /v1/commands/{clientCommandId}` | bearer | 200 command status |
 | `GET /v1/rounds/{roundId}/stream[?after=N]` | none | 200 `text/event-stream` |
