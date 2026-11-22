@@ -466,7 +466,8 @@ func TestStreamRefusalsBeforeAnyRecord(t *testing.T) {
 	}{
 		"unknown round":   {codes.NotFound, 404, `{"code":"round_not_found"}`},
 		"cursor too high": {codes.FailedPrecondition, 400, `{"code":"invalid_cursor"}`},
-		"engine down":     {codes.Unavailable, 503, `{"code":"unavailable"}`},
+		"bad request":     {codes.InvalidArgument, 400, `{"code":"invalid_request"}`},
+		"engine fault":    {codes.Internal, 500, `{"code":"internal"}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ts, _ := newGateway(t, &fakeEngine{subscribe: func(*orvexv1.SubscribeRoundRequest, grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse]) error {

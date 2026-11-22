@@ -67,7 +67,19 @@ Record 0 carries `"genesis":{"commitment","minBetCredits","maxBetCredits","maxBe
 
 After the round's last record the gateway sends `event: end` and closes the response. A client must not reconnect to that round. An idle stream carries `: ping` comments every 15 seconds.
 
-The cursor is the last sequence the client holds: `Last-Event-ID`, or `?after=N` without it. The stream resumes at N+1, and without a cursor it starts at genesis. Within one connection, sequences are strictly increasing and gapless. Across reconnects delivery is at least once, so drop any frame whose sequence is at or below your cursor. If a connection ends without `event: end`, reconnect with `Last-Event-ID`.
+The cursor is the last sequence the client holds: `Last-Event-ID`, or `?after=N` without it. `Last-Event-ID` wins when a request has both. The stream resumes at N+1, and without a cursor it starts at genesis. Within one connection, sequences are strictly increasing and gapless. Across reconnects delivery is at least once, so drop any frame whose sequence is at or below your cursor. If a connection ends without `event: end`, reconnect with `Last-Event-ID`. A native `EventSource` does this on its own.
+
+`EventSource` stops for good on any status but 200, and reconnects after the `retry` time whenever a 200 response ends. So the stream answers as follows, and never 503.
+
+| Status | When |
+|---|---|
+| 200 `text/event-stream` | The engine accepted the subscription. The body is `retry: 1000`, the records after the cursor, and `end` once the round completes. A live round whose head is the cursor is accepted and waits for the next record. |
+| 200 `text/event-stream` with only `retry: 1000` | The engine was unavailable, or the gateway was stopping, before the stream started. The response ends without `end`. Reconnect with the same cursor. |
+| 400 `invalid_request`, `invalid_cursor` | A malformed round ID or cursor, or a cursor above the round's execution head. |
+| 404 `round_not_found` | No crash/v1 round has this ID. |
+| 500 `internal` | Engine fault or gateway misconfiguration. |
+
+Changed before release: an engine outage before the stream started used to get 503 `unavailable`.
 
 ## Engine side
 

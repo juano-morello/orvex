@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -23,11 +24,10 @@ import (
 //	data: {"sequence":"5","effectiveTimeUnixMicro":"...","events":[...]}
 //
 // The genesis frame carries "genesis" instead of "events". After the
-// round's last record comes "event: end" and the response ends; a client
-// must not reconnect to that round. The cursor is the last sequence the
-// client holds, from Last-Event-ID or, without one, ?after=N. Across
-// reconnects delivery is at least once: drop frames with sequence <=
-// cursor.
+// round's last record comes "event: end" and the response ends. The
+// cursor is the last sequence the client holds, from Last-Event-ID or,
+// without one, ?after=N. Across reconnects delivery is at least once: drop
+// frames with sequence <= cursor.
 func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	round, ok := parseUUID(r.PathValue("roundId"))
 	if !ok {
@@ -52,22 +52,11 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	defer context.AfterFunc(h.streams, cancel)()
 	sub, err := h.engine.SubscribeRound(ctx, req)
-	if err != nil {
-		h.readFailed(w, "subscribe", err)
-		return
+	if err == nil {
+		err = accepted(sub)
 	}
-	// The engine sends headers once it accepts the subscription; without
-	// them the stream failed and Recv returns the status.
-	if md, err := sub.Header(); err != nil || md == nil {
-		_, err := sub.Recv()
-		switch status.Code(err) {
-		case codes.NotFound:
-			writeError(w, http.StatusNotFound, "round_not_found")
-		case codes.FailedPrecondition:
-			writeError(w, http.StatusBadRequest, "invalid_cursor")
-		default:
-			h.readFailed(w, "subscribe", err)
-		}
+	if err != nil {
+		h.notStreamed(w, r, err)
 		return
 	}
 
@@ -90,19 +79,8 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	rc := http.NewResponseController(w)
-	write := func(s string) bool {
-		_ = rc.SetWriteDeadline(time.Now().Add(writeTimeout))
-		if _, err := io.WriteString(w, s); err != nil {
-			return false
-		}
-		return rc.Flush() == nil
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	if !write("retry: 1000\n\n") {
+	write := eventStream(w)
+	if !write(retryField) {
 		return
 	}
 	ping := time.NewTicker(h.pingInterval)
@@ -135,6 +113,56 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+}
+
+// retryField sets EventSource's reconnection time.
+const retryField = "retry: 1000\n\n"
+
+// accepted waits for the engine to accept the subscription, which it
+// signals with headers before any record, and otherwise returns the
+// stream's status.
+func accepted(sub grpc.ServerStreamingClient[orvexv1.SubscribeRoundResponse]) error {
+	if md, err := sub.Header(); err == nil && md != nil {
+		return nil
+	}
+	_, err := sub.Recv()
+	return err
+}
+
+// notStreamed answers a subscription the engine did not accept.
+// EventSource stops for good on any status but 200, and reconnects with
+// the same Last-Event-ID when a 200 stream ends. So a failure that may
+// pass gets a stream that carries only the reconnection time and ends.
+func (h *Handler) notStreamed(w http.ResponseWriter, r *http.Request, err error) {
+	switch status.Code(err) {
+	case codes.NotFound:
+		writeError(w, http.StatusNotFound, "round_not_found")
+	case codes.FailedPrecondition:
+		writeError(w, http.StatusBadRequest, "invalid_cursor")
+	case codes.InvalidArgument, codes.Internal, codes.Unauthenticated, codes.PermissionDenied, codes.Unimplemented:
+		h.readFailed(w, "subscribe", err)
+	default:
+		if r.Context().Err() == nil {
+			eventStream(w)(retryField)
+		}
+	}
+}
+
+// eventStream starts a 200 event stream and returns a function that writes
+// and flushes s, reporting whether it could.
+func eventStream(w http.ResponseWriter) func(s string) bool {
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	return func(s string) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(writeTimeout))
+		if _, err := io.WriteString(w, s); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
 	}
 }
 

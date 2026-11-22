@@ -2,9 +2,13 @@ package httpapi
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,11 +16,70 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
+	"github.com/juano-morello/orvex/internal/runtime/sessions"
 	orvexv1 "github.com/juano-morello/orvex/proto/orvex/v1"
 )
 
 const streamPath = "/v1/rounds/" + roundText + "/stream"
+
+// retryOnly is the body, less its last newline, of a stream the engine did
+// not accept for a transient reason.
+const retryOnly = "retry: 1000\n"
+
+func checkRetryOnly(t *testing.T, got response) {
+	t.Helper()
+	if got.status != 200 || got.header.Get("Content-Type") != "text/event-stream" ||
+		got.header.Get("Cache-Control") != "no-store" || got.body != retryOnly {
+		t.Errorf("stream = %d %v %q, want 200 text/event-stream %q", got.status, got.header, got.body, retryOnly)
+	}
+}
+
+func TestStreamRetriesWhileTheEngineIsUnavailable(t *testing.T) {
+	for _, code := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Aborted, codes.Unknown} {
+		t.Run(code.String(), func(t *testing.T) {
+			ts, _ := newGateway(t, &fakeEngine{subscribe: func(*orvexv1.SubscribeRoundRequest, grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse]) error {
+				return status.Error(code, "no")
+			}})
+			checkRetryOnly(t, do(t, ts, "GET", streamPath, "", "", "Last-Event-ID", "7"))
+		})
+	}
+}
+
+func TestStreamRetriesWhenTheEngineIsUnreachable(t *testing.T) {
+	conn, err := grpc.NewClient("passthrough:///unreachable",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return nil, errors.New("connection refused") }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	players, err := sessions.ParsePlayers([]byte(`{"` + aliceToken + `": "alice"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(orvexv1.NewEngineServiceClient(conn), players, slog.New(slog.DiscardHandler)))
+	t.Cleanup(ts.Close)
+	checkRetryOnly(t, do(t, ts, "GET", streamPath, "", ""))
+}
+
+func TestStreamRetriesWhenClosedBeforeTheEngineAnswers(t *testing.T) {
+	arrived := make(chan struct{}, 1)
+	ts, h := newGateway(t, &fakeEngine{subscribe: func(_ *orvexv1.SubscribeRoundRequest, s grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse]) error {
+		arrived <- struct{}{}
+		<-s.Context().Done()
+		return s.Context().Err()
+	}})
+	got := make(chan response, 1)
+	go func() { got <- do(t, ts, "GET", streamPath, "", "") }()
+	<-arrived
+	h.CloseStreams()
+	checkRetryOnly(t, <-got)
+	checkRetryOnly(t, do(t, ts, "GET", streamPath, "", ""))
+}
 
 // TestStreamStalledReaderIsolated runs a reader that stops reading beside
 // a healthy one on the same engine connection. The healthy reader gets
