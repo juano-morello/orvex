@@ -7,8 +7,9 @@
 // itself with player authority and the principal as the player, so no
 // caller can submit a lifecycle command or act for another player, and it
 // derives the admission command ID from the principal and the client's
-// command ID. Subscribers read the public projection of chain records from
-// the database; the relay's wakeups only shorten the wait. No path here
+// command ID. Subscribers of a round share one reader of the public
+// projection of its chain records from the database (feed.go); the relay's
+// wakeups only shorten the wait. No path here
 // reads a round's secret config or the keyring (LBT-21).
 package engineapi
 
@@ -76,13 +77,14 @@ func Serve(ctx context.Context, listener net.Listener, pool *pgxpool.Pool, seque
 		grpc.ChainStreamInterceptor(auth.stream),
 		grpc.MaxRecvMsgSize(maxRecvBytes),
 	)
-	orvexv1.RegisterEngineServiceServer(srv, &server{
+	engine := &server{
 		admit:   sequencer,
 		db:      pool,
 		wakeups: wakeups,
 		done:    ctx.Done(),
 		log:     log,
-	})
+	}
+	orvexv1.RegisterEngineServiceServer(srv, engine)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(listener) }()
 
@@ -103,6 +105,7 @@ func Serve(ctx context.Context, listener net.Listener, pool *pgxpool.Pool, seque
 	}
 	cancel()
 	wg.Wait()
+	engine.readers.Wait()
 	return err
 }
 
@@ -120,6 +123,11 @@ type server struct {
 	// done closes when Serve is stopping; open subscriptions end.
 	done <-chan struct{}
 	log  *slog.Logger
+
+	// feeds holds the feed of every round with a subscriber (feed.go).
+	feedsMu sync.Mutex
+	feeds   map[[16]byte]*feed
+	readers sync.WaitGroup
 }
 
 func (s *server) GetCurrentRound(ctx context.Context, _ *orvexv1.GetCurrentRoundRequest) (*orvexv1.GetCurrentRoundResponse, error) {
@@ -286,26 +294,29 @@ func (s *server) SubscribeRound(req *orvexv1.SubscribeRoundRequest, stream grpc.
 		}
 		next = req.GetAfterSequence() + 1
 	}
-	poll := time.NewTicker(pollInterval)
-	defer poll.Stop()
-	for first := true; ; first = false {
-		// Wait before the read: a commit during the read still wakes us.
-		wake, release := s.wakeups.Wait(round)
-		var idle bool
-		next, idle, err = s.deliver(stream, round, next, first)
-		if err == nil && idle {
-			select {
-			case <-wake:
-			case <-poll.C:
-			case <-ctx.Done():
-				err = status.FromContextError(ctx.Err()).Err()
-			case <-s.done:
-				err = status.Error(codes.Unavailable, "engine shutting down")
+	f := s.joinFeed(round, next)
+	defer s.leaveFeed(f)
+	if err := s.accept(stream, f, next); err != nil {
+		return err
+	}
+	for {
+		v := f.view(next)
+		switch {
+		case v.behind:
+			next, err = s.catchUp(stream, round, next)
+		case len(v.frames) > 0:
+			for _, frame := range v.frames {
+				if err = stream.Send(frame); err != nil {
+					break
+				}
+				next = frame.GetSequence() + 1
 			}
-		}
-		release()
-		if errors.Is(err, errRoundComplete) {
+		case v.complete:
 			return nil
+		case v.err != nil:
+			return s.subscribeError(ctx, v.err)
+		default:
+			err = s.await(ctx, v.changed)
 		}
 		if err != nil {
 			return err
@@ -313,56 +324,86 @@ func (s *server) SubscribeRound(req *orvexv1.SubscribeRoundRequest, stream grpc.
 	}
 }
 
-// errRoundComplete ends a subscription that delivered the round's last
-// record.
-var errRoundComplete = errors.New("engineapi: round complete")
-
-// deliver sends one batch of the round's records from sequence next and
-// returns the sequence after the last one sent. idle reports that the
-// batch reached the execution head, so the caller should wait for more.
-// On the first batch it checks the round and the cursor and sends the
-// stream headers, unless the cursor is the last record of a complete
-// round: then nothing follows, and OUT_OF_RANGE says so before headers.
-func (s *server) deliver(stream grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse], round [16]byte, next uint64, first bool) (uint64, bool, error) {
+// accept checks the round and the cursor against a read of the feed that
+// began after the call, unless the round is complete, then sends the
+// stream headers. It answers NOT_FOUND for an unknown round,
+// FAILED_PRECONDITION for a cursor above the execution head and
+// OUT_OF_RANGE for a cursor at the last record of a complete round,
+// before any header.
+func (s *server) accept(stream grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse], f *feed, next uint64) error {
 	ctx := stream.Context()
-	tail, err := eventstore.ReadTail(ctx, s.db, round, next, batchLimit)
-	switch {
-	case errors.Is(err, eventstore.ErrRoundNotFound):
-		return next, false, status.Error(codes.NotFound, "round not found")
-	case err != nil:
-		return next, false, s.readError(ctx, "subscribe", err)
-	}
-	if first {
-		if tail.Game != v1.GameID || tail.RulesVersion != v1.RulesVersionNumber {
-			return next, false, status.Error(codes.NotFound, "round not found")
+	n := f.request()
+	for {
+		st, ok, changed := f.state(n)
+		if !ok {
+			if err := s.await(ctx, changed); err != nil {
+				return err
+			}
+			continue
 		}
-		if next > tail.Head+1 {
-			return next, false, status.Error(codes.FailedPrecondition, "invalid cursor")
-		}
-		if tail.Final && next == tail.Head+1 {
-			return next, false, status.Error(codes.OutOfRange, "the cursor is the round's last record")
+		switch {
+		case st.err != nil:
+			return s.subscribeError(ctx, st.err)
+		case st.game != v1.GameID || st.rules != v1.RulesVersionNumber:
+			return status.Error(codes.NotFound, "round not found")
+		case next > st.head+1:
+			return status.Error(codes.FailedPrecondition, "invalid cursor")
+		case st.final && next == st.head+1:
+			return status.Error(codes.OutOfRange, "the cursor is the round's last record")
 		}
 		// The headers tell the gateway the subscription is accepted before
 		// any record exists to send.
-		if err := stream.SendHeader(metadata.MD{}); err != nil {
-			return next, false, err
-		}
+		return stream.SendHeader(metadata.MD{})
+	}
+}
+
+// catchUp sends, from this subscriber's own read, one batch of the round's
+// records from sequence next, and returns the sequence after the last one
+// sent. It serves a cursor older than the feed's buffer.
+func (s *server) catchUp(stream grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse], round [16]byte, next uint64) (uint64, error) {
+	ctx := stream.Context()
+	tail, err := eventstore.ReadTail(ctx, s.db, round, next, batchLimit)
+	if err != nil {
+		return next, s.subscribeError(ctx, err)
 	}
 	for _, r := range tail.Records {
 		frame, err := publicRecord(round, r)
 		if err != nil {
 			s.log.Error("engineapi: map record", "error", err.Error())
-			return next, false, status.Error(codes.Internal, "internal error")
+			return next, status.Error(codes.Internal, "internal error")
 		}
 		if err := stream.Send(frame); err != nil {
-			return next, false, err
+			return next, err
 		}
 		next = r.Sequence + 1
 	}
-	if tail.Final && next == tail.Head+1 {
-		return next, false, errRoundComplete
+	return next, nil
+}
+
+// await waits for changed to close, ending the subscription when its
+// caller leaves or Serve stops.
+func (s *server) await(ctx context.Context, changed <-chan struct{}) error {
+	select {
+	case <-changed:
+		return nil
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
+	case <-s.done:
+		return status.Error(codes.Unavailable, "engine shutting down")
 	}
-	return next, len(tail.Records) < batchLimit, nil
+}
+
+// subscribeError maps a failed subscription read: NOT_FOUND for an
+// unknown round, INTERNAL for a record with no public frame, and
+// otherwise as readError does.
+func (s *server) subscribeError(ctx context.Context, err error) error {
+	switch {
+	case errors.Is(err, eventstore.ErrRoundNotFound):
+		return status.Error(codes.NotFound, "round not found")
+	case errors.Is(err, errBadRecord):
+		return status.Error(codes.Internal, "internal error")
+	}
+	return s.readError(ctx, "subscribe", err)
 }
 
 // readError maps a database read failure: a context error to its status,

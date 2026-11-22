@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -39,7 +40,7 @@ func TestMain(m *testing.M) { os.Exit(pgtest.Run(m)) }
 // rig serves SubscribeRound over a migrated database. Nothing notifies its
 // wakeups, as if every notification were lost, so a subscriber sees a new
 // record only by polling. active counts SubscribeRound handlers still
-// running.
+// running, and reads the transactions the server began.
 type rig struct {
 	pool   *pgxpool.Pool
 	x      *execution.Executor
@@ -47,6 +48,24 @@ type rig struct {
 	client orvexv1.EngineServiceClient
 	stop   func()
 	active atomic.Int64
+	reads  atomic.Int64
+	// down makes every read fail as a lost connection does.
+	down atomic.Bool
+}
+
+// rigDB counts the transactions the server begins and fails them while
+// the rig is down.
+type rigDB struct {
+	*pgxpool.Pool
+	r *rig
+}
+
+func (d rigDB) BeginTx(ctx context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+	d.r.reads.Add(1)
+	if d.r.down.Load() {
+		return nil, errors.New("connection refused")
+	}
+	return d.Pool.BeginTx(ctx, opts)
 }
 
 func newRig(t *testing.T) *rig {
@@ -64,7 +83,7 @@ func newRig(t *testing.T) *rig {
 		defer r.active.Add(-1)
 		return h(s, ss)
 	}))
-	orvexv1.RegisterEngineServiceServer(srv, &server{db: pool, wakeups: relay.NewWakeups(), done: done, log: slog.New(slog.DiscardHandler)})
+	orvexv1.RegisterEngineServiceServer(srv, &server{db: rigDB{pool, r}, wakeups: relay.NewWakeups(), done: done, log: slog.New(slog.DiscardHandler)})
 	ln := bufconn.Listen(1 << 20)
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
@@ -353,4 +372,131 @@ func TestSubscribeEndsWhenTheEngineStops(t *testing.T) {
 	r.stop()
 	f.wait(t).check(t, r.committed(t, round), codes.Unavailable)
 	eventually(t, "a subscription still runs after the engine stopped", func() bool { return r.active.Load() == 0 })
+}
+
+// TestSubscribersShareOneRead follows one live round with many
+// subscribers. While nothing changes, the database work is the round's
+// one poll per interval however many subscribers it has, and every
+// subscriber still gets each new record.
+func TestSubscribersShareOneRead(t *testing.T) {
+	const subscribers = 100
+	r := newRig(t)
+	round := r.round(t, 3, false)
+	followers := make([]*follower, subscribers)
+	for i := range followers {
+		followers[i] = r.follow(t, round, nil)
+	}
+	eventually(t, "the subscribers did not reach the head", func() bool {
+		for _, f := range followers {
+			if f.frames.Load() != 3 {
+				return false
+			}
+		}
+		return true
+	})
+
+	before := r.reads.Load()
+	const idle = 3 * pollInterval
+	time.Sleep(idle)
+	if reads := r.reads.Load() - before; reads > int64(idle/pollInterval)+2 {
+		t.Errorf("%d reads in %v with %d idle subscribers of one round, want one per %v", reads, idle, subscribers, pollInterval)
+	}
+
+	r.cashOuts(t, round, 2)
+	r.settle(t, round)
+	want := r.committed(t, round)
+	for _, f := range followers {
+		f.wait(t).check(t, want, codes.OK)
+	}
+	eventually(t, "subscriptions still running after the round completed", func() bool { return r.active.Load() == 0 })
+}
+
+// TestSubscribeJudgesTheCursorOnAFreshRead subscribes beside a subscriber
+// whose shared read predates the newest records. A cursor at the new head
+// is accepted, a cursor above it is refused, and once the round completes
+// a cursor at its last record gets OUT_OF_RANGE at once, as if each
+// subscriber had read the round itself.
+func TestSubscribeJudgesTheCursorOnAFreshRead(t *testing.T) {
+	r := newRig(t)
+	round := r.round(t, 3, false)
+	first := r.follow(t, round, nil)
+	eventually(t, "the first subscriber did not reach the head", func() bool { return first.frames.Load() == 3 })
+
+	r.cashOuts(t, round, 1)
+	atHead := r.follow(t, round, proto.Uint64(3))
+	select {
+	case <-atHead.header:
+	case res := <-atHead.done:
+		t.Fatalf("a subscriber at the new head was refused: %v", res.err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("a subscriber at the new head was not accepted")
+	}
+	r.follow(t, round, proto.Uint64(4)).wait(t).check(t, nil, codes.FailedPrecondition)
+
+	r.settle(t, round)
+	want := r.committed(t, round)
+	last := uint64(len(want) - 1) //nolint:gosec // G115: a round has records
+	r.follow(t, round, proto.Uint64(last)).wait(t).check(t, nil, codes.OutOfRange)
+	first.wait(t).check(t, want, codes.OK)
+	atHead.wait(t).check(t, want[4:], codes.OK)
+	eventually(t, "subscriptions still running after the round completed", func() bool { return r.active.Load() == 0 })
+}
+
+// TestSubscribeBeyondTheFeedBuffer follows a live round longer than a
+// feed's buffer, so the feed has dropped its oldest frames when a second
+// subscriber joins from genesis. That subscriber reads the dropped frames
+// from the database, then the rest from the feed. Both get the complete
+// round, gapless and without repeats.
+func TestSubscribeBeyondTheFeedBuffer(t *testing.T) {
+	const n = feedFrames + batchLimit + 1
+	r := newRig(t)
+	round := r.round(t, n, false)
+	first := r.follow(t, round, nil)
+	eventually(t, "the first subscriber did not reach the head", func() bool { return first.frames.Load() == n })
+	late := r.follow(t, round, nil)
+	eventually(t, "the late subscriber did not reach the head", func() bool { return late.frames.Load() == n })
+
+	r.settle(t, round)
+	want := r.committed(t, round)
+	if len(want) != n+3 {
+		t.Fatalf("%d committed records, want %d", len(want), n+3)
+	}
+	first.wait(t).check(t, want, codes.OK)
+	late.wait(t).check(t, want, codes.OK)
+	eventually(t, "subscriptions still running after the round completed", func() bool { return r.active.Load() == 0 })
+}
+
+// TestSubscribeUnknownRound refuses a round that does not exist before any
+// header.
+func TestSubscribeUnknownRound(t *testing.T) {
+	r := newRig(t)
+	r.follow(t, newID(t), nil).wait(t).check(t, nil, codes.NotFound)
+	eventually(t, "a refused subscription still runs", func() bool { return r.active.Load() == 0 })
+}
+
+// TestSubscribeWhileTheDatabaseIsDown ends a following subscription when
+// the round's shared read fails, as its own read did, and refuses a new
+// one before any header with UNAVAILABLE, which the gateway retries. Once
+// the database is back a new subscription resumes.
+func TestSubscribeWhileTheDatabaseIsDown(t *testing.T) {
+	r := newRig(t)
+	round := r.round(t, 3, false)
+	f := r.follow(t, round, nil)
+	eventually(t, "the subscriber did not reach the head", func() bool { return f.frames.Load() == 3 })
+	want := r.committed(t, round)
+
+	r.down.Store(true)
+	f.wait(t).check(t, want, codes.Unavailable)
+	refused := r.follow(t, round, proto.Uint64(2)).wait(t)
+	if refused.header || status.Code(refused.err) != codes.Unavailable || len(refused.frames) != 0 {
+		t.Fatalf("subscription while the database is down: header %v, %d frames, status %v; want UNAVAILABLE before any header",
+			refused.header, len(refused.frames), refused.err)
+	}
+
+	r.down.Store(false)
+	resumed := r.follow(t, round, proto.Uint64(1))
+	eventually(t, "the resumed subscriber did not reach the head", func() bool { return resumed.frames.Load() == 1 })
+	r.settle(t, round)
+	resumed.wait(t).check(t, r.committed(t, round)[2:], codes.OK)
+	eventually(t, "subscriptions still running after the round completed", func() bool { return r.active.Load() == 0 })
 }
