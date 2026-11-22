@@ -171,6 +171,12 @@ func (s *server) SubmitCommand(ctx context.Context, req *orvexv1.SubmitCommandRe
 
 // submitResult maps Admit's result (S-12). Every outcome a caller can act
 // on travels in the response; a status error is a bad request or a bug.
+//
+// S-12 classifies only Admit's last attempt, and an earlier attempt's
+// COMMIT may have succeeded without its reply. So ErrBusy, ErrUnavailable
+// and a context error map to OUTCOME_UNKNOWN, because none of them proves
+// that the submission admitted nothing. RETRY_REASON_NOT_ADMITTED is
+// reserved for such a proof, and no path here has one.
 func (s *server) submitResult(a admission.Admission, err error) (*orvexv1.SubmitCommandResponse, error) {
 	rejected := func(r orvexv1.RejectionReason) (*orvexv1.SubmitCommandResponse, error) {
 		return &orvexv1.SubmitCommandResponse{Result: &orvexv1.SubmitCommandResponse_Rejected{
@@ -201,11 +207,9 @@ func (s *server) submitResult(a admission.Admission, err error) (*orvexv1.Submit
 		return rejected(orvexv1.RejectionReason_REJECTION_REASON_ROUND_NOT_FOUND)
 	case errors.Is(err, admission.ErrCommandIDReused):
 		return rejected(orvexv1.RejectionReason_REJECTION_REASON_COMMAND_ID_REUSED)
-	case errors.Is(err, admission.ErrOutcomeUnknown):
-		return retry(orvexv1.RetryReason_RETRY_REASON_OUTCOME_UNKNOWN)
-	case errors.Is(err, admission.ErrBusy), errors.Is(err, admission.ErrUnavailable),
+	case errors.Is(err, admission.ErrOutcomeUnknown), errors.Is(err, admission.ErrBusy), errors.Is(err, admission.ErrUnavailable),
 		errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		return retry(orvexv1.RetryReason_RETRY_REASON_NOT_ADMITTED)
+		return retry(orvexv1.RetryReason_RETRY_REASON_OUTCOME_UNKNOWN)
 	case errors.Is(err, admission.ErrInvalidCommand), errors.Is(err, admission.ErrInvalidRequest):
 		return nil, status.Error(codes.InvalidArgument, "command not admissible to this round")
 	}

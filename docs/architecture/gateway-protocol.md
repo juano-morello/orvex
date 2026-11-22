@@ -44,8 +44,10 @@ Every error body is `{"code":"..."}`.
 | 401 | `unauthenticated` | Missing or unknown bearer token. |
 | 404 | `round_not_found`, `command_not_found`, `no_current_round`, `unknown_game`, `not_found` | |
 | 409 | `round_closed`, `round_sealed`, `insufficient_credits`, `command_id_reused` | A definite rejection at admission. Nothing was written. |
-| 503 | `not_admitted`, `outcome_unknown`, `unavailable` | Resubmit the identical request (`Retry-After: 1`). |
+| 503 | `outcome_unknown`, `not_admitted`, `unavailable` | Resubmit the identical request (`Retry-After: 1`). |
 | 500 | `internal` | Engine fault or gateway misconfiguration. |
+
+A submission that fails for a retryable reason is `outcome_unknown`. The admission sequencer retries a lost COMMIT reply, and a lock timeout, a database outage or a cancellation on a later attempt does not show that the earlier COMMIT failed. `not_admitted` is reserved for a failure the engine can prove admitted nothing in any attempt; the current engine never sends it. Treat both codes alike.
 
 Recovery from a lost response is always "resubmit the identical request with the same `clientCommandId`". A command that was admitted returns 202 with `duplicate: true` and its original sequence and effective time, even after the round settles, so a cash-out's eligibility never changes. The same `clientCommandId` with a different command is 409 `command_id_reused`. The gateway adds no retries of its own; the admission sequencer already retries.
 
