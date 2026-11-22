@@ -28,7 +28,7 @@ JSON is camelCase. Every 64-bit integer is a decimal string. UUIDs are canonical
 | `GET /v1/rounds/current[?game=crash]` | none | 200 `{"roundId","game":"crash","rulesVersion":"1"}`, the newest crash/v1 round in any phase |
 | `POST /v1/rounds/{roundId}/commands` | bearer | 202 admission receipt |
 | `GET /v1/commands/{clientCommandId}` | bearer | 200 command status |
-| `GET /v1/rounds/{roundId}/stream[?after=N]` | none | 200 `text/event-stream` |
+| `GET /v1/rounds/{roundId}/stream[?after=N]` | none | 200 `text/event-stream`, or 204 at the end of the round (see [Stream](#stream)) |
 
 A submission body is `{"clientCommandId":"<uuid>","placeBet":{"betCredits":"100"}}` or `{"clientCommandId":"<uuid>","cashOut":{}}`, at most 4096 bytes. Every object holds exactly these keys, spelled with this case, each once, so a repeated `clientCommandId` or `betCredits` is a 400 rather than a choice between two values. A refused body never reaches the engine and writes nothing.
 
@@ -65,7 +65,7 @@ data: {"sequence":"5","effectiveTimeUnixMicro":"1763800006210000","events":[{"ty
 
 Record 0 carries `"genesis":{"commitment","minBetCredits","maxBetCredits","maxBets"}` instead of `events`. A command the rules rejected appears with `"events":[]`, so sequences stay gapless; its command, reason and ID stay in the audit record. Event types are `BetPlaced`, `RoundStarted`, `BetCashedOut`, `RoundCrashed`, `BetLost` and `RoundSettled`; the seed appears only in `RoundSettled`.
 
-After the round's last record the gateway sends `event: end` and closes the response. A client must not reconnect to that round. An idle stream carries `: ping` comments every 15 seconds.
+After the round's last record the gateway sends `event: end` and closes the response. A client should then close its `EventSource`; a reconnect gets 204. An idle stream carries `: ping` comments every 15 seconds.
 
 The cursor is the last sequence the client holds: `Last-Event-ID`, or `?after=N` without it. `Last-Event-ID` wins when a request has both. The stream resumes at N+1, and without a cursor it starts at genesis. Within one connection, sequences are strictly increasing and gapless. Across reconnects delivery is at least once, so drop any frame whose sequence is at or below your cursor. If a connection ends without `event: end`, reconnect with `Last-Event-ID`. A native `EventSource` does this on its own.
 
@@ -75,11 +75,12 @@ The cursor is the last sequence the client holds: `Last-Event-ID`, or `?after=N`
 |---|---|
 | 200 `text/event-stream` | The engine accepted the subscription. The body is `retry: 1000`, the records after the cursor, and `end` once the round completes. A live round whose head is the cursor is accepted and waits for the next record. |
 | 200 `text/event-stream` with only `retry: 1000` | The engine was unavailable, or the gateway was stopping, before the stream started. The response ends without `end`. Reconnect with the same cursor. |
+| 204 | The cursor is the last record of a complete round. Nothing follows, and `EventSource` stops. |
 | 400 `invalid_request`, `invalid_cursor` | A malformed round ID or cursor, or a cursor above the round's execution head. |
 | 404 `round_not_found` | No crash/v1 round has this ID. |
 | 500 `internal` | Engine fault or gateway misconfiguration. |
 
-Changed before release: an engine outage before the stream started used to get 503 `unavailable`.
+Changed before release: a cursor at the last record of a complete round used to get 200 with only `end`, and an engine outage before the stream started used to get 503 `unavailable`.
 
 ## Engine side
 
@@ -88,4 +89,4 @@ Changed before release: an engine outage before the stream started used to get 5
 - **The relay.** It claims due `orvex.outbox_messages` rows with `FOR UPDATE SKIP LOCKED`, marks them published and sends one `NOTIFY orvex_round_records, '<round>:<sequence>'` per round, in one transaction. A NOTIFY is delivered at COMMIT, so a row is published exactly when its notification is.
 - **The LISTEN loop.** It wakes the round's subscribers on each notification, and wakes every subscriber after each reconnect.
 
-A subscriber registers its wakeup, reads the records after its cursor from one snapshot, sends them, then waits for a wakeup or a 1-second poll. The database is the truth: a duplicate or lost notification costs an extra or a later read, never a duplicate or a gap. The subscribe and lookup paths read `chain_records`, `rounds` and the heads, never `round_secrets`, `round_secret_reveals` or the keyring (LBT-21).
+A subscriber registers its wakeup, reads the records after its cursor from one snapshot, sends them, then waits for a wakeup or a 1-second poll. On its first read it checks the round and the cursor before sending gRPC headers: `NOT_FOUND` for an unknown round, `FAILED_PRECONDITION` for a cursor above the execution head, and `OUT_OF_RANGE` for a cursor at the last record of a complete round, which the gateway answers with 204. A read returns at most 256 records; a full batch is followed at once by the next read. The database is the truth: a duplicate or lost notification costs an extra or a later read, never a duplicate or a gap. The subscribe and lookup paths read `chain_records`, `rounds` and the heads, never `round_secrets`, `round_secret_reveals` or the keyring (LBT-21).

@@ -321,7 +321,8 @@ var errRoundComplete = errors.New("engineapi: round complete")
 // returns the sequence after the last one sent. idle reports that the
 // batch reached the execution head, so the caller should wait for more.
 // On the first batch it checks the round and the cursor and sends the
-// stream headers.
+// stream headers, unless the cursor is the last record of a complete
+// round: then nothing follows, and OUT_OF_RANGE says so before headers.
 func (s *server) deliver(stream grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse], round [16]byte, next uint64, first bool) (uint64, bool, error) {
 	ctx := stream.Context()
 	tail, err := eventstore.ReadTail(ctx, s.db, round, next, batchLimit)
@@ -337,6 +338,9 @@ func (s *server) deliver(stream grpc.ServerStreamingServer[orvexv1.SubscribeRoun
 		}
 		if next > tail.Head+1 {
 			return next, false, status.Error(codes.FailedPrecondition, "invalid cursor")
+		}
+		if tail.Final && next == tail.Head+1 {
+			return next, false, status.Error(codes.OutOfRange, "the cursor is the round's last record")
 		}
 		// The headers tell the gateway the subscription is accepted before
 		// any record exists to send.

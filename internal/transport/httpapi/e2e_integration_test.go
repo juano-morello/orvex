@@ -460,10 +460,10 @@ func TestPlayableRoundEndToEnd(t *testing.T) {
 	if got := collect(t, resumed); len(got) != 4 || got[0].id != "5" || got[2].id != "7" || got[3].event != "end" {
 		t.Errorf("resumed from Last-Event-ID 4: %v, want 5..7 then end", got)
 	}
-	if code, done := s.openStream(t, round, "?after=7", ""); code != 200 {
-		t.Errorf("stream after the last record = %d", code)
-	} else if got := collect(t, done); len(got) != 1 || got[0].event != "end" {
-		t.Errorf("stream after the last record: %v, want only end", got)
+	if code, done := s.openStream(t, round, "?after=7", ""); code != 204 {
+		t.Errorf("stream after the last record = %d, want 204", code)
+	} else if got := collect(t, done); len(got) != 0 {
+		t.Errorf("stream after the last record: %v, want no events", got)
 	}
 	if r := s.call(t, "GET", "/v1/rounds/"+uuidText(round)+"/stream?after=8", "", ""); r.status != 400 || r.body["code"] != "invalid_cursor" {
 		t.Errorf("cursor above the head = %d %v", r.status, r.body)

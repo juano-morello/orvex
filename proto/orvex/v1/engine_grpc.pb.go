@@ -49,9 +49,10 @@ type EngineServiceClient interface {
 	LookupCommand(ctx context.Context, in *LookupCommandRequest, opts ...grpc.CallOption) (*LookupCommandResponse, error)
 	// SubscribeRound streams the round's public records in sequence order,
 	// gapless, starting after after_sequence (from genesis when unset). The
-	// stream ends with OK after the round's last record. NOT_FOUND for an
-	// unknown round, FAILED_PRECONDITION for a cursor above the execution
-	// head.
+	// stream ends with OK after the round's last record. Before any header:
+	// NOT_FOUND for an unknown round, FAILED_PRECONDITION for a cursor above
+	// the execution head, OUT_OF_RANGE for a cursor at the last record of a
+	// complete round.
 	SubscribeRound(ctx context.Context, in *SubscribeRoundRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SubscribeRoundResponse], error)
 }
 
@@ -136,9 +137,10 @@ type EngineServiceServer interface {
 	LookupCommand(context.Context, *LookupCommandRequest) (*LookupCommandResponse, error)
 	// SubscribeRound streams the round's public records in sequence order,
 	// gapless, starting after after_sequence (from genesis when unset). The
-	// stream ends with OK after the round's last record. NOT_FOUND for an
-	// unknown round, FAILED_PRECONDITION for a cursor above the execution
-	// head.
+	// stream ends with OK after the round's last record. Before any header:
+	// NOT_FOUND for an unknown round, FAILED_PRECONDITION for a cursor above
+	// the execution head, OUT_OF_RANGE for a cursor at the last record of a
+	// complete round.
 	SubscribeRound(*SubscribeRoundRequest, grpc.ServerStreamingServer[SubscribeRoundResponse]) error
 	mustEmbedUnimplementedEngineServiceServer()
 }

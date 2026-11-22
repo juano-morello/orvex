@@ -26,8 +26,9 @@ import (
 // The genesis frame carries "genesis" instead of "events". After the
 // round's last record comes "event: end" and the response ends. The
 // cursor is the last sequence the client holds, from Last-Event-ID or,
-// without one, ?after=N. Across reconnects delivery is at least once: drop
-// frames with sequence <= cursor.
+// without one, ?after=N. A cursor at the last record of a complete round
+// gets 204, which ends EventSource. Across reconnects delivery is at least
+// once: drop frames with sequence <= cursor.
 func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	round, ok := parseUUID(r.PathValue("roundId"))
 	if !ok {
@@ -136,6 +137,9 @@ func accepted(sub grpc.ServerStreamingClient[orvexv1.SubscribeRoundResponse]) er
 // pass gets a stream that carries only the reconnection time and ends.
 func (h *Handler) notStreamed(w http.ResponseWriter, r *http.Request, err error) {
 	switch status.Code(err) {
+	case codes.OutOfRange:
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
 	case codes.NotFound:
 		writeError(w, http.StatusNotFound, "round_not_found")
 	case codes.FailedPrecondition:

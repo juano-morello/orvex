@@ -298,6 +298,7 @@ func TestSubscribeAcrossBatchBoundaries(t *testing.T) {
 				{"from genesis", nil, 0, codes.OK},
 				{"after genesis", proto.Uint64(0), 1, codes.OK},
 				{"before the last record", proto.Uint64(last - 1), n - 1, codes.OK},
+				{"at the last record", proto.Uint64(last), n, codes.OutOfRange},
 				{"above the head", proto.Uint64(last + 1), n, codes.FailedPrecondition},
 			} {
 				t.Run(tc.name, func(t *testing.T) {

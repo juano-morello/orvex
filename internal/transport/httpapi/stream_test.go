@@ -66,6 +66,20 @@ func TestStreamRetriesWhenTheEngineIsUnreachable(t *testing.T) {
 	checkRetryOnly(t, do(t, ts, "GET", streamPath, "", ""))
 }
 
+func TestStreamNoContentAtTheLastRecord(t *testing.T) {
+	engine := &fakeEngine{subscribe: func(*orvexv1.SubscribeRoundRequest, grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse]) error {
+		return status.Error(codes.OutOfRange, "the cursor is the round's last record")
+	}}
+	ts, _ := newGateway(t, engine)
+	got := do(t, ts, "GET", streamPath+"?after=1", "", "", "Last-Event-ID", "7")
+	if got.status != 204 || got.body != "" || got.header.Get("Content-Type") == "text/event-stream" {
+		t.Errorf("stream = %d %v %q, want 204 with no event stream", got.status, got.header, got.body)
+	}
+	if len(engine.subs) != 1 || engine.subs[0].GetAfterSequence() != 7 {
+		t.Errorf("engine cursors %v, want 7", engine.subs)
+	}
+}
+
 func TestStreamRetriesWhenClosedBeforeTheEngineAnswers(t *testing.T) {
 	arrived := make(chan struct{}, 1)
 	ts, h := newGateway(t, &fakeEngine{subscribe: func(_ *orvexv1.SubscribeRoundRequest, s grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse]) error {

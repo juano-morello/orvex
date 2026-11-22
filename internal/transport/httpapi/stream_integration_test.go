@@ -212,6 +212,10 @@ func TestStreamFollowsARoundAcrossAnEngineRestart(t *testing.T) {
 	after := append([]sse{first}, collect(t, resumed)...)
 	checkIDs(t, "stream resumed with Last-Event-ID 1", after, "2", "3", "4", "end")
 
+	if r := s.get(t, round, "4"); r.status != 204 || r.body != "" {
+		t.Errorf("reconnect at the last record = %d %q, want 204", r.status, r.body)
+	}
+
 	_, replay := s.openStream(t, round, "", "")
 	all := collect(t, replay)
 	checkIDs(t, "replay from genesis", all, "0", "1", "2", "3", "4", "end")
