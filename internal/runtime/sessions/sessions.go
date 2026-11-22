@@ -53,22 +53,26 @@ type Players struct {
 
 // ParsePlayers parses a players file: one JSON object mapping each bearer
 // token to a player ID, for example {"<token>": "alice"}. Tokens are
-// 16 to 512 bytes of printable ASCII without spaces; several tokens may
-// name one player.
+// 16 to 512 bytes of printable ASCII without spaces and appear once;
+// several tokens may name one player.
 func ParsePlayers(b []byte) (*Players, error) {
-	var raw map[string]string
+	notObject := fmt.Errorf("%w: players file is not a JSON object of strings", ErrInvalid)
 	dec := json.NewDecoder(bytes.NewReader(b))
-	if err := dec.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("%w: players file is not a JSON object of strings", ErrInvalid)
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, notObject
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("%w: players file has data after the object", ErrInvalid)
-	}
-	if len(raw) == 0 {
-		return nil, fmt.Errorf("%w: players file names no player", ErrInvalid)
-	}
-	p := &Players{byDigest: make(map[[sha256.Size]byte]PlayerID, len(raw))}
-	for token, player := range raw {
+	p := &Players{byDigest: make(map[[sha256.Size]byte]PlayerID)}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, notObject
+		}
+		value, err := dec.Token()
+		player, isString := value.(string)
+		if err != nil || !isString {
+			return nil, notObject
+		}
+		token, _ := key.(string)
 		if !validToken(token, MinPlayerTokenBytes) {
 			return nil, fmt.Errorf("%w: a token is not %d to %d bytes of printable ASCII without spaces",
 				ErrInvalid, MinPlayerTokenBytes, maxTokenBytes)
@@ -77,7 +81,20 @@ func ParsePlayers(b []byte) (*Players, error) {
 		if !ok {
 			return nil, fmt.Errorf("%w: a player ID does not match %s", ErrInvalid, playerIDPattern)
 		}
-		p.byDigest[sha256.Sum256([]byte(token))] = id
+		digest := sha256.Sum256([]byte(token))
+		if _, repeated := p.byDigest[digest]; repeated {
+			return nil, fmt.Errorf("%w: a token appears more than once", ErrInvalid)
+		}
+		p.byDigest[digest] = id
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return nil, notObject
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("%w: players file has data after the object", ErrInvalid)
+	}
+	if len(p.byDigest) == 0 {
+		return nil, fmt.Errorf("%w: players file names no player", ErrInvalid)
 	}
 	return p, nil
 }

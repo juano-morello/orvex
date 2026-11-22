@@ -9,7 +9,7 @@ Players reach the engine through the HTTP gateway. The gateway authenticates bea
 | `ORVEX_GATEWAY_ADDR` | `127.0.0.1:8080` | HTTP listen address. |
 | `ORVEX_ENGINE_ADDR` | Gateway defaults to `127.0.0.1:7001`. The engine requires an explicit value. | Set both services to the same loopback address. The gRPC connection carries a bearer token over plaintext. |
 | `ORVEX_GATEWAY_TOKEN_FILE` | required | The service token shared with the engine: 32 to 512 printable ASCII bytes, no spaces. |
-| `ORVEX_PLAYERS_FILE` | required | A JSON object mapping each bearer token (16 to 512 bytes) to a player ID (`^[a-z0-9_-]{1,64}$`). |
+| `ORVEX_PLAYERS_FILE` | required | A JSON object mapping each bearer token (16 to 512 bytes) to a player ID (`^[a-z0-9_-]{1,64}$`). A token may appear only once. |
 
 Both files load like the round-secret keyring: a regular file with `perm & 0o027 == 0`, read once at start. No error names a path or quotes a token. Once listening, the gateway prints `ready <address>` on stdout.
 
