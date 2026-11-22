@@ -139,3 +139,49 @@ func TestListenWakesTheNotifiedRound(t *testing.T) {
 	default:
 	}
 }
+
+// TestListenWakesEveryWaiterAfterReconnecting terminates the LISTEN
+// connection. Listen connects again, wakes every waiter, since it may have
+// missed notifications, and then delivers the next notification.
+func TestListenWakesEveryWaiterAfterReconnecting(t *testing.T) {
+	pool, round := newRound(t)
+	w := relay.NewWakeups()
+	ready, releaseReady := w.Wait(round)
+	defer releaseReady()
+	lctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		relay.Listen(lctx, pool.Config().ConnConfig, w, slog.New(slog.DiscardHandler))
+		close(done)
+	}()
+	defer func() { stop(); <-done }()
+	select {
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Listen did not wake waiters after LISTEN")
+	}
+
+	missed, releaseMissed := w.Wait(round)
+	defer releaseMissed()
+	var terminated int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) FROM pg_stat_activity
+		WHERE datname = current_database() AND query = 'LISTEN `+relay.Channel+`'`).Scan(&terminated); err != nil || terminated != 1 {
+		t.Fatalf("terminated %d LISTEN connections, %v; want 1", terminated, err)
+	}
+	select {
+	case <-missed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Listen did not wake waiters after reconnecting")
+	}
+
+	woken, releaseWoken := w.Wait(round)
+	defer releaseWoken()
+	if _, err := pool.Exec(ctx, `SELECT pg_notify($1, $2)`, relay.Channel, string(canonjson.UUID(round))+":1"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-woken:
+	case <-time.After(5 * time.Second):
+		t.Fatal("NOTIFY after the reconnect did not wake the round's waiter")
+	}
+}
