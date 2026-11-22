@@ -34,6 +34,10 @@
 //   - CreateRound stores the secret config sealed with Config.Keyring
 //     (AES-256-GCM, LBT-21 K-8; internal/persistence/sealing), never in
 //     plaintext.
+//   - ClaimLease takes a round over for an owner: one statement raises the
+//     fencing token and names the owner, so every older lease is fenced at
+//     its next Transaction B. State returns the cached or cold-loaded round
+//     state, secrets included, for the engine's lifecycle scheduler.
 //   - The cold load reads the round's reveal, else the legacy plaintext,
 //     else opens the sealed form with Config.Keyring; a form it cannot open
 //     is ErrCorrupt. The record that first makes the round final writes the

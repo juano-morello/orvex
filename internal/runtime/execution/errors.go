@@ -16,8 +16,9 @@ var (
 	// policy, a duplicate policy, or a policy without a matching adapter or
 	// ledger rule.
 	ErrInvalidConfig = errors.New("execution: invalid config")
-	// ErrInvalidRequest: a nil round ID, a negative fencing token, or a
-	// Drain limit below 1. No database call was made.
+	// ErrInvalidRequest: a nil round ID, a negative fencing token, a Drain
+	// limit below 1, or a ClaimLease owner or ttl outside its range. No
+	// database call was made.
 	ErrInvalidRequest = errors.New("execution: invalid request")
 	// ErrInvalidRound: CreateRound was given a nil round ID or a config the
 	// rules version rejects or that belongs to another round.

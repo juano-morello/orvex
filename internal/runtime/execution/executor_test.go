@@ -181,6 +181,25 @@ func TestExecuteNextValidation(t *testing.T) {
 		if _, err := x.Drain(context.Background(), l, 1); !errors.Is(err, ErrInvalidRequest) {
 			t.Errorf("Drain %s: err = %v, want ErrInvalidRequest", name, err)
 		}
+		if _, err := x.State(context.Background(), l); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("State %s: err = %v, want ErrInvalidRequest", name, err)
+		}
+	}
+	for name, c := range map[string]struct {
+		round [16]byte
+		owner string
+		ttl   time.Duration
+	}{
+		"nil round id":    {owner: "engine-a", ttl: time.Second},
+		"empty owner":     {round: round, ttl: time.Second},
+		"owner with ws":   {round: round, owner: "engine a", ttl: time.Second},
+		"owner too long":  {round: round, owner: strings.Repeat("e", 129), ttl: time.Second},
+		"zero ttl":        {round: round, owner: "engine-a"},
+		"ttl above limit": {round: round, owner: "engine-a", ttl: MaxLeaseTTL + time.Microsecond},
+	} {
+		if _, err := x.ClaimLease(context.Background(), c.round, c.owner, c.ttl); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("ClaimLease %s: err = %v, want ErrInvalidRequest", name, err)
+		}
 	}
 	if n, err := x.Drain(context.Background(), Lease{RoundID: round}, 0); n != 0 || !errors.Is(err, ErrInvalidRequest) {
 		t.Errorf("Drain limit 0 = %d, %v; want ErrInvalidRequest", n, err)
