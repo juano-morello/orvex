@@ -15,7 +15,7 @@ Both files load like the round-secret keyring: a regular file with `perm & 0o027
 
 ## Identity
 
-A player's identity comes only from `Authorization: Bearer <token>`. No request body names a player or an authority: the gateway refuses unknown JSON keys, so a body with `player` is a 400. The gateway sends the player to the engine as the call's principal, and the engine trusts it only because the call carries the service token (`authorization: Bearer <service token>` metadata, compared by SHA-256 digest in constant time). The engine builds every command itself with player authority, so the wire cannot express StartRound, CloseRound or SettleRound.
+A player's identity comes only from `Authorization: Bearer <token>`. No request body names a player or an authority: the gateway refuses unknown, mixed-case and repeated JSON keys, so a body with `player` is a 400. The gateway sends the player to the engine as the call's principal, and the engine trusts it only because the call carries the service token (`authorization: Bearer <service token>` metadata, compared by SHA-256 digest in constant time). The engine builds every command itself with player authority, so the wire cannot express StartRound, CloseRound or SettleRound.
 
 The engine takes the first 16 bytes of SHA-256(`"orvex/command-id/v1"` 0x00 player 0x00 client ID) and sets the RFC 9562 variant and version 8 bits. Two players who pick the same `clientCommandId` get separate admissions. Each can look up their own result. The gateway exposes the client ID. The audit record contains the derived ID, whose encoding is pinned by `TestCommandIDGolden`.
 
@@ -30,7 +30,9 @@ JSON is camelCase. Every 64-bit integer is a decimal string. UUIDs are canonical
 | `GET /v1/commands/{clientCommandId}` | bearer | 200 command status |
 | `GET /v1/rounds/{roundId}/stream[?after=N]` | none | 200 `text/event-stream` |
 
-A submission body is `{"clientCommandId":"<uuid>","placeBet":{"betCredits":"100"}}` or `{"clientCommandId":"<uuid>","cashOut":{}}`. The 202 receipt is `{"clientCommandId","roundId","sequence","effectiveTimeUnixMicro","duplicate","status":"pending"}`. It says the command was durably admitted at that sequence and effective time (ADR-002), not that it was executed.
+A submission body is `{"clientCommandId":"<uuid>","placeBet":{"betCredits":"100"}}` or `{"clientCommandId":"<uuid>","cashOut":{}}`, at most 4096 bytes. Every object holds exactly these keys, spelled with this case, each once, so a repeated `clientCommandId` or `betCredits` is a 400 rather than a choice between two values. A refused body never reaches the engine and writes nothing.
+
+The 202 receipt is `{"clientCommandId","roundId","sequence","effectiveTimeUnixMicro","duplicate","status":"admitted"}`, for a new admission and for a duplicate alike. It says the command was durably admitted at that sequence and effective time (ADR-002), not that it was executed. Execution outcomes come only from the status lookup. Earlier revisions of this pre-release API put `"status":"pending"` in the receipt.
 
 A status is `{"clientCommandId","roundId","sequence","effectiveTimeUnixMicro","status","reason"?,"events":[...]}` with `status` one of `pending`, `accepted` or `rejected`. `events` holds this command's own events: `BetPlaced`, or `BetCashedOut` with `payoutCredits`. A bet lost at settlement appears in the stream, not here. A 404 is not definitive for a command still being admitted.
 
@@ -42,8 +44,10 @@ Every error body is `{"code":"..."}`.
 |---|---|---|
 | 400 | `invalid_request`, `invalid_cursor` | Malformed request, or a cursor above the round's execution head. |
 | 401 | `unauthenticated` | Missing or unknown bearer token. |
-| 404 | `round_not_found`, `command_not_found`, `no_current_round`, `unknown_game`, `not_found` | |
+| 404 | `round_not_found`, `command_not_found`, `no_current_round`, `unknown_game`, `not_found` | `not_found` is a path the API does not serve. |
+| 405 | `method_not_allowed` | A served path with another method. `Allow` names the methods: `POST` for submission, `GET, HEAD` for the others. |
 | 409 | `round_closed`, `round_sealed`, `insufficient_credits`, `command_id_reused` | A definite rejection at admission. Nothing was written. |
+| 413 | `request_too_large` | An authenticated submission body over 4096 bytes. Nothing was written. |
 | 503 | `outcome_unknown`, `not_admitted`, `unavailable` | Resubmit the identical request (`Retry-After: 1`). |
 | 500 | `internal` | Engine fault or gateway misconfiguration. |
 

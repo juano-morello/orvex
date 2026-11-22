@@ -14,6 +14,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -64,12 +65,33 @@ type Handler struct {
 func New(engine orvexv1.EngineServiceClient, auth Authenticator, log *slog.Logger) *Handler {
 	h := &Handler{engine: engine, auth: auth, log: log, mux: http.NewServeMux(), pingInterval: 15 * time.Second}
 	h.streams, h.closeStreams = context.WithCancel(context.Background())
-	h.mux.HandleFunc("GET /v1/rounds/current", h.currentRound)
-	h.mux.HandleFunc("POST /v1/rounds/{roundId}/commands", h.authenticated(h.submit))
-	h.mux.HandleFunc("GET /v1/commands/{clientCommandId}", h.authenticated(h.lookup))
-	h.mux.HandleFunc("GET /v1/rounds/{roundId}/stream", h.stream)
+	for _, rt := range []struct {
+		method, path string
+		serve        http.HandlerFunc
+	}{
+		{http.MethodGet, "/v1/rounds/current", h.currentRound},
+		{http.MethodPost, "/v1/rounds/{roundId}/commands", h.authenticated(h.submit)},
+		{http.MethodGet, "/v1/commands/{clientCommandId}", h.authenticated(h.lookup)},
+		{http.MethodGet, "/v1/rounds/{roundId}/stream", h.stream},
+	} {
+		h.mux.HandleFunc(rt.method+" "+rt.path, rt.serve)
+		h.mux.HandleFunc(rt.path, methodNotAllowed(rt.method))
+	}
 	h.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { writeError(w, http.StatusNotFound, "not_found") })
 	return h
+}
+
+// methodNotAllowed answers 405 on a known path. ServeMux serves HEAD with
+// a GET route's handler, so a GET route allows HEAD too.
+func methodNotAllowed(method string) http.HandlerFunc {
+	allow := method
+	if method == http.MethodGet {
+		allow = "GET, HEAD"
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Allow", allow)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
@@ -123,48 +145,28 @@ func (h *Handler) currentRound(w http.ResponseWriter, r *http.Request) {
 	}{round, resp.GetGame(), resp.GetRulesVersion()})
 }
 
-// submitBody is a command submission. Exactly one of PlaceBet and CashOut
-// is set.
-type submitBody struct {
-	ClientCommandID string `json:"clientCommandId"`
-	PlaceBet        *struct {
-		BetCredits string `json:"betCredits"`
-	} `json:"placeBet"`
-	CashOut *struct{} `json:"cashOut"`
-}
-
 func (h *Handler) submit(w http.ResponseWriter, r *http.Request, player sessions.PlayerID) {
 	round, ok := parseUUID(r.PathValue("roundId"))
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	var body submitBody
-	if err := decodeStrict(w, r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request")
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large")
 		return
-	}
-	client, ok := parseUUID(body.ClientCommandID)
-	if !ok {
+	case err != nil:
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
 	req := &orvexv1.SubmitCommandRequest{
-		Principal:       &orvexv1.Principal{PlayerId: string(player)},
-		ClientCommandId: client[:],
-		RoundId:         round[:],
+		Principal: &orvexv1.Principal{PlayerId: string(player)},
+		RoundId:   round[:],
 	}
-	switch {
-	case body.PlaceBet != nil && body.CashOut == nil:
-		credits, ok := parsePositive(body.PlaceBet.BetCredits)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "invalid_request")
-			return
-		}
-		req.Command = &orvexv1.SubmitCommandRequest_PlaceBet{PlaceBet: &orvexv1.PlaceBet{BetCredits: credits}}
-	case body.CashOut != nil && body.PlaceBet == nil:
-		req.Command = &orvexv1.SubmitCommandRequest_CashOut{CashOut: &orvexv1.CashOut{}}
-	default:
+	clientText, ok := parseSubmission(b, req)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -196,7 +198,7 @@ func (h *Handler) submit(w http.ResponseWriter, r *http.Request, player sessions
 			admissionJSON
 			Duplicate bool   `json:"duplicate"`
 			Status    string `json:"status"`
-		}{body.ClientCommandID, a, res.Admitted.GetDuplicate(), "pending"})
+		}{clientText, a, res.Admitted.GetDuplicate(), "admitted"})
 	case *orvexv1.SubmitCommandResponse_Rejected:
 		code, ok := rejectionCodes[res.Rejected.GetReason()]
 		if !ok {
@@ -305,18 +307,98 @@ func (h *Handler) internal(w http.ResponseWriter, msg string) {
 	writeError(w, http.StatusInternalServerError, "internal")
 }
 
-// decodeStrict decodes one JSON object of at most maxBodyBytes into v,
-// refusing unknown keys, such as a player, and trailing data.
-func decodeStrict(w http.ResponseWriter, r *http.Request, v any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return err
+// parseSubmission parses a submission body into req's client command ID
+// and command, and returns the client command ID's text. The body is
+// {"clientCommandId":"<uuid>"} with exactly one of
+// "placeBet":{"betCredits":"<n>"} and "cashOut":{}. Keys match byte for
+// byte and appear at most once, so no key names a player and none
+// overrides another.
+func parseSubmission(b []byte, req *orvexv1.SubmitCommandRequest) (string, bool) {
+	var (
+		clientText, credits string
+		bet, cash           bool
+	)
+	dec := json.NewDecoder(bytes.NewReader(b))
+	err := object(dec, fields{
+		"clientCommandId": stringField(&clientText),
+		"placeBet": func(dec *json.Decoder) error {
+			bet = true
+			return object(dec, fields{"betCredits": stringField(&credits)})
+		},
+		"cashOut": func(dec *json.Decoder) error {
+			cash = true
+			return object(dec, nil)
+		},
+	})
+	if err != nil {
+		return "", false
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return errors.New("trailing data")
+		return "", false
+	}
+	client, ok := parseUUID(clientText)
+	if !ok {
+		return "", false
+	}
+	switch {
+	case bet && !cash:
+		n, ok := parsePositive(credits)
+		if !ok {
+			return "", false
+		}
+		req.Command = &orvexv1.SubmitCommandRequest_PlaceBet{PlaceBet: &orvexv1.PlaceBet{BetCredits: n}}
+	case cash && !bet:
+		req.Command = &orvexv1.SubmitCommandRequest_CashOut{CashOut: &orvexv1.CashOut{}}
+	default:
+		return "", false
+	}
+	req.ClientCommandId = client[:]
+	return clientText, true
+}
+
+// fields maps each key an object may hold to the parser of its value.
+type fields map[string]func(*json.Decoder) error
+
+var errBody = errors.New("httpapi: malformed request body")
+
+// object decodes one JSON object whose keys are all in fs, each at most
+// once.
+func object(dec *json.Decoder, fs fields) error {
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return errBody
+	}
+	seen := make(map[string]bool, len(fs))
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return errBody
+		}
+		key, _ := t.(string)
+		parse, known := fs[key]
+		if !known || seen[key] {
+			return errBody
+		}
+		seen[key] = true
+		if err := parse(dec); err != nil {
+			return err
+		}
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return errBody
 	}
 	return nil
+}
+
+func stringField(out *string) func(*json.Decoder) error {
+	return func(dec *json.Decoder) error {
+		t, err := dec.Token()
+		s, ok := t.(string)
+		if err != nil || !ok {
+			return errBody
+		}
+		*out = s
+		return nil
+	}
 }
 
 // parseUUID parses canonical lowercase UUID text and refuses the nil UUID.
