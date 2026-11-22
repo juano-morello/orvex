@@ -107,7 +107,7 @@ func requireFramesMatch(t *testing.T, who string, frames []frame, records []stor
 
 // TestLostCashOutResponsePaysOnce plays a two-player round through the
 // gateway. alice's cash-out is admitted, its response is lost on the way
-// to her, and she resubmits the identical request after the crash. The
+// to her, and she resubmits the identical request after settlement. The
 // retry returns the original admission, the payout lands exactly once, and
 // the settled round verifies as an explicit orvex/audit-history/v2 export.
 // Along the way it checks that identity comes only from the bearer token.
@@ -196,10 +196,10 @@ func TestLostCashOutResponsePaysOnce(t *testing.T) {
 		t.Fatalf("cash-out effective %dµs after T0 with D = %dµs: the controlled round left no eligibility margin", e, r.d)
 	}
 
-	bobStream.waitEvent(t, "RoundCrashed", controlledWait)
+	bobStream.waitEvent(t, "RoundSettled", controlledWait)
 	retry := aliceViaProxy.admit(t, r.text, cashOut)
 	if !retry.Duplicate || retry.Sequence != lost.Sequence || retry.EffectiveTimeUnixMicro != lost.EffectiveTimeUnixMicro {
-		t.Fatalf("retry after the crash = %+v, want the lost admission %+v marked duplicate", retry, lost)
+		t.Fatalf("retry after settlement = %+v, want the lost admission %+v marked duplicate", retry, lost)
 	}
 	if _, n := proxy.lostResponse(); n != 2 {
 		t.Errorf("proxy forwarded %d cash-out requests, want the lost one and one retry", n)

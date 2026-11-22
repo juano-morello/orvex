@@ -148,16 +148,9 @@ func ExportHistory(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Wr
 	var head chain.Hash
 	copy(head[:], headBytes)
 
-	var newest *int64
-	err = tx.QueryRow(ctx, `SELECT max(sequence) FROM orvex.chain_records WHERE round_id = $1`,
-		roundID).Scan(&newest)
-	switch {
-	case err != nil:
-		return Export{}, fmt.Errorf("eventstore: read record count: %w", err)
-	case newest == nil:
-		return Export{}, fmt.Errorf("%w: round has no chain records", ErrCorrupt)
-	case *newest < int64(last): //nolint:gosec // G115: last is a snapshot sequence scanned from bigint and checked >= 0 above
-		return Export{}, fmt.Errorf("%w: newest record %d before snapshot %d", ErrCorrupt, *newest, last)
+	roundRecords, err := readRoundRecords(ctx, tx, roundID, last)
+	if err != nil {
+		return Export{}, err
 	}
 
 	header, err := encodeHeader(head, cps, secret)
@@ -207,7 +200,7 @@ func ExportHistory(ctx context.Context, db TxBeginner, roundID [16]byte, w io.Wr
 	return Export{
 		RoundID:      roundID,
 		Records:      int(n),
-		RoundRecords: int(*newest) + 1,
+		RoundRecords: roundRecords,
 		Head:         head,
 		Checkpoints:  cps,
 	}, nil

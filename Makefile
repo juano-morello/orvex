@@ -53,6 +53,10 @@ test:
 test-integration:
 	$(GO) test $(GOTESTFLAGS) -tags integration -count=1 ./...
 
+.PHONY: test-acceptance
+test-acceptance:
+	$(GO) test $(GOTESTFLAGS) -tags 'integration acceptance' -count=1 ./tests/integration/firstround
+
 test-repeat: test-repeat-admission test-repeat-execution test-repeat-export
 
 test-repeat-admission:
