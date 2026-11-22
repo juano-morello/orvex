@@ -21,8 +21,12 @@
 //     engine's admission of a command the earlier one admitted is a
 //     Duplicate. Start is due at created_at + BettingWindow, close at the
 //     crash deadline T0 + D read from the round's state, settle at once;
-//     the database clock decides. Admitted player commands are executed on
-//     every tick.
+//     the database clock decides. Each tick executes at most one batch of
+//     admitted commands, then checks the clock, so a due step is admitted
+//     even when admissions never stop, behind those admitted before it.
+//     The driver then waits for the step's admission sequence to execute.
+//     The final record ends the drive: the executor has dropped the
+//     round's state, and nothing reads it again.
 //   - Halts: a round whose execution is corrupt or fails closed, or whose
 //     lifecycle command is rejected, halts. It stays unsettled, blocks new
 //     rounds and is logged once per leadership. Nothing voids it.

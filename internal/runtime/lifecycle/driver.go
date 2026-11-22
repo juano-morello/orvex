@@ -99,18 +99,71 @@ type driver struct {
 	lease execution.Lease
 	// phase is the last phase logged.
 	phase v1.Phase
+	// awaiting is the step admitted, or refused, out of the round's phase;
+	// nil before one is.
+	awaiting *awaiting
 }
 
-// tick executes the admitted commands, then admits the next lifecycle
-// command if it is due, or waits up to one tick for it.
+// awaiting is a lifecycle step out of phase from. The round must have left
+// from once the admission at sequence through has executed. through is the
+// step's own admission or, for a refused step, the round's last admission
+// at the refusal, which may still move the round.
+type awaiting struct {
+	name    string
+	from    v1.Phase
+	through uint64
+	// refused is the step's rejection at admission; nil when admitted.
+	refused *admission.RejectedError
+}
+
+// batch is what one call of execute did.
+type batch struct {
+	// full: drainBatch commands executed; more may be admitted.
+	full bool
+	// last is the sequence of the last command executed, 0 for none.
+	last uint64
+	// final: the last command made the round final.
+	final bool
+}
+
+// executed reports whether every admission through seq, committed before
+// the batch began, has executed. A batch that ran out of admissions
+// executed them all.
+func (b batch) executed(seq uint64) bool { return !b.full || b.last >= seq }
+
+// tick executes one batch of admitted commands, then admits the round's
+// next lifecycle step if it is due, or waits up to one tick for it when
+// nothing is left to execute. A due step is thus admitted at the next batch
+// boundary even when admissions never stop, behind those admitted before
+// it.
 func (d *driver) tick(ctx context.Context) (settled bool, err error) {
-	st, err := d.current(ctx)
+	b, err := d.execute(ctx)
+	switch {
+	case err != nil:
+		return false, err
+	case b.final:
+		// The executor dropped the round's state with its final record
+		// (E-3); reading it again would replay the whole chain.
+		d.logPhase(v1.PhaseSettled)
+		return true, nil
+	}
+	st, err := d.state(ctx)
 	if err != nil {
 		return false, err
 	}
 	if st.Phase == v1.PhaseSettled {
+		// The final record committed without this driver seeing it
+		// executed, and a cold load cached the settled state.
+		d.s.x.Forget(d.round.id)
 		return true, nil
 	}
+	if a := d.awaiting; a != nil && a.from == st.Phase {
+		if !b.executed(a.through) {
+			return false, nil
+		}
+		return false, d.stalled(ctx, *a)
+	}
+	d.awaiting = nil
 	next, ok := steps[st.Phase]
 	if !ok {
 		return false, fmt.Errorf("%w: phase %v has no lifecycle step", errHalted, st.Phase)
@@ -120,26 +173,38 @@ func (d *driver) tick(ctx context.Context) (settled bool, err error) {
 		return false, err
 	}
 	if wait := next.due(d.round, st, d.s.cfg.BettingWindow) - now; wait > 0 {
+		if b.full {
+			return false, nil
+		}
 		poll := d.s.timing.waiting
 		if st.Phase == v1.PhaseRunning {
 			poll = d.s.timing.running
 		}
 		return false, sleepCtx(ctx, min(time.Duration(wait)*time.Microsecond, poll))
 	}
-	return false, d.advance(ctx, next, st.Phase)
+	return false, d.admit(ctx, next, st.Phase)
 }
 
-// current executes every admitted command and returns the round's state.
-func (d *driver) current(ctx context.Context) (v1.State, error) {
-	for {
-		n, err := d.s.x.Drain(ctx, d.lease, drainBatch)
-		if err != nil {
-			return v1.State{}, err
+// execute executes up to drainBatch admitted commands in sequence order,
+// stopping after the final record.
+func (d *driver) execute(ctx context.Context) (batch, error) {
+	var b batch
+	for range drainBatch {
+		out, err := d.s.x.ExecuteNext(ctx, d.lease)
+		if err != nil || !out.Executed {
+			return b, err
 		}
-		if n < drainBatch {
-			break
+		b.last, b.final = out.Sequence, out.Final
+		if out.Final {
+			return b, nil
 		}
 	}
+	b.full = true
+	return b, nil
+}
+
+// state returns the round's state after its last executed command.
+func (d *driver) state(ctx context.Context) (v1.State, error) {
 	got, err := d.s.x.State(ctx, d.lease)
 	if err != nil {
 		return v1.State{}, err
@@ -148,41 +213,57 @@ func (d *driver) current(ctx context.Context) (v1.State, error) {
 	if !ok {
 		return v1.State{}, fmt.Errorf("%w: the round's state is not a crash/v1 state", errHalted)
 	}
-	if st.Phase != d.phase {
-		d.phase = st.Phase
-		d.s.log.Info("round phase", "round", roundText(d.round.id), "phase", st.Phase.String())
-	}
+	d.logPhase(st.Phase)
 	return st, nil
 }
 
-// advance admits next for a round in phase from and executes it. The round
-// halts when it stays in from: the command was rejected at admission or by
-// Decide.
-func (d *driver) advance(ctx context.Context, next step, from v1.Phase) error {
-	id := commandID(d.round.id, next.name)
-	_, admitErr := d.s.seq.Admit(ctx, admission.Request{
+func (d *driver) logPhase(p v1.Phase) {
+	if p != d.phase {
+		d.phase = p
+		d.s.log.Info("round phase", "round", roundText(d.round.id), "phase", p.String())
+	}
+}
+
+// admit admits next, the step out of phase from, and records the sequence
+// it executes at. Admitting it again, after a restart or an unknown
+// outcome, is Duplicate and returns the same sequence.
+func (d *driver) admit(ctx context.Context, next step, from v1.Phase) error {
+	a, err := d.s.seq.Admit(ctx, admission.Request{
 		RoundID: d.round.id, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber,
-		CommandID: id, Command: next.command,
+		CommandID: commandID(d.round.id, next.name), Command: next.command,
 	})
-	refused, isRefused := errors.AsType[*admission.RejectedError](admitErr)
-	if admitErr != nil && !isRefused {
-		return admitErr
-	}
-	st, err := d.current(ctx)
-	if err != nil || st.Phase != from {
+	refused, isRefused := errors.AsType[*admission.RejectedError](err)
+	switch {
+	case isRefused:
+		var head int64
+		if err := d.s.pool.QueryRow(ctx, `SELECT admitted_sequence FROM orvex.round_admission_heads WHERE round_id = $1`,
+			d.round.id).Scan(&head); err != nil {
+			return err
+		}
+		d.awaiting = &awaiting{name: next.name, from: from, through: uint64(head), refused: refused} //nolint:gosec // G115: round_admission_heads_admitted_sequence_check holds admitted_sequence >= 0
+	case err != nil:
 		return err
+	default:
+		d.awaiting = &awaiting{name: next.name, from: from, through: a.Sequence}
 	}
-	if isRefused {
-		return fmt.Errorf("%w: %s refused at admission: %w", errHalted, next.name, refused)
+	return nil
+}
+
+// stalled handles a round still in a.from after the admission at a.through
+// executed: its step was refused at admission or rejected by Decide, so the
+// round halts.
+func (d *driver) stalled(ctx context.Context, a awaiting) error {
+	if a.refused != nil {
+		return fmt.Errorf("%w: %s refused at admission: %w", errHalted, a.name, a.refused)
 	}
-	status, err := d.s.seq.Lookup(ctx, id)
+	status, err := d.s.seq.Lookup(ctx, commandID(d.round.id, a.name))
 	switch {
 	case err != nil:
 		return err
 	case status.Outcome == admission.OutcomeRejected:
-		return fmt.Errorf("%w: %s rejected: %s", errHalted, next.name, status.Reason)
+		return fmt.Errorf("%w: %s rejected: %s", errHalted, a.name, status.Reason)
 	case status.Outcome == admission.OutcomeAccepted:
-		return fmt.Errorf("%w: %s accepted, and the round stayed in %v", errHalted, next.name, from)
+		return fmt.Errorf("%w: %s accepted, and the round stayed in %v", errHalted, a.name, a.from)
 	default:
 		return errNotExecuted
 	}

@@ -34,8 +34,8 @@ var (
 	errHalted = errors.New("lifecycle: round halted")
 	// errLeadershipLost: the leadership session ended.
 	errLeadershipLost = errors.New("lifecycle: scheduler leadership lost")
-	// errNotExecuted: a lifecycle command was admitted, and the drain after
-	// it did not execute it.
+	// errNotExecuted: every admission through a lifecycle command's own
+	// executed, and the command is still pending.
 	errNotExecuted = errors.New("lifecycle: admitted lifecycle command not executed yet")
 )
 
@@ -76,8 +76,8 @@ var defaultTiming = timing{
 	maxBackoff: 2 * time.Second,
 }
 
-// drainBatch is the Drain limit of one call; the driver drains until a call
-// executes fewer.
+// drainBatch bounds the commands a driver executes between two checks of
+// its round's phase and the database clock.
 const drainBatch = 64
 
 // Scheduler creates and drives crash/v1 rounds while it leads.
