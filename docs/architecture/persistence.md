@@ -779,3 +779,45 @@ the compromised key as exposed; what happens to those rounds is an operations de
   that the reveal names an accepted record (`TestComputeTransitionReveal`).
 - **R-7:** the plaintext secret and the keys live in engine memory, and Go cannot reliably zero them.
 - **R-8:** a file written with `-unsettled` holds the seed.
+
+## 17. Engine lifecycle (first playable)
+
+`internal/runtime/lifecycle` and `cmd/engine` drive crash/v1 rounds without a human. One engine replica
+is the milestone; the advisory lock below is defence in depth, not multi-replica support.
+
+- **Leadership:** the scheduler holds `pg_try_advisory_lock(8451814261399681253)` (the first 8 bytes of
+  SHA-256(`orvex/engine/v1/scheduler:crash`)) on a dedicated session and pings it every second. A
+  second engine waits. The lock ends with the session; a leader that loses it stops scheduling.
+- **Discovery:** before it creates a round, the leader lists the unsettled crash rounds, those without
+  a reveal:
+
+  ```sql
+  SELECT r.round_id, r.created_at_unix_micro FROM orvex.rounds r
+  WHERE r.game = 'crash'
+    AND NOT EXISTS (SELECT 1 FROM orvex.round_secret_reveals v WHERE v.round_id = r.round_id)
+  ORDER BY r.created_at_unix_micro, r.round_id
+  ```
+
+  It drives each to settlement and creates a round only when the list is empty (and `ORVEX_CREATE_ROUNDS`
+  is not `false`). A round whose creation committed while its creator died is adopted here.
+- **Lease claim** (`Executor.ClaimLease`): `UPDATE orvex.round_execution_heads SET fencing_token =
+  fencing_token + 1, owner_id = $owner, lease_expires_at = clock_timestamp() + $ttl WHERE round_id = $1
+  RETURNING fencing_token`. `check_execution_head` accepts the owner change because the token rises.
+  Transaction B checks only the token, so the claim fences any earlier engine. Nothing reads or renews
+  `lease_expires_at` yet; the last claim owns the round.
+- **Creation:** the plan (a random UUIDv4, a crypto/rand seed, `created_at` from
+  `orvex.unix_micro(clock_timestamp())`) is drawn once and resent unchanged until `CreateRound` answers
+  definitely, so an unknown commit outcome resolves to `Duplicate`.
+- **Lifecycle commands:** `StartRound`, `CloseRound` and `SettleRound` carry `AuthoritySystem` and the
+  command ID `uuid8("orvex/engine/v1/command:<round uuid>/start|close|settle")`, so an engine that
+  restarts re-admits a step as `Duplicate`. Start is due at `created_at + ORVEX_BETTING_WINDOW` (default
+  10 s), close at `T0 + D` from the engine's in-memory state, settle at once, all on the database clock.
+  The engine never reads `close_offset_micros` or `close_not_before_unix_micro`.
+- **Halts:** a round whose execution is corrupt or fails closed, or whose lifecycle command is rejected,
+  stays unsettled, blocks new rounds and is logged; nothing voids it.
+
+Grants: nothing beyond §13. Discovery reads `rounds` and `round_secret_reveals`, the claim updates
+`round_execution_heads`, and the clock read calls `orvex.unix_micro` (default `PUBLIC` `EXECUTE`). The
+known gap of this milestone: a leader whose session drops while its `CreateRound` commits can race the
+next leader's discovery and leave two unsettled rounds; both are then driven to settlement. Residual
+risk R-1 (§6, §16) is unchanged: `D` and `T0 + D` stay plaintext at rest until LBT-26.
