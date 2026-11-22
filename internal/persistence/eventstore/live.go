@@ -99,10 +99,19 @@ func ReadTail(ctx context.Context, db TxBeginner, round [16]byte, from uint64, l
 			if seq < 0 || uint64(seq) != next {
 				return fmt.Errorf("%w: record %d where %d was expected", ErrCorrupt, seq, next)
 			}
+			if next > t.Head {
+				return fmt.Errorf("%w: record %d past execution head %d", ErrCorrupt, next, t.Head)
+			}
 			t.Records = append(t.Records, StoredRecord{Sequence: next, Record: record})
 			next++
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(t.Records) < limit && next <= t.Head {
+			return fmt.Errorf("%w: missing record %d before end of batch", ErrCorrupt, next)
+		}
+		return nil
 	})
 	if err != nil {
 		return Tail{}, err
