@@ -60,6 +60,25 @@ done
 (
   cd "$tmp/b"
   umask 077
+  export ORVEX_WORKSPACE_ID ORVEX_UID ORVEX_GID
+  ORVEX_WORKSPACE_ID=$(basename "$(git rev-parse --absolute-git-dir)"/orvex-wt-*)
+  ORVEX_UID=$(id -u)
+  ORVEX_GID=$(id -g)
+  compose=(docker compose -p "$ORVEX_WORKSPACE_ID" -f deployments/docker/compose.yaml -f .devcontainer/compose.yaml)
+  ./workspace exec make build-engine
+  "${compose[@]}" exec -d dev sh -c 'echo $$ > /tmp/orvex-engine.pid
+    export ORVEX_SECRET_KEYRING_FILE=/var/lib/orvex-preview/keyring
+    export ORVEX_GATEWAY_TOKEN_FILE=/var/lib/orvex-preview/gateway-token
+    export ORVEX_ENGINE_ADDR=127.0.0.1:0 ORVEX_BETTING_WINDOW=1h
+    exec ./bin/engine'
+  sealed=0
+  for ((i=0; i<60; i++)); do
+    sealed=$("${compose[@]}" exec -T postgres psql -XqAt -v ON_ERROR_STOP=1 -U orvex -d orvex < deployments/docker/unrevealed-rounds.sql)
+    [[ $sealed == 0 ]] || break
+    sleep 1
+  done
+  [[ $sealed == 1 ]] || { echo 'engine did not create a sealed round' >&2; exit 1; }
+  ./workspace exec sh -c 'kill -TERM "$(cat /tmp/orvex-engine.pid)"'
   ./workspace exec cat "$creds/keyring" > "$tmp/original-keyring"
   ./workspace exec rm "$creds/keyring"
   sql=deployments/docker/unrevealed-rounds.sql
@@ -72,17 +91,23 @@ done
   ./workspace exec test ! -e "$creds/keyring"
   mv "$tmp/original-query" "$sql"
   ./workspace exec rm "$creds/gateway-token"
-  export ORVEX_WORKSPACE_ID ORVEX_UID ORVEX_GID
-  ORVEX_WORKSPACE_ID=$(basename "$(git rev-parse --absolute-git-dir)"/orvex-wt-*)
-  ORVEX_UID=$(id -u)
-  ORVEX_GID=$(id -g)
+  rc=0
+  ./workspace preview > "$tmp/key-loss.log" 2>&1 || rc=$?
+  [[ $rc == 3 ]] || { echo "missing key with a sealed round returned $rc, want 3" >&2; exit 1; }
+  ./workspace exec test ! -e "$creds/keyring"
+  ./workspace exec test ! -e "$creds/gateway-token"
+  "$tmp/a/workspace" exec cat "$creds/keyring" > "$tmp/wrong-keyring"
+  if ./workspace restore-keyring "$tmp/wrong-keyring"; then
+    echo 'restored another preview’s valid keyring over an unsettled round' >&2
+    exit 1
+  fi
+  ./workspace exec test ! -e "$creds/keyring"
   cat > "$tmp/legacy.yaml" <<'EOF'
 services:
   dev:
     volumes: !override ["../..:/workspace"]
     depends_on: !reset {}
 EOF
-  compose=(docker compose -p "$ORVEX_WORKSPACE_ID" -f deployments/docker/compose.yaml -f .devcontainer/compose.yaml)
   "${compose[@]}" -f "$tmp/legacy.yaml" up -d --no-deps --force-recreate dev
   old_dev=$("${compose[@]}" ps -q dev)
   docker exec "$old_dev" python3 -c 'import secrets
@@ -117,3 +142,5 @@ for kind in container network volume; do
 done
 "$tmp/b/workspace" exec ./bin/crashctl migrate status | grep -F "${version} probe_b applied"
 [[ $("$tmp/b/workspace" exec sha256sum "$creds/keyring") == "${fingerprint[b]}" ]] || { echo 'collection changed the other preview keyring' >&2; exit 1; }
+
+echo "PASS: preview key loss, backup recovery and worktree isolation"

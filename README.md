@@ -177,7 +177,7 @@ Compose with support for the `!reset` tag. Git operations stay on the host.
 | `./workspace devcontainer` | Start it through the optional Dev Container CLI (which must be installed) and report its container ID for attachment. |
 | `./workspace preview` | Start private PostgreSQL, build this checkout's crashctl, apply its migrations, create the preview's demo credentials and show schema status. Run it again to upgrade an older preview. |
 | `./workspace recreate` | Replace only the development container. The database and the credentials stay. |
-| `./workspace restore-keyring FILE` | Copy a backed-up keyring into the preview. It refuses to overwrite one that exists. |
+| `./workspace restore-keyring FILE` | Restore a keyring into an empty slot after checking its format and opening every unsettled sealed round with it. |
 | `./workspace stop` | Stop this project's containers and retain the database and the credentials. |
 | `./workspace dispose` | Remove this project's containers, network, database volume and credentials volume immediately. |
 

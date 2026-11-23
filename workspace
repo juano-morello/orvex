@@ -146,6 +146,7 @@ case "${1:-}" in
   restore-keyring)
     [[ -f ${2:-} ]] || { echo 'usage: ./workspace restore-keyring FILE' >&2; exit 2; }
     "${compose[@]}" run --rm -T --no-deps credentials
+    "${compose[@]}" up -d --wait --no-deps postgres
     exec "${compose[@]}" run --rm -T --no-deps dev python3 deployments/docker/demo-credentials.py restore "$creds" < "$2"
     ;;
   devcontainer)

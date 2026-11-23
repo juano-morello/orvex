@@ -24,6 +24,7 @@ import base64
 import json
 import os
 import secrets
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -139,6 +140,15 @@ def main(argv: list[str]) -> int:
         data = sys.stdin.buffer.read((64 << 10) + 1)
         if not data or len(data) > 64 << 10:
             print("keyring: empty or oversized backup", file=sys.stderr)
+            return EXIT_UNSAFE
+        if (args.directory / "keyring").exists():
+            print("keyring: a keyring already exists", file=sys.stderr)
+            return EXIT_UNSAFE
+        verifier = subprocess.run(
+            ["go", "run", "-buildvcs=false", "./deployments/docker/check-keyring"],
+            input=data, check=False,
+        )
+        if verifier.returncode:
             return EXIT_UNSAFE
         if not create_once(args.directory / "keyring", data):
             print("keyring: a keyring already exists", file=sys.stderr)

@@ -40,6 +40,7 @@ jobs:
           cache-dependency-path: go.mod
       - run: make test-integration
       - run: make test-acceptance
+      - run: deployments/docker/tests/worktree-isolation.sh
 
   lint:
     runs-on: ubuntu-latest
