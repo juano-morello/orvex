@@ -7,6 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/juano-morello/orvex/internal/game"
 	"github.com/juano-morello/orvex/internal/persistence/eventstore"
 	orvexv1 "github.com/juano-morello/orvex/proto/orvex/v1"
@@ -19,12 +22,15 @@ const feedFrames = 4 * batchLimit
 // one reader reads its records from the database, a batch at a time after
 // each wakeup or poll, and maps each record to its public frame once. Each
 // subscriber sends from the feed's buffer at its own pace, so the
-// database work of a round does not grow with its subscribers, and a
+// live tail is read once per round, and a
 // subscriber that stops reading blocks only its own stream. The buffer
 // keeps the newest feedFrames frames; a subscriber whose cursor is older
-// reads the database itself until it reaches the buffer.
+// replays shared historical pages until it reaches the buffer.
 type feed struct {
 	round [16]byte
+	// history pages contain immutable public frames. The server-wide historyRead
+	// token protects this cache, including the fill on a miss.
+	history [8]historyPage
 	// kick asks the reader to start a read now.
 	kick   chan struct{}
 	cancel context.CancelFunc
@@ -61,6 +67,7 @@ func (s *server) joinFeed(round [16]byte, next uint64) *feed {
 		f = &feed{round: round, kick: make(chan struct{}, 1), cancel: cancel, base: next, changed: make(chan struct{})}
 		if s.feeds == nil {
 			s.feeds = make(map[[16]byte]*feed)
+			s.historyRead = make(chan struct{}, 1)
 		}
 		s.feeds[round] = f
 		s.readers.Go(func() { s.readFeed(ctx, f) })
@@ -239,4 +246,49 @@ func (f *feed) view(next uint64) view {
 		return view{err: f.err}
 	}
 	return view{changed: f.changed}
+}
+
+// historyPage covers up to batchLimit records at an aligned sequence. A nil
+// frame marks a record that could not be mapped. Readers stop at that record.
+type historyPage struct {
+	start  uint64
+	frames []*orvexv1.SubscribeRoundResponse
+}
+
+// historyFrames shares an aligned page across subscribers, including those
+// that reconnect at different offsets in the same page. Hold the token only
+// while looking up or filling the cache. Network sends happen after release.
+func (s *server) historyFrames(ctx context.Context, f *feed, next uint64) ([]*orvexv1.SubscribeRoundResponse, error) {
+	select {
+	case s.historyRead <- struct{}{}:
+		defer func() { <-s.historyRead }()
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
+	case <-s.done:
+		return nil, status.Error(codes.Unavailable, "engine shutting down")
+	}
+	pageNumber := next / batchLimit
+	start := pageNumber * batchLimit
+	offset := next - start
+	slot := &f.history[pageNumber%uint64(len(f.history))]
+	if slot.start != start || offset >= uint64(len(slot.frames)) {
+		tail, err := eventstore.ReadTail(ctx, s.db, f.round, start, batchLimit)
+		if err != nil {
+			return nil, s.subscribeError(ctx, err)
+		}
+		if offset >= uint64(len(tail.Records)) {
+			return nil, s.subscribeError(ctx, eventstore.ErrCorrupt)
+		}
+		frames := make([]*orvexv1.SubscribeRoundResponse, len(tail.Records))
+		for i, r := range tail.Records {
+			frame, err := publicRecord(f.round, r)
+			if err != nil {
+				s.log.Error("engineapi: map historical record", "error", err.Error())
+				continue
+			}
+			frames[i] = frame
+		}
+		*slot = historyPage{start: start, frames: frames}
+	}
+	return slot.frames[offset:], nil
 }

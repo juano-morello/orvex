@@ -128,6 +128,8 @@ type server struct {
 	feedsMu sync.Mutex
 	feeds   map[[16]byte]*feed
 	readers sync.WaitGroup
+	// historyRead limits all historical replay to one database connection per engine.
+	historyRead chan struct{}
 }
 
 func (s *server) GetCurrentRound(ctx context.Context, _ *orvexv1.GetCurrentRoundRequest) (*orvexv1.GetCurrentRoundResponse, error) {
@@ -301,11 +303,18 @@ func (s *server) SubscribeRound(req *orvexv1.SubscribeRoundRequest, stream grpc.
 	}
 	for {
 		v := f.view(next)
+		if v.behind {
+			v.frames, err = s.historyFrames(ctx, f, next)
+			if err != nil {
+				return err
+			}
+		}
 		switch {
-		case v.behind:
-			next, err = s.catchUp(stream, round, next)
 		case len(v.frames) > 0:
 			for _, frame := range v.frames {
+				if frame == nil {
+					return s.subscribeError(ctx, errBadRecord)
+				}
 				if err = stream.Send(frame); err != nil {
 					break
 				}
@@ -373,29 +382,6 @@ func (st roundState) judge(next uint64) error {
 		return status.Error(codes.OutOfRange, "the cursor is the round's last record")
 	}
 	return nil
-}
-
-// catchUp sends, from this subscriber's own read, one batch of the round's
-// records from sequence next, and returns the sequence after the last one
-// sent. It serves a cursor older than the feed's buffer.
-func (s *server) catchUp(stream grpc.ServerStreamingServer[orvexv1.SubscribeRoundResponse], round [16]byte, next uint64) (uint64, error) {
-	ctx := stream.Context()
-	tail, err := eventstore.ReadTail(ctx, s.db, round, next, batchLimit)
-	if err != nil {
-		return next, s.subscribeError(ctx, err)
-	}
-	for _, r := range tail.Records {
-		frame, err := publicRecord(round, r)
-		if err != nil {
-			s.log.Error("engineapi: map record", "error", err.Error())
-			return next, status.Error(codes.Internal, "internal error")
-		}
-		if err := stream.Send(frame); err != nil {
-			return next, err
-		}
-		next = r.Sequence + 1
-	}
-	return next, nil
 }
 
 // await waits for changed to close, ending the subscription when its

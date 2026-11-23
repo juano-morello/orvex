@@ -442,27 +442,42 @@ func TestSubscribeJudgesTheCursorOnAFreshRead(t *testing.T) {
 	eventually(t, "subscriptions still running after the round completed", func() bool { return r.active.Load() == 0 })
 }
 
-// TestSubscribeBeyondTheFeedBuffer follows a live round longer than a
-// feed's buffer, so the feed has dropped its oldest frames when a second
-// subscriber joins from genesis. That subscriber reads the dropped frames
-// from the database, then the rest from the feed. Both get the complete
-// round, gapless and without repeats.
+// Late subscribers resume at different offsets of the same historical pages.
+// Their read count is bounded by the number of pages plus live polls.
 func TestSubscribeBeyondTheFeedBuffer(t *testing.T) {
 	const n = feedFrames + batchLimit + 1
 	r := newRig(t)
 	round := r.round(t, n, false)
 	first := r.follow(t, round, nil)
 	eventually(t, "the first subscriber did not reach the head", func() bool { return first.frames.Load() == n })
-	late := r.follow(t, round, nil)
-	eventually(t, "the late subscriber did not reach the head", func() bool { return late.frames.Load() == n })
+
+	before := r.reads.Load()
+	start := time.Now()
+	var late [24]*follower
+	for i := range late {
+		after := uint64(i) //nolint:gosec // G115: array index
+		late[i] = r.follow(t, round, &after)
+	}
+	eventually(t, "historical subscribers did not catch up", func() bool {
+		for i, f := range late {
+			if f.frames.Load() != int64(n-i-1) {
+				return false
+			}
+		}
+		return true
+	})
+	// Two historical pages, a possible in-flight poll and regular polls.
+	limit := int64(3 + time.Since(start)/pollInterval)
+	if got := r.reads.Load() - before; got > limit {
+		t.Errorf("catch-up used %d reads, want at most %d", got, limit)
+	}
 
 	r.settle(t, round)
 	want := r.committed(t, round)
-	if len(want) != n+3 {
-		t.Fatalf("%d committed records, want %d", len(want), n+3)
-	}
 	first.wait(t).check(t, want, codes.OK)
-	late.wait(t).check(t, want, codes.OK)
+	for i, f := range late {
+		f.wait(t).check(t, want[i+1:], codes.OK)
+	}
 	eventually(t, "subscriptions still running after the round completed", func() bool { return r.active.Load() == 0 })
 }
 
