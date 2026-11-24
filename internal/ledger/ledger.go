@@ -59,9 +59,15 @@ type Rule interface {
 
 // Reserved system account names.
 const (
-	HouseAccountName = "house"
-	RoundAccountName = "round_pool"
+	HouseAccountName  = "house"
+	RoundAccountName  = "round_pool"
+	FaucetAccountName = "faucet"
 )
+
+// KindGrant is the ledger transaction kind of an operator grant: one
+// posting from the faucet account to a player's account, outside every
+// round.
+const KindGrant = "grant"
 
 // ErrInvalidEvents reports events a rule cannot post: a foreign event type
 // or an amount outside the rule's range.

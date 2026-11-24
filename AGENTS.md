@@ -48,6 +48,9 @@ If a change conflicts with, or needs to deviate from, an ADR, say so explicitly 
 
 - `make build`: build all binaries into `bin/`.
 - `make build-gateway`, `make build-engine`, `make build-crashctl`: build one binary.
+- `make proto` lints the engine protocol and generates its Go bindings. Run `make proto-check` to verify that the committed files match.
+- `make test-acceptance` runs the two-player lost-response and engine-restart scenarios against the real binaries and PostgreSQL. It requires Docker and accepts `GOTESTFLAGS`.
+- `crashctl ledger grant GRANT_KEY PLAYER_ID CREDITS` adds demo credits. Reuse the same key and operands when retrying a grant.
 - `make test`: `go test -race ./...`. Override with `make test GOTESTFLAGS=` on hosts without cgo.
 - `make test-integration`: the tests plus the PostgreSQL integration tests (`-tags integration`, Testcontainers). It needs a Docker daemon and fails without one. Override with `make test-integration GOTESTFLAGS=` on hosts without cgo. The fuzz and repeat targets take `GOTESTFLAGS` too.
 - `make lint`: golangci-lint. It requires v2.14.0. The pin lives in both `Makefile` and `.github/workflows/ci.yml`; change both together.

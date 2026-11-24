@@ -10,7 +10,10 @@
 // global "house" account) that the executor resolves to account IDs.
 // HouseAccountID, RoundAccountID and TransactionID derive RFC 9562 UUIDv8
 // IDs from SHA-256, so the postings of a round are a pure function of its
-// chain and a later audit stage can recompute them.
+// chain and a later audit stage can recompute them. FaucetAccountID and
+// GrantTransactionID name the global faucet account and the ledger
+// transaction of an operator grant, which is outside every round
+// (internal/runtime/grant).
 //
 // The package does no I/O and reads no clock or randomness: it imports only
 // the standard library's hashing and formatting packages and the game

@@ -301,18 +301,11 @@ func (e *Executor) ExecuteNext(ctx context.Context, lease Lease) (Outcome, error
 
 		if !en.loaded {
 			tr, checkFirst = nil, false
-			err := e.load(ctx, en, lease)
-			switch {
-			case err == nil:
-			case errors.Is(err, errTransient):
-				lastErr, wait = err, true
-				continue
-			case errors.Is(err, ErrFenced), errors.Is(err, ErrRoundNotFound), errors.Is(err, ErrInternal):
-				e.drop(lease.RoundID, en)
-				return Outcome{}, err
-			case errors.Is(err, ErrCorrupt), errors.Is(err, ErrUnknownRules):
-				return Outcome{}, halt(en, err)
-			default:
+			if err := e.coldLoad(ctx, en, lease); err != nil {
+				if errors.Is(err, errTransient) {
+					lastErr, wait = err, true
+					continue
+				}
 				return Outcome{}, err
 			}
 		}
@@ -413,6 +406,56 @@ func (e *Executor) ExecuteNext(ctx context.Context, lease Lease) (Outcome, error
 		}
 	}
 	return Outcome{}, fmt.Errorf("%w: %w", ErrUnavailable, lastErr)
+}
+
+// coldLoad runs the cold load into en and applies its error table:
+// ErrFenced, ErrRoundNotFound and ErrInternal drop the entry, ErrCorrupt
+// and ErrUnknownRules halt the round, and errTransient is left for the
+// caller to retry.
+func (e *Executor) coldLoad(ctx context.Context, en *entry, lease Lease) error {
+	err := e.load(ctx, en, lease)
+	switch {
+	case errors.Is(err, ErrFenced), errors.Is(err, ErrRoundNotFound), errors.Is(err, ErrInternal):
+		e.drop(lease.RoundID, en)
+	case errors.Is(err, ErrCorrupt), errors.Is(err, ErrUnknownRules):
+		return halt(en, err)
+	}
+	return err
+}
+
+// State returns the round's state after its last executed record, from the
+// cache or from a cold load under lease (E-3). It is the rules version's
+// state type, for crash/v1 a v1.State, and holds the round's secrets: never
+// log, format or send it, and do not mutate it. A halted round returns its
+// halt. The cache is not checked against the fencing token: a superseded
+// lease is detected by its next Transaction B.
+func (e *Executor) State(ctx context.Context, lease Lease) (any, error) {
+	if err := lease.validate(); err != nil {
+		return nil, err
+	}
+	en := e.lock(lease.RoundID)
+	defer en.mu.Unlock()
+	if en.halt != nil {
+		return nil, en.halt
+	}
+	var lastErr error
+	for attempt := 1; !en.loaded; attempt++ {
+		if attempt > e.cfg.MaxAttempts {
+			return nil, fmt.Errorf("%w: %w", ErrUnavailable, lastErr)
+		}
+		if attempt > 1 {
+			if err := e.sleep(ctx, backoff(attempt)); err != nil {
+				return nil, contextError(ctx, err)
+			}
+		}
+		if err := e.coldLoad(ctx, en, lease); err != nil {
+			if !errors.Is(err, errTransient) {
+				return nil, err
+			}
+			lastErr = err
+		}
+	}
+	return en.state, nil
 }
 
 // Drain calls ExecuteNext until nothing is pending, limit commands ran, or

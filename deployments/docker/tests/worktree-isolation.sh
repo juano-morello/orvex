@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run from any directory in the checkout containing the launcher under test.
 set -euo pipefail
+declare -A fingerprint
 source_root=$(git rev-parse --show-toplevel)
 tmp=$(mktemp -d)
 root=$tmp/repo
@@ -19,7 +20,7 @@ git clone --quiet --no-hardlinks "$source_root" "$root"
 cp "$source_root/workspace" "$root/"
 mkdir -p "$root/.devcontainer"
 cp "$source_root/.devcontainer/compose.yaml" "$root/.devcontainer/"
-cp "$source_root/deployments/docker/compose.yaml" "$root/deployments/docker/"
+cp "$source_root/deployments/docker/"{compose.yaml,demo-credentials.py,unrevealed-rounds.sql} "$root/deployments/docker/"
 for label in a b; do
   dir=$tmp/$label
   git -C "$root" worktree add --quiet --detach "$dir" HEAD
@@ -27,8 +28,9 @@ for label in a b; do
   cp "$root/workspace" "$dir/"
   mkdir -p "$dir/.devcontainer"
   cp "$root/.devcontainer/compose.yaml" "$dir/.devcontainer/"
-  cp "$root/deployments/docker/compose.yaml" "$dir/deployments/docker/"
-  last=$(basename "$(ls "$dir"/migrations/*.up.sql | tail -1)")
+  cp "$root/deployments/docker/"{compose.yaml,demo-credentials.py,unrevealed-rounds.sql} "$dir/deployments/docker/"
+  migrations=("$dir"/migrations/*.up.sql)
+  last=${migrations[-1]##*/}
   printf -v version '%04d' "$((10#${last%%_*} + 1))"
   base="$dir/migrations/${version}_probe_$label"
   echo "CREATE TABLE orvex.probe_$label (id integer);" > "$base.up.sql"
@@ -43,6 +45,91 @@ for label in a b; do
   grep -F "${version} probe_$label applied" "$tmp/$label.log" || failed=1
 done
 ((failed == 0))
+# Each preview owns a credentials volume for the host user, and no two share a key.
+creds=/var/lib/orvex-preview
+want="$(id -u):$(id -g) 700"
+for label in a b; do
+  got=$("$tmp/$label/workspace" exec stat -c '%u:%g %a' "$creds")
+  [[ $got == "$want" ]] || { echo "$label credentials directory is $got, want $want" >&2; exit 1; }
+  [[ $("$tmp/$label/workspace" exec stat -c %a "$creds/keyring") == 600 ]]
+  fingerprint[$label]=$("$tmp/$label/workspace" exec sha256sum "$creds/keyring")
+done
+[[ ${fingerprint[a]} != "${fingerprint[b]}" ]] || { echo 'previews share a keyring' >&2; exit 1; }
+# An old dev container has no credentials mount. Recovery must write to its
+# project's volume without replacing the container that may still hold a key.
+(
+  cd "$tmp/b"
+  umask 077
+  export ORVEX_WORKSPACE_ID ORVEX_UID ORVEX_GID
+  ORVEX_WORKSPACE_ID=$(basename "$(git rev-parse --absolute-git-dir)"/orvex-wt-*)
+  ORVEX_UID=$(id -u)
+  ORVEX_GID=$(id -g)
+  compose=(docker compose -p "$ORVEX_WORKSPACE_ID" -f deployments/docker/compose.yaml -f .devcontainer/compose.yaml)
+  ./workspace exec make build-engine
+  "${compose[@]}" exec -d dev sh -c 'echo $$ > /tmp/orvex-engine.pid
+    export ORVEX_SECRET_KEYRING_FILE=/var/lib/orvex-preview/keyring
+    export ORVEX_GATEWAY_TOKEN_FILE=/var/lib/orvex-preview/gateway-token
+    export ORVEX_ENGINE_ADDR=127.0.0.1:0 ORVEX_BETTING_WINDOW=1h
+    exec ./bin/engine'
+  sealed=0
+  for ((i=0; i<60; i++)); do
+    sealed=$("${compose[@]}" exec -T postgres psql -XqAt -v ON_ERROR_STOP=1 -U orvex -d orvex < deployments/docker/unrevealed-rounds.sql)
+    [[ $sealed == 0 ]] || break
+    sleep 1
+  done
+  [[ $sealed == 1 ]] || { echo 'engine did not create a sealed round' >&2; exit 1; }
+  ./workspace exec sh -c 'kill -TERM "$(cat /tmp/orvex-engine.pid)"'
+  ./workspace exec cat "$creds/keyring" > "$tmp/original-keyring"
+  ./workspace exec rm "$creds/keyring"
+  sql=deployments/docker/unrevealed-rounds.sql
+  cp "$sql" "$tmp/original-query"
+  echo 'SELECT 1 / 0;' > "$sql"
+  if ./workspace preview > "$tmp/query-failure.log" 2>&1; then
+    echo 'preview created credentials after the database check failed' >&2
+    exit 1
+  fi
+  ./workspace exec test ! -e "$creds/keyring"
+  mv "$tmp/original-query" "$sql"
+  ./workspace exec rm "$creds/gateway-token"
+  rc=0
+  ./workspace preview > "$tmp/key-loss.log" 2>&1 || rc=$?
+  [[ $rc == 3 ]] || { echo "missing key with a sealed round returned $rc, want 3" >&2; exit 1; }
+  ./workspace exec test ! -e "$creds/keyring"
+  ./workspace exec test ! -e "$creds/gateway-token"
+  "$tmp/a/workspace" exec cat "$creds/keyring" > "$tmp/wrong-keyring"
+  if ./workspace restore-keyring "$tmp/wrong-keyring"; then
+    echo 'restored another preview’s valid keyring over an unsettled round' >&2
+    exit 1
+  fi
+  ./workspace exec test ! -e "$creds/keyring"
+  cat > "$tmp/legacy.yaml" <<'EOF'
+services:
+  dev:
+    volumes: !override ["../..:/workspace"]
+    depends_on: !reset {}
+EOF
+  "${compose[@]}" -f "$tmp/legacy.yaml" up -d --no-deps --force-recreate dev
+  old_dev=$("${compose[@]}" ps -q dev)
+  docker exec "$old_dev" python3 -c 'import secrets
+from pathlib import Path
+p = Path("/tmp/.local/state/orvex-demo/gateway-token")
+p.parent.mkdir(mode=0o700, parents=True)
+p.write_text(secrets.token_hex(32) + "\n")
+p.chmod(0o600)'
+  docker exec "$old_dev" cat /tmp/.local/state/orvex-demo/gateway-token | sha256sum > "$tmp/token-before"
+  ./workspace restore-keyring "$tmp/original-keyring"
+  [[ $("${compose[@]}" ps -q dev) == "$old_dev" ]]
+  if ./workspace restore-keyring "$tmp/original-keyring"; then
+    echo 'restore overwrote the stored keyring' >&2
+    exit 1
+  fi
+)
+# Recreating the development container and repeating the preview keep the key.
+"$tmp/b/workspace" recreate
+"$tmp/b/workspace" exec cat "$creds/gateway-token" | sha256sum > "$tmp/token-after"
+cmp "$tmp/token-before" "$tmp/token-after"
+"$tmp/b/workspace" preview > "$tmp/b2.log"
+[[ $("$tmp/b/workspace" exec sha256sum "$creds/keyring") == "${fingerprint[b]}" ]] || { echo 'recreate changed the keyring' >&2; exit 1; }
 project=$(basename "$(git -C "$tmp/a" rev-parse --absolute-git-dir)"/orvex-wt-*)
 git -C "$root" worktree remove --force "$tmp/a"
 "$root/workspace" gc
@@ -54,3 +141,6 @@ for kind in container network volume; do
   [[ -z $remaining ]] || { echo "$project still has $kind resources" >&2; exit 1; }
 done
 "$tmp/b/workspace" exec ./bin/crashctl migrate status | grep -F "${version} probe_b applied"
+[[ $("$tmp/b/workspace" exec sha256sum "$creds/keyring") == "${fingerprint[b]}" ]] || { echo 'collection changed the other preview keyring' >&2; exit 1; }
+
+echo "PASS: preview key loss, backup recovery and worktree isolation"

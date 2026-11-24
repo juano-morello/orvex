@@ -28,6 +28,7 @@ jobs:
           cache-dependency-path: go.mod
       - run: make test
       - run: make golden-check
+      - run: make proto-check
 
   integration:
     runs-on: ubuntu-latest
@@ -38,6 +39,8 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: go.mod
       - run: make test-integration
+      - run: make test-acceptance
+      - run: deployments/docker/tests/worktree-isolation.sh
 
   lint:
     runs-on: ubuntu-latest

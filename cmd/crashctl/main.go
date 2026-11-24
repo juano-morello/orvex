@@ -3,9 +3,10 @@
 // (ADR-001, ADR-006; decision A-16 and section 7 of
 // docs/specs/8bebb70f_canonical-codec-audit-cli.md), exports a round's
 // history from PostgreSQL: crashctl audit export (LBT-19,
-// docs/specs/73dbe98d_audit-export-cli.md), and migrates the PostgreSQL
+// docs/specs/73dbe98d_audit-export-cli.md), migrates the PostgreSQL
 // schema: crashctl migrate up|down|status (ADR-005; decision P-6 of
-// docs/specs/17380a6e_postgresql-schema-migrations.md). It reads history
+// docs/specs/17380a6e_postgresql-schema-migrations.md), and grants
+// simulated credits to a player: crashctl ledger grant. It reads history
 // formats v1 and v2; for v2, audit verify adds the ledger stage (LBT-18,
 // docs/specs/ac81f88f_audit-ledger-stage.md).
 package main
@@ -38,20 +39,22 @@ const usage = `usage: crashctl [-version]
        crashctl migrate up [-to N]
        crashctl migrate down -to N
        crashctl migrate status
+       crashctl ledger grant GRANT_KEY PLAYER_ID CREDITS
 FILE "-" reads standard input (export: writes standard output).
-ORVEX_DATABASE_URL names the database for migrate and export (a PostgreSQL URL or key=value connection string).
+ORVEX_DATABASE_URL names the database for migrate, export and ledger grant (a PostgreSQL URL or key=value connection string).
 ORVEX_SECRET_KEYRING_FILE names the keyring audit export -unsettled reads to open a sealed, unrevealed round secret.
 `
 
-// Exit codes (spec section 7; 5 and 6: LBT-19 X-9).
+// Exit codes (spec section 7; 5 and 6: LBT-19 X-9; 7: ledger grant).
 const (
-	exitOK          = 0
-	exitFailed      = 1
-	exitUsage       = 2
-	exitUnsupported = 3
-	exitIO          = 4
-	exitNotFound    = 5
-	exitNotSettled  = 6
+	exitOK             = 0
+	exitFailed         = 1
+	exitUsage          = 2
+	exitUnsupported    = 3
+	exitIO             = 4
+	exitNotFound       = 5
+	exitNotSettled     = 6
+	exitGrantKeyReused = 7
 )
 
 func main() {
@@ -61,7 +64,8 @@ func main() {
 // run is the testable entry point. Exit codes: 0 success or help, 1
 // verification failed (or -version could not write), 2 usage error, 3
 // unsupported artifact, 4 I/O error; crashctl audit export adds 5 round not
-// found and 6 round not settled.
+// found and 6 round not settled; crashctl ledger grant adds 7 grant key
+// already used for another grant.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -86,6 +90,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runAudit(fs.Args()[1:], stdin, stdout, stderr)
 	case !*showVersion && fs.Arg(0) == "migrate":
 		return runMigrate(fs.Args()[1:], stdout, stderr)
+	case !*showVersion && fs.Arg(0) == "ledger":
+		return runLedger(fs.Args()[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "%s: unexpected arguments: %v\n", name, fs.Args())
 		return exitUsage

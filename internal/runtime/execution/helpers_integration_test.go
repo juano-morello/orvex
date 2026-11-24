@@ -74,25 +74,6 @@ func roundConfig(roundID [16]byte, seed [32]byte, maxBet, maxBets int64) v1.Conf
 	return v1.Config{RoundID: roundID, Seed: seed, MinBetCredits: 1, MaxBetCredits: maxBet, MaxBets: maxBets}
 }
 
-// seedWithDeadline scans 32-byte big-endian counters from 1 (the all-zero
-// seed is invalid) until crash/v1 gives min <= D <= max µs.
-func seedWithDeadline(t *testing.T, roundID [16]byte, minD, maxD time.Duration) [32]byte {
-	t.Helper()
-	for n := uint64(1); n <= 100_000; n++ {
-		var seed [32]byte
-		binary.BigEndian.PutUint64(seed[24:], n)
-		s, err := v1.Rules{}.InitialState(roundConfig(roundID, seed, 1_000_000_000, 100))
-		if err != nil {
-			continue
-		}
-		if d := s.CrashDeadlineOffsetMicros; d >= minD.Microseconds() && d <= maxD.Microseconds() {
-			return seed
-		}
-	}
-	t.Fatalf("no seed with D in [%v, %v]", minD, maxD)
-	return [32]byte{}
-}
-
 // testSeed is a valid seed for rounds whose timing does not matter.
 var testSeed = func() [32]byte {
 	var s [32]byte

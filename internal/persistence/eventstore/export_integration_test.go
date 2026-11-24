@@ -130,9 +130,9 @@ func TestExportGoldenHistories(t *testing.T) {
 			if rep.Format != verification.Format {
 				t.Errorf("report format = %q", rep.Format)
 			}
-			if exp.RoundID != l.RoundID || exp.Records != h.Records || exp.Head != hash(t, h.Head) || rep.Head != exp.Head {
-				t.Errorf("export = {round %x, records %d, head %s}, want {%x, %d, %s}",
-					exp.RoundID, exp.Records, exp.Head, l.RoundID, h.Records, h.Head)
+			if exp.RoundID != l.RoundID || exp.Records != h.Records || exp.RoundRecords != h.Records || exp.Head != hash(t, h.Head) || rep.Head != exp.Head {
+				t.Errorf("export = {round %x, records %d of %d, head %s}, want {%x, %d of %d, %s}",
+					exp.RoundID, exp.Records, exp.RoundRecords, exp.Head, l.RoundID, h.Records, h.Records, h.Head)
 			}
 			if exp.RoundRecords != h.Records {
 				t.Errorf("export round records = %d, want %d", exp.RoundRecords, h.Records)
@@ -161,8 +161,8 @@ func TestExportStopsAtLatestSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExportHistory: %v", err)
 	}
-	if exp.Records != 10 || exp.Head != l.Hashes[9] {
-		t.Errorf("export = {records %d, head %s}, want {10, %s}", exp.Records, exp.Head, l.Hashes[9])
+	if exp.Records != 10 || exp.RoundRecords != 23 || exp.Head != l.Hashes[9] {
+		t.Errorf("export = {records %d of %d, head %s}, want {10 of 23, %s}", exp.Records, exp.RoundRecords, exp.Head, l.Hashes[9])
 	}
 	if exp.RoundRecords != 23 {
 		t.Errorf("export round records = %d, want 23", exp.RoundRecords)

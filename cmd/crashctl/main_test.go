@@ -41,6 +41,7 @@ func TestRun(t *testing.T) {
 		{name: "usage lists migrate", args: nil, wantCode: 2, wantStderr: "crashctl migrate up [-to N]"},
 		{name: "usage lists export", args: nil, wantCode: 2, wantStderr: "crashctl audit export [-unsettled] [-format NAME] ROUND_ID FILE"},
 		{name: "usage names the keyring", args: nil, wantCode: 2, wantStderr: "ORVEX_SECRET_KEYRING_FILE"},
+		{name: "usage lists ledger grant", args: nil, wantCode: 2, wantStderr: "crashctl ledger grant GRANT_KEY PLAYER_ID CREDITS"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

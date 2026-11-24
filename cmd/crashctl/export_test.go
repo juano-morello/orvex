@@ -139,11 +139,11 @@ func TestExportUsage(t *testing.T) {
 func TestExportFormatUnsupported(t *testing.T) {
 	t.Setenv(databaseURLEnv, unreachableDSN)
 	file := filepath.Join(t.TempDir(), "out.jsonl")
-	code, stdout, stderr := exportCmd(t, "-format", "orvex/audit-history/v2", exportRoundID, file)
+	code, stdout, stderr := exportCmd(t, "-format", "orvex/audit-history/v99", exportRoundID, file)
 	if code != exitUnsupported || stdout != "" {
 		t.Errorf("exit code = %d, stdout %q; want %d and empty", code, stdout, exitUnsupported)
 	}
-	want := "crashctl: audit export: format orvex/audit-history/v2 unsupported: this build writes orvex/audit-history/v1\n"
+	want := "crashctl: audit export: format orvex/audit-history/v99 unsupported: this build writes orvex/audit-history/v1 and orvex/audit-history/v2\n"
 	if stderr != want {
 		t.Errorf("stderr = %q, want %q", stderr, want)
 	}

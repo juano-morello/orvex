@@ -152,7 +152,7 @@ func totalsSnapshot(t *testing.T, pool *pgxpool.Pool) map[string]account {
 }
 
 func TestConflictingPerRoundCommits(t *testing.T) {
-	seed := seedWithDeadline(t, conflictRoundID, time.Second, 10*time.Second)
+	seed := roundtest.SeedWithDeadline(t, conflictRoundID, time.Second, 10*time.Second)
 
 	// The sequential reference run.
 	_, refPool := newDB(t)
