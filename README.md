@@ -31,7 +31,7 @@ Status: scaffold ([LBT-5](https://linear.app/lbtworks/issue/LBT-5/scaffold-go-mo
 
 ## Development
 
-Prerequisites: Go 1.26 (the module requires 1.26.0), golangci-lint v2.14.0, Python 3.11 or newer (standard library only; used by `make golden-check` and the demo credentials), a Docker-compatible daemon (used by `make test-integration`) and, for the demo round, `curl`.
+Prerequisites: Go 1.26 (the module requires 1.26.0), golangci-lint v2.14.0, Python 3.11 or newer (standard library only; used by `make golden-check` and the demo credentials), a Docker-compatible daemon (used by `make test-integration`) and, for the shell demo, `curl`. The browser console requires Node 24.12+ and pnpm 10.34.9. CI uses the Node version in `web/.node-version`. Browser tests also require Playwright Chromium.
 
 Buf needs a newer Go than the module. `make proto` and `make proto-check` run Buf v1.75.0, which declares Go 1.26.7, while `go.mod` keeps `go 1.26.0`. With the default `GOTOOLCHAIN=auto`, Go downloads a 1.26.7 or later toolchain for those targets, so they need network access on a host with an older 1.26.x; with `GOTOOLCHAIN=local`, install Go 1.26.7 or later. The generators in `buf.gen.yaml` are pinned independently: `protoc-gen-go` v1.36.12 matches the `google.golang.org/protobuf` runtime in `go.mod`, while `protoc-gen-go-grpc` v1.6.2 is a separate module with its own version line. Its output needs `grpc.SupportPackageIsVersion9`, which the `google.golang.org/grpc` runtime in `go.mod` provides. Change a generator or a runtime together with `make proto` and a commit of the regenerated files.
 
@@ -116,6 +116,41 @@ gateway_pid=$!
 ```
 
 In a preview, services started in a `./workspace shell` stop when that shell exits. Keep the shell open, or start them again as described under [Recreate and resume](#recreate-and-resume).
+
+### Play in two browsers
+
+With the funded players and services above running on the host, start the local console
+from the repository root (Node 24.12+ and pnpm 10.34.9):
+
+```sh
+cd web
+corepack enable pnpm
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+Open the loopback URL printed by Vite in two separate browser sessions. Enter Alice’s player token in one and Bob’s in the other, using the tokens from the operator’s private players file. Vite proxies `/v1` to the gateway at `127.0.0.1:8080`; set `ORVEX_GATEWAY_ADDR` before starting Vite if your gateway listens elsewhere. To serve the console under a subpath, set `ORVEX_WEB_BASE=/crash/` for both build and serve, and route that prefix’s `v1/` requests to the gateway.
+
+Place both bets while betting is open. Cash out in Alice’s session after the round starts. Refresh the page to recover the latest command and its payout. The browser keeps the player token, round ID and latest command in that tab’s session storage. **Leave session** clears them. At settlement both players can see the outcome in round activity and choose **Join current round**. The current receipt remains available until a different round is found. A disconnected tab pauses its multiplier and resumes the feed from the last record. If status lookup pauses after admission, use **Retry command recovery**, supplying a refreshed token for the same player if needed.
+
+To run the two-browser lost-response test, install the frontend dependencies and Chromium (`pnpm exec playwright install --with-deps chromium` from `web/`), then run `make test-browser` from the root. The test starts its own gateway, engine, PostgreSQL and Vite server. `pnpm build` typechecks and builds the console.
+
+### Verify a player's settled receipt
+
+Keep the player's tab on the finished round. The console retains the latest command in that tab. A command rejected during execution has a chain record and can be verified. An admission refusal, such as insufficient credits, has no chain record.
+
+1. As the operator, run `./bin/crashctl audit export -format orvex/audit-history/v2 ROUND_ID round.jsonl` with the auditor database connection. Share this file with the intended verifier. It includes the settled seed and the round's player commands and ledger rows.
+2. Supply the expected 64-character chain head through a separately trusted record or channel. For the local demo an auditor can read the latest committed hash directly from the settled database with the query below. A head copied from the JSONL header only checks internal consistency.
+3. Under **Verify settled receipt**, enter the player ID and expected head, select the export, and click **Verify receipt**. The browser runs the Go audit verifier in a worker and matches the local claim to the replayed command and outcome. The current receipt includes the original sequence and effective time. Older saved receipts are located by the player-scoped command ID.
+
+```sql
+SELECT encode(hash, 'hex') FROM orvex.chain_records
+WHERE round_id = :'round_id' ORDER BY sequence DESC LIMIT 1;
+```
+
+The verifier checks chain, fairness, decisions, state, and ledger against the supplied anchor. The operator controls that anchor in the local demo. The file stays on the device. Browser verification accepts files up to 32 MiB. The build script selects Go 1.26.11 for the verifier and its JavaScript runtime. The first build may download that toolchain. The script honors the `GO` executable override.
+
+### Play from the shell
 
 After both services report ready, the following Bash commands place Alice's bet and follow the round. They use `curl` and Python. Bob can use the same commands with his own token.
 

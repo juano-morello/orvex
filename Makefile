@@ -76,6 +76,7 @@ lint:
 		exit 1; \
 	fi
 	$(GOLANGCI_LINT) run ./...
+	GOOS=js GOARCH=wasm $(GOLANGCI_LINT) run ./cmd/receiptwasm
 
 golden-check:
 	$(PYTHON) $(GOLDEN_GEN) --check
@@ -175,3 +176,8 @@ clean:
 	rm -rf $(BIN_DIR)
 
 include proto/proto.mk
+
+.PHONY: test-browser
+test-browser:
+	cd web && GO="$(GO)" pnpm build
+	$(GO) test $(GOTESTFLAGS) -tags 'integration acceptance browser' -count=1 -run '^TestBrowserRound$$' ./tests/integration/firstround

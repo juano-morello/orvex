@@ -6,3 +6,8 @@ requests/
 
 # build output
 /bin/
+
+# Local package store and agent configuration
+.pnpm-store/
+/.codex/
+/.mcp.json

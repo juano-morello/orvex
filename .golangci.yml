@@ -4,6 +4,7 @@ run:
   build-tags:
     - integration
     - acceptance
+    - browser
 
 linters:
   default: standard

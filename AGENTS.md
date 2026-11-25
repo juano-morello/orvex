@@ -49,6 +49,7 @@ If a change conflicts with, or needs to deviate from, an ADR, say so explicitly 
 - `make build`: build all binaries into `bin/`.
 - `make build-gateway`, `make build-engine`, `make build-crashctl`: build one binary.
 - `make proto` lints the engine protocol and generates its Go bindings. Run `make proto-check` to verify that the committed files match.
+- `make test-browser` builds the console and runs the browser scenarios against PostgreSQL. Use Node 24.12+ (CI pin in `web/.node-version`), pnpm 10.34.9, and Chromium installed with `pnpm exec playwright install --with-deps chromium` in `web/` after `pnpm install --frozen-lockfile`. Run this target when changing `web/`, `cmd/receiptwasm/` or the browser harness. `make lint` includes the browser test tag and the js/wasm verifier.
 - `make test-acceptance` runs the two-player lost-response and engine-restart scenarios against the real binaries and PostgreSQL. It requires Docker and accepts `GOTESTFLAGS`.
 - `crashctl ledger grant GRANT_KEY PLAYER_ID CREDITS` adds demo credits. Reuse the same key and operands when retrying a grant.
 - `make test`: `go test -race ./...`. Override with `make test GOTESTFLAGS=` on hosts without cgo.
