@@ -32,6 +32,10 @@ func main() {
 		}
 		data := make([]byte, args[0].Length())
 		js.CopyBytesToGo(data, args[0])
+		// Bound historical replay before decoding. Every v2 record occupies one line.
+		if bytes.Count(data, []byte{'\n'}) > 4096 {
+			return "Browser limit is 4,096 history lines. Use crashctl to verify this export."
+		}
 		report, err := verification.Verify(bytes.NewReader(data), verification.Options{
 			Mode: verification.ModeVerify, Registry: reg, ExpectHead: &head, LedgerRules: []ledger.Rule{ledger.CrashV1()},
 		})
@@ -54,7 +58,7 @@ func main() {
 		if !ok || state.Phase != v1.PhaseSettled || report.Ledger == nil {
 			return "A settled Crash v1 history with v2 ledger evidence is required."
 		}
-		return ""
+		return true
 	}))
 	select {}
 }

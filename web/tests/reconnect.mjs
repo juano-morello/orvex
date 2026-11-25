@@ -58,6 +58,11 @@ try {
       record(2, {
         events: [
           { type: 'RoundCrashed', crashPointScaled: '19999' },
+          ...Array.from({ length: 250 }, (_, index) => ({
+            type: 'BetLost',
+            playerId: 'player' + index,
+            betCredits: '1',
+          })),
           { type: 'RoundSettled' },
         ],
       }),
@@ -79,6 +84,16 @@ try {
   available = true
   await page.getByText('Settled', { exact: true }).waitFor({ timeout: 35000 })
   await page.getByText('1.9999×', { exact: true }).waitFor()
+  await page.getByRole('button', { name: 'First activity' }).click()
+  assert.equal(
+    await page.getByRole('listitem').first().textContent(),
+    'player0 lost 1',
+  )
+  await page.getByRole('button', { name: 'Latest activity' }).click()
+  assert.equal(
+    await page.getByRole('listitem').last().textContent(),
+    'player249 lost 1',
+  )
   await page.getByRole('button', { name: 'Join current round' }).click()
   await page.getByText('Waiting for a new round…').waitFor()
   assert.deepEqual(

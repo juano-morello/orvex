@@ -103,6 +103,17 @@ try {
     undefined,
     'load-failure',
   )
+  await verify(
+    'alice',
+    {},
+    head,
+    'Browser limit is 4,096 history lines. Use crashctl to verify this export.',
+    {
+      name: 'too-many-lines.jsonl',
+      mimeType: 'application/octet-stream',
+      buffer: Buffer.from('\n'.repeat(4097)),
+    },
+  )
   await verify('alice', {}, head, 'Browser limit is 32 MiB.', {
     name: 'oversized.jsonl',
     mimeType: 'application/octet-stream',

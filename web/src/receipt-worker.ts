@@ -1,12 +1,14 @@
 import './generated/wasm_exec.js'
 import { z } from 'zod'
+import { requireAuditSuccess } from './audit-verdict'
 import type { Command } from './commands'
 
 declare class Go {
+  exited: boolean
   importObject: WebAssembly.Imports
   run(instance: WebAssembly.Instance): Promise<void>
 }
-declare function verifySettled(data: Uint8Array, expectedHead: string): string
+declare function verifySettled(data: Uint8Array, expectedHead: string): unknown
 
 const recordSchema = z.object({
   kind: z.literal('command'),
@@ -67,67 +69,76 @@ async function check(file: File, head: string, player: string, claim: Command) {
   ).catch(() => {
     throw Error('Verifier could not load.')
   })
-  void go.run(module.instance)
-  const failure = verifySettled(data, head)
-  if (failure) throw Error(failure)
+  const stopped = go.run(module.instance).then(() => {
+    throw Error(
+      'Verifier stopped before completing. Use crashctl to verify this export.',
+    )
+  })
+  return Promise.race([stopped, matchVerifiedReceipt()])
 
-  // In v2 the header is followed by genesis and all command records in sequence order.
-  const decoder = new TextDecoder('utf-8', { fatal: true })
-  const id = await commandId(player, claim.id)
-  const target = position ? Number(position.sequence) + 1 : undefined
-  let parsed
-  for (let offset = 0, line = 0; offset < data.length; line++) {
-    const end = data.indexOf(10, offset)
-    if (end < 0) break
-    if (line === target || (target === undefined && line >= 2)) {
-      const record = recordSchema.safeParse(
-        JSON.parse(decoder.decode(data.subarray(offset, end))),
-      )
-      if (
-        line === target ||
-        (record.success && record.data.commandId.replaceAll('-', '') === id)
-      ) {
-        parsed = record
-        break
+  async function matchVerifiedReceipt() {
+    const verdict = verifySettled(data, head)
+    requireAuditSuccess(verdict, go.exited)
+
+    // In v2 the header is followed by genesis and all command records in sequence order.
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    const id = await commandId(player, claim.id)
+    const target = position ? Number(position.sequence) + 1 : undefined
+    let parsed
+    for (let offset = 0, line = 0; offset < data.length; line++) {
+      const end = data.indexOf(10, offset)
+      if (end < 0) break
+      if (line === target || (target === undefined && line >= 2)) {
+        const record = recordSchema.safeParse(
+          JSON.parse(decoder.decode(data.subarray(offset, end))),
+        )
+        if (
+          line === target ||
+          (record.success && record.data.commandId.replaceAll('-', '') === id)
+        ) {
+          parsed = record
+          break
+        }
       }
+      offset = end + 1
     }
-    offset = end + 1
+    if (!parsed || !parsed.success)
+      throw Error('Player command missing at the receipt sequence.')
+    const r = parsed.data
+    const matches =
+      r.roundId === claim.round &&
+      (!position ||
+        (r.sequence === position.sequence &&
+          r.effectiveTimeUnixMicro === position.effectiveTimeUnixMicro)) &&
+      (!claim.player || claim.player === player) &&
+      r.command.player === player &&
+      r.commandId.replaceAll('-', '') === id &&
+      (claim.credits === null
+        ? r.command.type === 'CashOut'
+        : r.command.type === 'PlaceBet' &&
+          r.command.betCredits === claim.credits)
+    if (!matches) throw Error('Receipt does not match the audited command.')
+    const paid = r.events.find((e) => e.event.type === 'BetCashedOut')
+    const result =
+      r.result.status === 'rejected'
+        ? 'Rejected · ' + r.result.reason
+        : paid
+          ? 'Paid ' + paid.event.payoutCredits + ' credits'
+          : 'Bet accepted'
+    if (result !== claim.result)
+      throw Error('Receipt outcome differs from the audited result.')
+    return (
+      'Verified for ' +
+      player +
+      ' at sequence ' +
+      r.sequence +
+      ' · ' +
+      result +
+      (position
+        ? ''
+        : ' · Legacy receipt: original sequence and time unavailable')
+    )
   }
-  if (!parsed || !parsed.success)
-    throw Error('Player command missing at the receipt sequence.')
-  const r = parsed.data
-  const matches =
-    r.roundId === claim.round &&
-    (!position ||
-      (r.sequence === position.sequence &&
-        r.effectiveTimeUnixMicro === position.effectiveTimeUnixMicro)) &&
-    (!claim.player || claim.player === player) &&
-    r.command.player === player &&
-    r.commandId.replaceAll('-', '') === id &&
-    (claim.credits === null
-      ? r.command.type === 'CashOut'
-      : r.command.type === 'PlaceBet' && r.command.betCredits === claim.credits)
-  if (!matches) throw Error('Receipt does not match the audited command.')
-  const paid = r.events.find((e) => e.event.type === 'BetCashedOut')
-  const result =
-    r.result.status === 'rejected'
-      ? 'Rejected · ' + r.result.reason
-      : paid
-        ? 'Paid ' + paid.event.payoutCredits + ' credits'
-        : 'Bet accepted'
-  if (result !== claim.result)
-    throw Error('Receipt outcome differs from the audited result.')
-  return (
-    'Verified for ' +
-    player +
-    ' at sequence ' +
-    r.sequence +
-    ' · ' +
-    result +
-    (position
-      ? ''
-      : ' · Legacy receipt: original sequence and time unavailable')
-  )
 }
 
 self.onmessage = async ({

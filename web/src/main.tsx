@@ -49,8 +49,14 @@ const Activity = memo(function Activity({
           <li key={start + i}>{line}</li>
         ))}
       </ul>
+      {start > 100 && (
+        <button onClick={() => setPageEnd(100)}>First activity</button>
+      )}
       {start > 0 && (
         <button onClick={() => setPageEnd(start)}>Earlier activity</button>
+      )}
+      {end + 100 < total && (
+        <button onClick={() => setPageEnd(null)}>Latest activity</button>
       )}
       {end < total && (
         <button

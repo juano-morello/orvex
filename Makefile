@@ -179,5 +179,6 @@ include proto/proto.mk
 
 .PHONY: test-browser
 test-browser:
+	cd web && node --test tests/audit-verdict.mjs
 	cd web && GO="$(GO)" pnpm build
 	$(GO) test $(GOTESTFLAGS) -tags 'integration acceptance browser' -count=1 -run '^TestBrowserRound$$' ./tests/integration/firstround
