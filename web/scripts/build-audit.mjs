@@ -10,6 +10,7 @@ import {
 import { join } from 'node:path'
 
 const dir = 'public/audit'
+const generated = 'src/generated'
 const go = process.env.GO || 'go'
 const env = {
   ...process.env,
@@ -23,6 +24,7 @@ const goroot = execFileSync(go, ['env', 'GOROOT'], {
   encoding: 'utf8',
 }).trim()
 mkdirSync(dir, { recursive: true })
+mkdirSync(generated, { recursive: true })
 const staging = mkdtempSync(join(dir, '.build-'))
 try {
   writeFileSync(
@@ -41,8 +43,9 @@ try {
     ],
     { env, stdio: 'inherit' },
   )
-  for (const name of ['wasm_exec.js', 'verify.wasm'])
-    renameSync(join(staging, name), join(dir, name))
+  renameSync(join(staging, 'wasm_exec.js'), join(generated, 'wasm_exec.js'))
+  renameSync(join(staging, 'verify.wasm'), join(dir, 'verify.wasm'))
+  rmSync(join(dir, 'wasm_exec.js'), { force: true })
 } finally {
   rmSync(staging, { recursive: true, force: true })
 }

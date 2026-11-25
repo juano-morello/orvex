@@ -35,7 +35,9 @@ func TestBrowserRound(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "round.jsonl"), history, 0600); err != nil {
 		t.Fatal(err)
 	}
-	run("tests/verify.mjs", "EXPECTED_HEAD="+records[len(records)-1].Hash.String())
+	head := "EXPECTED_HEAD=" + records[len(records)-1].Hash.String()
+	run("tests/verify.mjs", head)
+	run("tests/verify.mjs", head, "ORVEX_TEST_DEV=1")
 	run("tests/reconnect.mjs")
 
 	if payouts := p.obs.payoutsTo(round.id, "alice"); len(payouts) != 1 {

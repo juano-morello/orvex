@@ -1,10 +1,15 @@
 import { chromium } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { preview } from 'vite'
+import { createServer, preview } from 'vite'
 
 const dir = process.env.EVIDENCE_DIR
-const server = await preview({ preview: { host: '127.0.0.1', port: 0 } })
+const server =
+  process.env.ORVEX_TEST_DEV === '1'
+    ? await (
+        await createServer({ server: { host: '127.0.0.1', port: 0 } })
+      ).listen()
+    : await preview({ preview: { host: '127.0.0.1', port: 0 } })
 const browser = await chromium.launch()
 try {
   async function verify(

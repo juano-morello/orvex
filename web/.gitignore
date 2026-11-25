@@ -2,3 +2,4 @@ node_modules/
 dist/
 test-results/
 /public/audit/
+/src/generated/wasm_exec.js

@@ -1,3 +1,4 @@
+import './generated/wasm_exec.js'
 import { z } from 'zod'
 import type { Command } from './commands'
 
@@ -59,8 +60,6 @@ async function check(file: File, head: string, player: string, claim: Command) {
   )
     throw Error('Receipt identity is missing or inconsistent.')
   const data = new Uint8Array(await file.arrayBuffer())
-  const runtimeURL = import.meta.env.BASE_URL + 'audit/wasm_exec.js'
-  await import(/* @vite-ignore */ runtimeURL)
   const go = new Go()
   const module = await WebAssembly.instantiateStreaming(
     fetch(import.meta.env.BASE_URL + 'audit/verify.wasm'),
