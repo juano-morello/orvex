@@ -12,6 +12,9 @@ try {
   const charlie = await browser.newPage()
   async function join(page, token) {
     page.setDefaultTimeout(30_000)
+    page.on('dialog', (dialog) =>
+      dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss(),
+    )
     await page.goto(server.resolvedUrls.local[0], {
       waitUntil: 'domcontentloaded',
     })
@@ -22,6 +25,12 @@ try {
       const attempts = []
       const malformed = async (route) => {
         attempts.push(route.request().postData())
+        if (attempts.length === 1) {
+          return route.fulfill({
+            status: 503,
+            json: { code: 'outcome_unknown' },
+          })
+        }
         await route.fulfill({
           status: 400,
           contentType: 'text/html',
@@ -35,7 +44,7 @@ try {
       await page.unroute('**/rounds/*/commands', malformed)
       const retry = page.waitForRequest((r) => r.method() === 'POST')
       await page.getByRole('button', { name: 'Retry command recovery' }).click()
-      assert.deepEqual(attempts, [(await retry).postData()])
+      assert.deepEqual(attempts, Array(2).fill((await retry).postData()))
       await page.getByText('Refused · insufficient_credits').waitFor()
       await page.reload({ waitUntil: 'domcontentloaded' })
       await page.getByText('Refused · insufficient_credits').waitFor()
@@ -59,6 +68,23 @@ try {
         .getByText('Admitted · outcome unavailable · unauthenticated')
         .waitFor()
       await page.unroute('**/v1/commands/*')
+      for (const [status, json, message] of [
+        [
+          404,
+          { code: 'command_not_found' },
+          'Admitted · outcome unavailable · command_not_found',
+        ],
+        [200, {}, 'Inconsistent gateway receipt · outcome unavailable'],
+      ]) {
+        await page.route('**/v1/commands/*', (route) =>
+          route.fulfill({ status, json }),
+        )
+        await page
+          .getByRole('button', { name: 'Retry command recovery' })
+          .click()
+        await page.getByText(message).waitFor()
+        await page.unroute('**/v1/commands/*')
+      }
       await page.getByRole('button', { name: 'Retry command recovery' }).click()
     }
     await page.getByText('Bet accepted', { exact: true }).waitFor()
@@ -70,9 +96,18 @@ try {
     join(charlie, process.env.CHARLIE_TOKEN),
   ])
   let first
+  let rotated = true
   let duplicate
   await alice.route('**/rounds/*/commands', async (route) => {
+    if (first && rotated) {
+      rotated = false
+      return route.fulfill({ status: 401, json: { code: 'unauthenticated' } })
+    }
     const response = await route.fetch()
+    if (response.status() === 403) {
+      assert.equal((await response.json()).code, 'player_mismatch')
+      return route.fulfill({ response })
+    }
     assert.equal(response.status(), 202)
     const receipt = await response.json()
     if (!first) {
@@ -90,6 +125,16 @@ try {
   )
   await alice.getByText('Recovering command…').waitFor()
   await alice.reload({ waitUntil: 'domcontentloaded' })
+  await alice.getByText('Admission unknown · unauthenticated').waitFor()
+  await alice
+    .getByLabel('Updated token for this player (optional)')
+    .fill(process.env.BOB_TOKEN)
+  await alice.getByRole('button', { name: 'Retry command recovery' }).click()
+  await alice.getByText('Admission unknown · player_mismatch').waitFor()
+  await alice
+    .getByLabel('Updated token for this player (optional)')
+    .fill(process.env.ALICE_TOKEN)
+  await alice.getByRole('button', { name: 'Retry command recovery' }).click()
   await alice
     .getByRole('status')
     .filter({ hasText: /^Paid \d+ credits$/ })

@@ -336,6 +336,26 @@ func TestSubmitMapsEngineResults(t *testing.T) {
 	}
 }
 
+func TestSessionIdentityAndCommandOwner(t *testing.T) {
+	ts, handler := newGateway(t, &fakeEngine{})
+	got := do(t, ts, http.MethodGet, "/v1/session", aliceToken, "")
+	if got.status != http.StatusOK || got.body != `{"player":"alice"}` || got.header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("session = %+v", got)
+	}
+	for _, expected := range [][]string{{"bob"}, {"alice", "alice"}} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/commands/"+clientText, nil)
+		req.Header.Set("Authorization", "Bearer "+aliceToken)
+		for _, player := range expected {
+			req.Header.Add("Orvex-Expected-Player", player)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != `{"code":"player_mismatch"}` {
+			t.Fatalf("expected player %v: got %d %s", expected, w.Code, w.Body)
+		}
+	}
+}
+
 func TestLookup(t *testing.T) {
 	engine := &fakeEngine{lookup: func(r *orvexv1.LookupCommandRequest) (*orvexv1.LookupCommandResponse, error) {
 		if r.GetPrincipal().GetPlayerId() != "alice" {

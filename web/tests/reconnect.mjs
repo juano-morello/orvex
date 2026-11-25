@@ -21,6 +21,7 @@ try {
     sessionStorage.setItem('orvex.command', JSON.stringify(claim))
   }, claim)
   let available = false
+  let faults = 0
   let current = round
   const outage = page.waitForResponse((res) => res.status() === 502, {
     timeout: 10000,
@@ -49,6 +50,10 @@ try {
     if (!available) {
       return route.fulfill({ status: 502, body: 'Service unavailable' })
     }
+    if (faults++ === 0)
+      return sse('event: record\ndata: {broken\n\n' + record(3, { events: [] }))
+    if (faults === 2) return sse(record(3, { events: [] }))
+    if (faults === 3) return sse('event: end\ndata: {}\n\n')
     return sse(
       record(2, {
         events: [
@@ -72,7 +77,7 @@ try {
     true,
   )
   available = true
-  await page.getByText('Settled', { exact: true }).waitFor()
+  await page.getByText('Settled', { exact: true }).waitFor({ timeout: 35000 })
   await page.getByText('1.9999×', { exact: true }).waitFor()
   await page.getByRole('button', { name: 'Join current round' }).click()
   await page.getByText('Waiting for a new round…').waitFor()

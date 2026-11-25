@@ -3,6 +3,12 @@ import { defineConfig } from 'vite'
 const base = (process.env.ORVEX_WEB_BASE || '/').replace(/\/$/, '') + '/'
 export default defineConfig({
   base,
+  preview: {
+    headers: {
+      'Content-Security-Policy':
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    },
+  },
   server: {
     host: '127.0.0.1',
     proxy: {

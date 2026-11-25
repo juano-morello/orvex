@@ -139,7 +139,7 @@ To run the two-browser lost-response test, install the frontend dependencies and
 
 Keep the player's tab on the finished round. The console retains the latest command in that tab. A command rejected during execution has a chain record and can be verified. An admission refusal, such as insufficient credits, has no chain record.
 
-1. As the operator, run `./bin/crashctl audit export -format orvex/audit-history/v2 ROUND_ID round.jsonl` with the auditor database connection. Share this file with the intended verifier. It includes the settled seed and the round's player commands and ledger rows.
+1. As the operator, run `./bin/crashctl audit export -format orvex/audit-history/v2 ROUND_ID round.jsonl` with the auditor database connection. Restrict this file to auditors authorized to see the entire round. It links player names to account IDs and includes all commands, rejection reasons, and ledger entries. Use synthetic accounts for the shared demo.
 2. Supply the expected 64-character chain head through a separately trusted record or channel. For the local demo an auditor can read the latest committed hash directly from the settled database with the query below. A head copied from the JSONL header only checks internal consistency.
 3. Under **Verify settled receipt**, enter the player ID and expected head, select the export, and click **Verify receipt**. The browser runs the Go audit verifier in a worker and matches the local claim to the replayed command and outcome. The current receipt includes the original sequence and effective time. Older saved receipts are located by the player-scoped command ID.
 
@@ -148,7 +148,7 @@ SELECT encode(hash, 'hex') FROM orvex.chain_records
 WHERE round_id = :'round_id' ORDER BY sequence DESC LIMIT 1;
 ```
 
-The verifier checks chain, fairness, decisions, state, and ledger against the supplied anchor. The operator controls that anchor in the local demo. The file stays on the device. Browser verification accepts files up to 32 MiB. The build script selects Go 1.26.11 for the verifier and its JavaScript runtime. The first build may download that toolchain. The script honors the `GO` executable override.
+The verifier checks chain, fairness, decisions, state, and ledger against the supplied anchor. The operator controls that anchor in the local demo. The operator also supplies the verifier code. For independent verification, build `crashctl` from a separately trusted checkout and run `crashctl audit verify -expect-head HEAD round.jsonl`. This checks the entire export. Match the local receipt to its player command separately. For a distributed browser build, publish a SHA-256 manifest of the complete `web/dist` directory (generate it with `cd web/dist && find . -type f -print0 | sort -z | xargs -0 sha256sum`) through a trusted release channel and verify the files before serving them. Apply the Content-Security-Policy header from `web/vite.config.mjs` on the deployment host, including worker responses. The file stays on the device. Large rounds can spend substantial time replaying historical rules. Use **Cancel verification** to stop the worker. The activity panel displays up to 100 entries per page. Browser verification accepts files up to 32 MiB. The build script selects Go 1.26.11 for the verifier and its JavaScript runtime. The first build may download that toolchain. The script honors the `GO` executable override.
 
 ### Play from the shell
 

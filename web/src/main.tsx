@@ -1,9 +1,67 @@
 import { VerifyReceipt } from './VerifyReceipt'
-import { useEffect, useState } from 'react'
+import { z } from 'zod'
+import { memo, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { recover, restoreCommand, saveCommand } from './commands'
 import { currentRound, frameSchema } from './wire'
 import './style.css'
+
+const sessionSchema = z.object({
+  player: z.string().regex(/^[a-z0-9_-]{1,64}$/),
+})
+const retryDelay = (attempt: number) =>
+  (0.5 + Math.random() * 0.5) * Math.min(8000, 1000 * 2 ** Math.min(attempt, 3))
+
+type ActivityBatch = {
+  entries: string[]
+  total: number
+  previous: ActivityBatch | null
+}
+
+const Activity = memo(function Activity({
+  history,
+}: {
+  history: ActivityBatch | null
+}) {
+  const [pageEnd, setPageEnd] = useState<number | null>(null)
+  const total = history?.total ?? 0
+  const end = Math.min(pageEnd ?? total, total)
+  const start = Math.max(0, end - 100)
+  const rows: string[] = []
+  for (
+    let batch = history;
+    batch && batch.total > start;
+    batch = batch.previous
+  ) {
+    const offset = batch.total - batch.entries.length
+    for (
+      let i = Math.min(end, batch.total) - 1;
+      i >= Math.max(offset, start);
+      i--
+    ) {
+      rows.push(batch.entries[i - offset])
+    }
+  }
+  return (
+    <>
+      <ul>
+        {rows.reverse().map((line, i) => (
+          <li key={start + i}>{line}</li>
+        ))}
+      </ul>
+      {start > 0 && (
+        <button onClick={() => setPageEnd(start)}>Earlier activity</button>
+      )}
+      {end < total && (
+        <button
+          onClick={() => setPageEnd(end + 100 >= total ? null : end + 100)}
+        >
+          Later activity
+        </button>
+      )}
+    </>
+  )
+})
 
 function Console({
   token,
@@ -14,10 +72,12 @@ function Console({
 }) {
   const [command, setCommand] = useState(restoreCommand)
   const [round, setRound] = useState(
-    command?.round ?? sessionStorage.getItem('orvex.round') ?? '',
+    command?.round ??
+      z.uuid().safeParse(sessionStorage.getItem('orvex.round')).data ??
+      '',
   )
   const [phase, setPhase] = useState('Connecting')
-  const [events, setEvents] = useState<string[]>([])
+  const [events, setEvents] = useState<ActivityBatch | null>(null)
   const [start, setStart] = useState(0)
   const [multiplier, setMultiplier] = useState('1.00')
   const [credits, setCredits] = useState('100')
@@ -29,9 +89,52 @@ function Console({
   const [paused, setPaused] = useState(false)
   const [attempt, setAttempt] = useState(0)
 
+  const [identity, setIdentity] = useState<{
+    token: string
+    player: string
+  } | null>(null)
+  const [authMessage, setAuthMessage] = useState('')
+  const player = identity?.token === token ? identity.player : undefined
+  useEffect(() => {
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    let failures = 0
+    async function identify() {
+      try {
+        const res = await fetch(import.meta.env.BASE_URL + 'v1/session', {
+          headers: { Authorization: 'Bearer ' + token },
+          signal: controller.signal,
+          cache: 'no-store',
+        })
+        if (controller.signal.aborted) return
+        if (res.status === 401) {
+          setAuthMessage(
+            'Player token unavailable. Re-enter your session with a valid token.',
+          )
+          return
+        }
+        if (!res.ok) throw Error()
+        const session = sessionSchema.parse(await res.json())
+        if (!controller.signal.aborted) {
+          setIdentity({ token, player: session.player })
+          setAuthMessage('')
+        }
+      } catch {
+        if (controller.signal.aborted) return
+        setAuthMessage('Waiting for player authentication…')
+        timer = setTimeout(identify, retryDelay(failures++))
+      }
+    }
+    void identify()
+    return () => {
+      controller.abort()
+      clearTimeout(timer)
+    }
+  }, [token])
   useEffect(() => {
     if (round && !seeking) return
     const ctrl = new AbortController()
+    let failures = 0
     async function discover() {
       while (!ctrl.signal.aborted) {
         try {
@@ -43,7 +146,9 @@ function Console({
             const { roundId } = currentRound.parse(await res.json())
             if (ctrl.signal.aborted) return
             if (roundId === round) {
-              await new Promise((resolve) => setTimeout(resolve, 1000))
+              await new Promise((resolve) =>
+                setTimeout(resolve, retryDelay(failures++)),
+              )
               continue
             }
             saveCommand(null)
@@ -59,7 +164,9 @@ function Console({
         } catch {
           if (ctrl.signal.aborted) return
         }
-        await new Promise((resolve) => setTimeout(resolve, 1000))
+        await new Promise((resolve) =>
+          setTimeout(resolve, retryDelay(failures++)),
+        )
       }
     }
     void discover()
@@ -71,31 +178,53 @@ function Console({
     let stream: EventSource
     let retry: ReturnType<typeof setTimeout>
     let disposed = false
+    let failures = 0
     let cursor = -1n
-    setEvents([])
+    setEvents(null)
     setPhase('Connecting')
     setMultiplier('1.00')
     setStart(0)
     function subscribe() {
       const after = cursor < 0n ? '' : '?after=' + cursor
-      stream = new EventSource(
+      const source = new EventSource(
         import.meta.env.BASE_URL + 'v1/rounds/' + round + '/stream' + after,
       )
-      stream.onopen = () => {
-        if (!disposed) setConnected(true)
-      }
-      stream.onerror = () => {
-        stream.close()
-        if (disposed) return
+      stream = source
+      let closed = false
+      const reconnect = () => {
+        if (disposed || closed) return
+        closed = true
+        source.close()
         setConnected(false)
-        retry = setTimeout(subscribe, 1000)
+        retry = setTimeout(subscribe, retryDelay(failures++))
       }
-      stream.addEventListener('record', (frame) => {
-        if (disposed) return
-        const record = frameSchema.parse(JSON.parse(frame.data))
+      source.onopen = () => {
+        if (!disposed && !closed) setConnected(true)
+      }
+      source.onerror = reconnect
+      source.addEventListener('record', (frame) => {
+        if (disposed || closed) return
+        let record
+        try {
+          record = frameSchema.parse(JSON.parse(frame.data))
+        } catch {
+          reconnect()
+          return
+        }
         const seq = BigInt(record.sequence)
         if (seq <= cursor) return
+        if (
+          seq !== cursor + 1n ||
+          Boolean(record.genesis) !== (seq === 0n) ||
+          Boolean(record.events) === Boolean(record.genesis)
+        ) {
+          reconnect()
+          return
+        }
         cursor = seq
+        failures = 0
+        setConnected(true)
+        const activity: string[] = []
         if (record.genesis) setPhase('Betting open')
         for (const event of record.events ?? []) {
           switch (event.type) {
@@ -110,30 +239,28 @@ function Console({
               break
             case 'RoundSettled':
               setPhase('Settled')
-              stream.close()
+              closed = true
+              source.close()
               break
             case 'BetPlaced':
-              setEvents((rows) => [
-                ...rows,
-                event.playerId + ' bet ' + event.betCredits,
-              ])
+              activity.push(event.playerId + ' bet ' + event.betCredits)
               break
             case 'BetCashedOut':
-              setEvents((rows) => [
-                ...rows,
-                event.playerId + ' received ' + event.payoutCredits,
-              ])
+              activity.push(event.playerId + ' received ' + event.payoutCredits)
               break
             case 'BetLost':
-              setEvents((rows) => [
-                ...rows,
-                event.playerId + ' lost ' + event.betCredits,
-              ])
+              activity.push(event.playerId + ' lost ' + event.betCredits)
               break
           }
         }
+        if (activity.length)
+          setEvents((previous) => ({
+            entries: activity,
+            total: (previous?.total ?? 0) + activity.length,
+            previous,
+          }))
       })
-      stream.addEventListener('end', () => stream.close())
+      source.addEventListener('end', reconnect)
     }
     subscribe()
     return () => {
@@ -170,8 +297,16 @@ function Console({
     return () => ctrl.abort()
   }, [command, token, attempt])
 
+  useEffect(() => {
+    if (!busy) return
+    const warn = (event: BeforeUnloadEvent) => event.preventDefault()
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [busy])
+
   function submit(amount: string | null) {
-    const next = { round, id: crypto.randomUUID(), credits: amount }
+    if (!player || busy) return
+    const next = { round, player, id: crypto.randomUUID(), credits: amount }
     saveCommand(next)
     setBusy(true)
     setReceipt('Submitting…')
@@ -181,7 +316,7 @@ function Console({
   return (
     <>
       <section className="board">
-        <span>
+        <span aria-live="polite">
           {connected || !round
             ? phase
             : 'Round feed unavailable · reconnecting…'}
@@ -197,6 +332,12 @@ function Console({
       <div className="columns">
         <section>
           <h2>Your play</h2>
+          <p>
+            {authMessage ||
+              (busy
+                ? 'Finish command recovery before playing again.'
+                : 'Place a bet while betting is open. Cash out while the round is running.')}
+          </p>
           <form
             onSubmit={(e) => {
               e.preventDefault()
@@ -216,6 +357,7 @@ function Console({
             <button
               disabled={
                 busy ||
+                !player ||
                 seeking ||
                 receipt === 'Bet accepted' ||
                 !connected ||
@@ -229,6 +371,7 @@ function Console({
               type="button"
               disabled={
                 busy ||
+                !player ||
                 seeking ||
                 !connected ||
                 receipt.startsWith('Paid ') ||
@@ -273,11 +416,7 @@ function Console({
         </section>
         <section>
           <h2>Round activity</h2>
-          <ul>
-            {events.map((line, index) => (
-              <li key={index}>{line}</li>
-            ))}
-          </ul>
+          <Activity key={round} history={events} />
         </section>
       </div>
     </>
@@ -291,7 +430,7 @@ function App() {
   return (
     <main>
       <header>
-        <b>ORVEX</b>
+        {token ? <h1>Orvex Crash</h1> : <b>ORVEX</b>}
         <span>Crash / Simulated credits</span>
       </header>
       {token ? (

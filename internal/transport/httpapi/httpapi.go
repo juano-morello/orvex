@@ -69,6 +69,7 @@ func New(engine orvexv1.EngineServiceClient, auth Authenticator, log *slog.Logge
 		method, path string
 		serve        http.HandlerFunc
 	}{
+		{http.MethodGet, "/v1/session", h.authenticated(sessionIdentity)},
 		{http.MethodGet, "/v1/rounds/current", h.currentRound},
 		{http.MethodPost, "/v1/rounds/{roundId}/commands", h.authenticated(h.submit)},
 		{http.MethodGet, "/v1/commands/{clientCommandId}", h.authenticated(h.lookup)},
@@ -108,6 +109,10 @@ func (h *Handler) authenticated(next func(http.ResponseWriter, *http.Request, se
 		scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
 		if ok && strings.EqualFold(scheme, "Bearer") && token != "" {
 			if player, ok := h.auth.Authenticate(token); ok {
+				if expected := r.Header.Values("Orvex-Expected-Player"); len(expected) != 0 && (len(expected) != 1 || expected[0] != string(player)) {
+					writeError(w, http.StatusForbidden, "player_mismatch")
+					return
+				}
 				next(w, r, player)
 				return
 			}
@@ -115,6 +120,12 @@ func (h *Handler) authenticated(next func(http.ResponseWriter, *http.Request, se
 		w.Header().Set("WWW-Authenticate", `Bearer realm="orvex"`)
 		writeError(w, http.StatusUnauthorized, "unauthenticated")
 	}
+}
+
+func sessionIdentity(w http.ResponseWriter, _ *http.Request, player sessions.PlayerID) {
+	writeJSON(w, http.StatusOK, struct {
+		Player sessions.PlayerID `json:"player"`
+	}{player})
 }
 
 func (h *Handler) currentRound(w http.ResponseWriter, r *http.Request) {

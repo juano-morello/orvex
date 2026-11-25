@@ -18,6 +18,7 @@ try {
     head,
     expected,
     file = join(dir, 'round.jsonl'),
+    mode,
   ) {
     const claim = JSON.parse(
       await readFile(join(dir, player + '.json'), 'utf8'),
@@ -39,14 +40,44 @@ try {
       })
       await page.getByLabel('Player ID').fill(player)
       await page.getByLabel('Expected chain head').fill(head)
+      if (mode === 'cancel' || mode === 'load-failure') {
+        await page
+          .context()
+          .route('**/audit/verify.wasm', (route) =>
+            mode === 'cancel' ? undefined : route.abort(),
+          )
+      }
       await page.getByLabel('Settled history').setInputFiles(file)
       await page.getByRole('button', { name: 'Verify receipt' }).click()
+      if (mode === 'cancel')
+        await page.getByRole('button', { name: 'Cancel verification' }).click()
       await page.getByText(expected).waitFor({ timeout: 15000 })
     } finally {
       await page.close()
     }
   }
   const head = process.env.EXPECTED_HEAD
+  await verify(
+    'alice',
+    {},
+    head,
+    'Verification cancelled.',
+    undefined,
+    'cancel',
+  )
+  await verify(
+    'alice',
+    {},
+    head,
+    'Verifier could not load.',
+    undefined,
+    'load-failure',
+  )
+  await verify('alice', {}, head, 'Browser limit is 32 MiB.', {
+    name: 'oversized.jsonl',
+    mimeType: 'application/octet-stream',
+    buffer: Buffer.alloc(32 * 1024 * 1024 + 1),
+  })
   await verify(
     'alice',
     {},

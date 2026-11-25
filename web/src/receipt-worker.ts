@@ -64,27 +64,35 @@ async function check(file: File, head: string, player: string, claim: Command) {
   const module = await WebAssembly.instantiateStreaming(
     fetch(import.meta.env.BASE_URL + 'audit/verify.wasm'),
     go.importObject,
-  )
+  ).catch(() => {
+    throw Error('Verifier could not load.')
+  })
   void go.run(module.instance)
   const failure = verifySettled(data, head)
   if (failure) throw Error(failure)
 
   // In v2 the header is followed by genesis and all command records in sequence order.
-  const lines = new TextDecoder('utf-8', { fatal: true })
-    .decode(data)
-    .split('\n')
+  const decoder = new TextDecoder('utf-8', { fatal: true })
   const id = await commandId(player, claim.id)
-  // Earlier console versions retained the client ID and outcome but no admission position.
-  const line = position
-    ? lines[Number(position.sequence) + 1]
-    : lines.find((text) => {
-        if (!text.includes('"commandId"')) return false
-        const record = recordSchema.safeParse(JSON.parse(text))
-        return (
-          record.success && record.data.commandId.replaceAll('-', '') === id
-        )
-      })
-  const parsed = line && recordSchema.safeParse(JSON.parse(line))
+  const target = position ? Number(position.sequence) + 1 : undefined
+  let parsed
+  for (let offset = 0, line = 0; offset < data.length; line++) {
+    const end = data.indexOf(10, offset)
+    if (end < 0) break
+    if (line === target || (target === undefined && line >= 2)) {
+      const record = recordSchema.safeParse(
+        JSON.parse(decoder.decode(data.subarray(offset, end))),
+      )
+      if (
+        line === target ||
+        (record.success && record.data.commandId.replaceAll('-', '') === id)
+      ) {
+        parsed = record
+        break
+      }
+    }
+    offset = end + 1
+  }
   if (!parsed || !parsed.success)
     throw Error('Player command missing at the receipt sequence.')
   const r = parsed.data

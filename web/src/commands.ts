@@ -17,7 +17,10 @@ export function restoreCommand(): Command | null {
     const saved =
       commandSchema.safeParse(JSON.parse(sessionStorage.getItem(key) ?? 'null'))
         .data ?? null
-    if (saved?.position && saved.result?.startsWith('Refused · ')) {
+    if (
+      saved?.result === 'Refused · unauthenticated' ||
+      (saved?.position && saved.result?.startsWith('Refused · '))
+    ) {
       return { ...saved, result: undefined }
     }
     return saved
@@ -37,24 +40,35 @@ export async function recover(
   signal: AbortSignal,
   report: (text: string) => void,
 ) {
+  function inconsistent() {
+    report('Inconsistent gateway receipt · outcome unavailable')
+    return 'paused' as const
+  }
   let observed = command.position
   function finish(result: string, player?: string) {
-    saveCommand({ ...command, result, player, position: observed })
+    saveCommand({
+      ...command,
+      result,
+      player: player ?? command.player,
+      position: observed,
+    })
     report(result)
   }
   const headers = {
     Authorization: 'Bearer ' + token,
     'Content-Type': 'application/json',
+    ...(command.player ? { 'Orvex-Expected-Player': command.player } : {}),
   }
   const payload =
     command.credits === null
       ? { cashOut: {} }
       : { placeBet: { betCredits: command.credits } }
   const body = JSON.stringify({ clientCommandId: command.id, ...payload })
-  let admitted = Boolean(observed)
+  // Old pending receipts have no authenticated owner. Look them up without issuing a new POST.
+  let lookup = Boolean(observed) || !command.player
   while (!signal.aborted) {
     try {
-      const response = admitted
+      const response = lookup
         ? await fetch(import.meta.env.BASE_URL + 'v1/commands/' + command.id, {
             headers,
             signal,
@@ -74,41 +88,45 @@ export async function recover(
       const data: unknown = await response.json().catch(() => null)
       if (signal.aborted) return
       if (response.ok) {
-        const next = position.parse(data)
+        const parsed = position.safeParse(data)
+        if (!parsed.success) return inconsistent()
+        const next = parsed.data
         if (
           next.roundId !== command.round ||
           next.clientCommandId !== command.id ||
           (observed &&
             (next.sequence !== observed.sequence ||
               next.effectiveTimeUnixMicro !== observed.effectiveTimeUnixMicro))
-        ) {
-          report('Inconsistent gateway receipt · outcome unavailable')
-          return 'paused'
-        }
+        )
+          return inconsistent()
         observed = next
       }
-      if (response.ok && !admitted) {
-        const receipt = admission.parse(data)
+      if (response.ok && !lookup) {
+        const parsed = admission.safeParse(data)
+        if (!parsed.success || response.status !== 202) return inconsistent()
+        const receipt = parsed.data
         saveCommand({ ...command, position: observed })
-        admitted = true
+        lookup = true
         report('Admitted · sequence ' + receipt.sequence)
         continue
       }
       if (response.ok) {
-        const status = outcome.parse(data)
+        const parsed = outcome.safeParse(data)
+        if (!parsed.success || response.status !== 200) return inconsistent()
+        const status = parsed.data
+        saveCommand({ ...command, position: observed })
         if (status.status === 'accepted') {
           const [event] = status.events
           if (
             status.events.length !== 1 ||
             !event ||
+            (command.player && event.playerId !== command.player) ||
             (command.credits === null
               ? event.type !== 'BetCashedOut'
               : event.type !== 'BetPlaced' ||
                 event.betCredits !== command.credits)
-          ) {
-            report('Inconsistent gateway receipt · outcome unavailable')
-            return 'paused'
-          }
+          )
+            return inconsistent()
           return finish(
             event.type === 'BetCashedOut'
               ? 'Paid ' + event.payoutCredits + ' credits'
@@ -118,24 +136,19 @@ export async function recover(
         }
         if (status.status === 'rejected')
           return finish('Rejected · ' + status.reason)
-      } else if (
-        response.status < 500 &&
-        !(admitted && response.status === 404)
-      ) {
+      } else if (response.status < 500) {
         const error = failure.safeParse(data)
         if (
-          !admitted &&
+          !lookup &&
           error.success &&
-          [
-            'invalid_request',
-            'unauthenticated',
-            'round_not_found',
-            'round_closed',
-            'round_sealed',
-            'insufficient_credits',
-            'command_id_reused',
-            'request_too_large',
-          ].includes(error.data.code)
+          ((response.status === 404 && error.data.code === 'round_not_found') ||
+            (response.status === 409 &&
+              [
+                'round_closed',
+                'round_sealed',
+                'insufficient_credits',
+                'command_id_reused',
+              ].includes(error.data.code)))
         ) {
           return finish('Refused · ' + error.data.code)
         }
@@ -143,18 +156,22 @@ export async function recover(
           ? error.data.code
           : 'HTTP ' + response.status
         report(
-          (admitted ? 'Admitted · outcome unavailable' : 'Admission unknown') +
+          (observed ? 'Admitted · outcome unavailable' : 'Admission unknown') +
             ' · ' +
             detail,
         )
         return 'paused'
-      } else if (admitted) {
-        report('Admitted · waiting for command outcome…')
+      } else {
+        report(
+          observed
+            ? 'Admitted · waiting for command outcome…'
+            : 'Recovering command…',
+        )
       }
     } catch {
       if (signal.aborted) return
       report(
-        admitted
+        observed
           ? 'Admitted · waiting for command outcome…'
           : 'Recovering command…',
       )

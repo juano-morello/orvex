@@ -46,10 +46,14 @@ export function VerifyReceipt() {
           worker.current = audit
           setMessage('Checking history and receipt…')
           audit.onmessage = ({ data }) => {
+            if (worker.current !== audit) return
+            worker.current = null
             setMessage(data)
             audit.terminate()
           }
           audit.onerror = () => {
+            if (worker.current !== audit) return
+            worker.current = null
             setMessage('Verifier could not run.')
             audit.terminate()
           }
@@ -84,6 +88,17 @@ export function VerifyReceipt() {
           <input name="history" type="file" required />
         </label>
         <button>Verify receipt</button>
+        {worker.current && (
+          <button
+            type="button"
+            onClick={() => {
+              reset()
+              setMessage('Verification cancelled.')
+            }}
+          >
+            Cancel verification
+          </button>
+        )}
       </form>
       <p aria-live="polite">{message}</p>
     </section>
