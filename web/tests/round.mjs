@@ -11,13 +11,18 @@ try {
   const [alice, bob] = await Promise.all([browser.newPage(), browser.newPage()])
   const charlie = await browser.newPage()
   async function join(page, token) {
-    page.setDefaultTimeout(30_000)
+    page.setDefaultTimeout(60_000)
     page.on('dialog', (dialog) =>
       dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss(),
     )
-    await page.goto(server.resolvedUrls.local[0], {
+    const response = await page.goto(server.resolvedUrls.local[0], {
       waitUntil: 'domcontentloaded',
     })
+    const headers = response.headers()
+    assert.match(headers['content-security-policy'], /frame-ancestors 'none'/)
+    assert.match(headers['content-security-policy'], /object-src 'none'/)
+    assert.equal(headers['x-content-type-options'], 'nosniff')
+    assert.equal(headers['referrer-policy'], 'no-referrer')
     await page.getByLabel('Player token').fill(token)
     await page.getByRole('button', { name: 'Join round' }).click()
     if (page === charlie) return

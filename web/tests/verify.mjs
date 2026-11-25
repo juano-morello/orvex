@@ -24,6 +24,14 @@ try {
       await readFile(join(dir, player + '.json'), 'utf8'),
     )
     const page = await browser.newPage()
+    const requests = []
+    page.on('response', (res) => {
+      if (res.status() >= 400)
+        requests.push([res.status(), new URL(res.url()).pathname])
+    })
+    page.on('pageerror', (error) =>
+      requests.push(error.name + ' ' + error.message),
+    )
     try {
       await page.addInitScript(
         ({ claim, token }) => {
@@ -52,6 +60,11 @@ try {
       if (mode === 'cancel')
         await page.getByRole('button', { name: 'Cancel verification' }).click()
       await page.getByText(expected).waitFor({ timeout: 15000 })
+    } catch (error) {
+      const phase = await page.locator('.board span').allTextContents()
+      throw new Error(JSON.stringify({ player, phase, requests }), {
+        cause: error,
+      })
     } finally {
       await page.close()
     }

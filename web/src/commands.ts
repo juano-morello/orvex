@@ -152,6 +152,12 @@ export async function recover(
         ) {
           return finish('Refused · ' + error.data.code)
         }
+        if (!command.player && response.status === 404) {
+          report(
+            'Legacy command outcome unknown. Retry lookup with the original player token, or leave this session to start again.',
+          )
+          return 'paused'
+        }
         const detail = error.success
           ? error.data.code
           : 'HTTP ' + response.status

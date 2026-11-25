@@ -146,6 +146,7 @@ function Console({
             const { roundId } = currentRound.parse(await res.json())
             if (ctrl.signal.aborted) return
             if (roundId === round) {
+              failures = 0
               await new Promise((resolve) =>
                 setTimeout(resolve, retryDelay(failures++)),
               )

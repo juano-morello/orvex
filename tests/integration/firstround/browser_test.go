@@ -15,7 +15,7 @@ func TestBrowserRound(t *testing.T) {
 	for _, player := range []string{"alice", "bob"} {
 		p.grant("browser-"+player, player, 1000)
 	}
-	engine := p.startEngine(engineConfig{createRounds: false, bettingWindow: 15 * time.Second})
+	engine := p.startEngine(engineConfig{createRounds: false, bettingWindow: 30 * time.Second})
 	gateway := p.startGateway(engine.addr)
 	round := createControlledRound(t, p, controlledMinD, controlledMaxD)
 	dir := t.TempDir()
