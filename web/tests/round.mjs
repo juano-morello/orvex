@@ -23,9 +23,15 @@ try {
     assert.match(headers['content-security-policy'], /object-src 'none'/)
     assert.equal(headers['x-content-type-options'], 'nosniff')
     assert.equal(headers['referrer-policy'], 'no-referrer')
-    await page.getByLabel('Player token').fill(token)
+    await page
+      .getByLabel('Player token')
+      .fill(page === charlie ? 'expired-demo-token' : token)
     await page.getByRole('button', { name: 'Join round' }).click()
-    if (page === charlie) return
+    if (page === charlie) {
+      await page.getByLabel('Replacement player token').fill(token)
+      await page.getByRole('button', { name: 'Update player token' }).click()
+      return
+    }
     if (page === bob) {
       const attempts = []
       const malformed = async (route) => {

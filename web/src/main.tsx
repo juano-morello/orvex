@@ -93,7 +93,9 @@ function Console({
     token: string
     player: string
   } | null>(null)
-  const [authMessage, setAuthMessage] = useState('')
+  const [authStatus, setAuthStatus] = useState<'waiting' | 'invalid' | 'ready'>(
+    'waiting',
+  )
   const player = identity?.token === token ? identity.player : undefined
   useEffect(() => {
     const controller = new AbortController()
@@ -108,20 +110,18 @@ function Console({
         })
         if (controller.signal.aborted) return
         if (res.status === 401) {
-          setAuthMessage(
-            'Player token unavailable. Re-enter your session with a valid token.',
-          )
+          setAuthStatus('invalid')
           return
         }
         if (!res.ok) throw Error()
         const session = sessionSchema.parse(await res.json())
         if (!controller.signal.aborted) {
           setIdentity({ token, player: session.player })
-          setAuthMessage('')
+          setAuthStatus('ready')
         }
       } catch {
         if (controller.signal.aborted) return
-        setAuthMessage('Waiting for player authentication…')
+        setAuthStatus('waiting')
         timer = setTimeout(identify, retryDelay(failures++))
       }
     }
@@ -334,10 +334,13 @@ function Console({
         <section>
           <h2>Your play</h2>
           <p>
-            {authMessage ||
-              (busy
-                ? 'Finish command recovery before playing again.'
-                : 'Place a bet while betting is open. Cash out while the round is running.')}
+            {authStatus === 'invalid'
+              ? 'Enter a valid player token to continue.'
+              : authStatus === 'waiting'
+                ? 'Waiting for player authentication…'
+                : busy
+                  ? 'Finish command recovery before playing again.'
+                  : 'Place a bet while betting is open. Cash out while the round is running.'}
           </p>
           <form
             onSubmit={(e) => {
@@ -390,7 +393,7 @@ function Console({
               Stay on this round
             </button>
           )}
-          {paused && (
+          {(paused || authStatus === 'invalid') && (
             <form
               onSubmit={(event) => {
                 event.preventDefault()
@@ -403,10 +406,19 @@ function Console({
               }}
             >
               <label>
-                Updated token for this player (optional)
-                <input type="password" name="replacement" autoComplete="off" />
+                {paused
+                  ? 'Updated token for this player (optional)'
+                  : 'Replacement player token'}
+                <input
+                  type="password"
+                  name="replacement"
+                  autoComplete="off"
+                  required={!paused}
+                />
               </label>
-              <button>Retry command recovery</button>
+              <button>
+                {paused ? 'Retry command recovery' : 'Update player token'}
+              </button>
             </form>
           )}
           {(seeking || phase === 'Settled' || !connected) && round && (

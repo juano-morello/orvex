@@ -12,6 +12,18 @@ const server =
     : await preview({ preview: { host: '127.0.0.1', port: 0 } })
 const browser = await chromium.launch()
 try {
+  const receipt = JSON.parse(await readFile(join(dir, 'alice.json'), 'utf8'))
+  const path = 'v1/rounds/' + receipt.round + '/stream'
+  const stream = await fetch(new URL(path, server.resolvedUrls.local[0]), {
+    signal: AbortSignal.timeout(15000),
+  })
+  const frames = await stream.text()
+  if (
+    !stream.ok ||
+    !frames.includes('RoundSettled') ||
+    !frames.includes('event: end')
+  )
+    throw Error('Gateway did not supply a complete settled stream.')
   async function verify(
     player,
     change,
@@ -33,6 +45,11 @@ try {
       requests.push(error.name + ' ' + error.message),
     )
     try {
+      if (mode !== 'live') {
+        await page.route('**/' + path, (route) =>
+          route.fulfill({ contentType: 'text/event-stream', body: frames }),
+        )
+      }
       await page.addInitScript(
         ({ claim, token }) => {
           sessionStorage.setItem('orvex.command', JSON.stringify(claim))
@@ -96,6 +113,8 @@ try {
     {},
     head,
     /^Verified for alice at sequence \d+ · Paid \d+ credits$/,
+    undefined,
+    'live',
   )
   await verify(
     'charlie',
