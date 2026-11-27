@@ -31,9 +31,10 @@ var (
 	// ErrRoundExists: CreateRound found the round ID with a different
 	// genesis record. Nothing was written.
 	ErrRoundExists = errors.New("execution: round exists with a different genesis")
-	// ErrFenced: the round's fencing token is no longer the lease's; stop
+	ErrLeaseHeld   = errors.New("execution: round has a live owner")
+	// ErrFenced: the lease expired or the fencing token changed; stop
 	// executing this round (E-7).
-	ErrFenced = errors.New("execution: fencing token superseded; stop executing this round")
+	ErrFenced = errors.New("execution: lease expired or superseded; stop executing this round")
 	// ErrFailClosed is matched by every *FailClosedError.
 	ErrFailClosed = errors.New("execution: rules failed closed; round halted")
 	// ErrCorrupt: stored round data violates an execution invariant; the

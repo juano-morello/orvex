@@ -363,9 +363,10 @@ func TestLegacySecretRoundCompletes(t *testing.T) {
 	seed(t, pool, l.RoundID, 902, settleRound, closeAt)
 
 	x := roundtest.NewExecutor(t, pool, nil, nil)
+	legacyLease := roundtest.Claim(t, x, l.RoundID)
 	var last execution.Outcome
 	for range 2 {
-		out, err := x.ExecuteNext(ctx, lease(l.RoundID))
+		out, err := x.ExecuteNext(ctx, legacyLease)
 		if err != nil || !out.Executed || out.Result.Rejected {
 			t.Fatalf("ExecuteNext = %+v, %v; want accepted", out, err)
 		}

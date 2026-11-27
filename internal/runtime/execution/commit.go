@@ -15,8 +15,9 @@ import (
 // the last statement, queued only on the record that first makes the round
 // final (LBT-21 K-6), so it commits or rolls back with the record.
 const (
-	casSQL = `UPDATE orvex.round_execution_heads SET processed_sequence = $3
-		WHERE round_id = $1 AND processed_sequence = $2 AND fencing_token = $4`
+	casSQL = lockedLease + ` UPDATE orvex.round_execution_heads h SET processed_sequence = $3
+		FROM locked l WHERE h.round_id = l.round_id AND h.processed_sequence = $2
+		AND l.fencing_token = $4 AND l.lease_expires_at > clock_timestamp()`
 	insertRecordSQL = `INSERT INTO orvex.chain_records
 		(round_id, sequence, prev_hash, hash, record, result_status, result_reason, fencing_token)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`

@@ -157,16 +157,17 @@ func TestRestartAdoptsEachPhase(t *testing.T) {
 			e := newEnv(t)
 			old := roundtest.NewExecutor(t, e.pool, nil, nil)
 			round := e.createRound(old, e.dbNow())
+			lease := roundtest.Claim(t, old, round)
 			drain := func() {
 				t.Helper()
-				if _, err := old.Drain(ctx, execution.Lease{RoundID: round}, 10); err != nil {
+				if _, err := old.Drain(ctx, lease, 10); err != nil {
 					t.Fatal(err)
 				}
 			}
 			e.admit(round, commandID(round, "start"), steps[v1.PhaseBetting].command)
 			if left >= started {
 				drain()
-				got, err := old.State(ctx, execution.Lease{RoundID: round})
+				got, err := old.State(ctx, lease)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -183,12 +184,15 @@ func TestRestartAdoptsEachPhase(t *testing.T) {
 				e.admit(round, commandID(round, "settle"), steps[v1.PhaseCrashed].command)
 			}
 
+			if _, err := e.pool.Exec(ctx, `UPDATE orvex.round_execution_heads SET lease_expires_at=clock_timestamp() WHERE round_id=$1`, round); err != nil {
+				t.Fatal(err)
+			}
 			s := e.scheduler(Config{CreateRounds: false}, nil, nil)
 			startRun(t, s)
 			waitFor(t, "the round to settle", func() bool { return e.settled(round) })
 			e.requireLifecycle(round, 0)
-			if token, owner := e.head(round); token != 1 || owner != s.owner {
-				t.Errorf("head token %d owner %q, want 1 and %q", token, owner, s.owner)
+			if token, owner := e.head(round); token != 2 || owner != s.owner {
+				t.Errorf("head token %d owner %q, want 2 and %q", token, owner, s.owner)
 			}
 			if strings.Contains(e.logs.String(), "halted") {
 				t.Errorf("a round halted:\n%s", e.logs)
@@ -233,6 +237,20 @@ func TestStandbyTakesOverMidRound(t *testing.T) {
 	}
 }
 
+func TestSchedulerRenewsLiveRound(t *testing.T) {
+	e := newEnv(t)
+	s := e.scheduler(Config{BettingWindow: time.Hour, CreateRounds: true}, nil, nil)
+	startRun(t, s)
+	waitFor(t, "the round to be claimed", func() bool { return strings.Contains(e.logs.String(), "round claimed") })
+	round := e.firstRound()
+	const expiry = `SELECT orvex.unix_micro(lease_expires_at) FROM orvex.round_execution_heads WHERE round_id=$1`
+	first := e.count(expiry, round)
+	waitFor(t, "a later expiry", func() bool { return e.count(expiry, round) > first })
+	if token, owner := e.head(round); token != 1 || owner != s.owner {
+		t.Fatalf("renewed head token %d owner %q", token, owner)
+	}
+}
+
 // TestFencedSchedulerStops: when another engine claims a round this one is
 // driving, this one's next execution is fenced and Run returns ErrFenced.
 func TestFencedSchedulerStops(t *testing.T) {
@@ -243,6 +261,9 @@ func TestFencedSchedulerStops(t *testing.T) {
 	waitFor(t, "the round to be claimed", func() bool { return strings.Contains(e.logs.String(), "round claimed") })
 	round := e.firstRound()
 
+	if _, err := e.pool.Exec(ctx, `UPDATE orvex.round_execution_heads SET lease_expires_at=clock_timestamp() WHERE round_id=$1`, round); err != nil {
+		t.Fatal(err)
+	}
 	other := roundtest.NewExecutor(t, e.pool, nil, nil)
 	if _, err := other.ClaimLease(ctx, round, "engine/other", time.Minute); err != nil {
 		t.Fatal(err)

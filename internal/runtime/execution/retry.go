@@ -145,6 +145,7 @@ const (
 
 // headView is what the conflict check reads.
 type headView struct {
+	expired   bool
 	found     bool
 	processed int64
 	token     int64
@@ -162,6 +163,8 @@ func decideConflict(h headView, k uint64, hash [32]byte, token int64) conflictDe
 		return conflictFenced
 	case h.processed >= int64(k) && h.recordHash != nil && string(h.recordHash) == string(hash[:]): //nolint:gosec // G115: k = processed_sequence + 1, a bigint round sequence
 		return conflictAdopt
+	case h.expired:
+		return conflictFenced
 	case h.processed == int64(k)-1: //nolint:gosec // G115: k = processed_sequence + 1, a bigint round sequence
 		return conflictRetry
 	default:

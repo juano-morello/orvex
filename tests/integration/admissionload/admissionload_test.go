@@ -208,7 +208,7 @@ func playRound(t *testing.T, pool *pgxpool.Pool, seq *admission.Sequencer, x *ex
 	if _, err := x.CreateRound(ctx, execution.NewRound{RoundID: id, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber, Config: cfg, CreatedAtUnixMicro: created}); err != nil {
 		t.Fatalf("CreateRound: %v", err)
 	}
-	lease := execution.Lease{RoundID: id}
+	lease := roundtest.Claim(t, x, id)
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)

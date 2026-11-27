@@ -130,7 +130,7 @@ those report their own SQLSTATE.
 | Transaction | Go options | Concurrency control |
 |---|---|---|
 | A: admission (LBT-11) | `AdmissionTxOptions()`: READ COMMITTED, read-write | `orvex.admit_command` (§12): lock-free dedupe and window read, then `round_admission_heads` `FOR UPDATE`; then `clock_timestamp()`, dedupe, window, holds, admission insert |
-| B: execution (LBT-12) | `ExecutionTxOptionsWithTimeouts(lock, idle)`: READ COMMITTED, read-write, transaction-local timeouts in the `BEGIN` | the compare-and-set `UPDATE round_execution_heads … WHERE processed_sequence = k-1 AND fencing_token = t` is the first statement that touches data (0 rows means a conflict); then one batch of inserts; deferred `OX004`, `OX009` and head foreign keys at commit; account floors at each statement (§13) |
+| B: execution (LBT-12) | `ExecutionTxOptionsWithTimeouts(lock, idle)`: READ COMMITTED, read-write, transaction-local timeouts in the `BEGIN` | the compare-and-set `UPDATE round_execution_heads … WHERE processed_sequence = k-1 AND fencing_token = t AND lease_expires_at > clock_timestamp()` is the first statement that touches data (0 rows means a conflict); then one batch of inserts; deferred `OX004`, `OX009` and head foreign keys at commit; account floors at each statement (§13) |
 | Round creation (LBT-12) | `ExecutionTxOptionsWithTimeouts(lock, idle)` | inserts only; deferred foreign keys require the genesis record |
 | Ownership takeover (LBT-14) | `ExecutionTxOptions()` | conditional `UPDATE` of the execution head |
 | Export and multi-statement reads | `SnapshotReadTxOptions()`: REPEATABLE READ, read-only | one consistent snapshot |
@@ -433,9 +433,8 @@ creation. The normative design is [the LBT-12 spec](../specs/e0df34d3_execution-
 2. `BeginTx(ExecutionTxOptionsWithTimeouts(LockTimeout, IdleInTransactionTimeout))`: the `BEGIN` sets
    `lock_timeout`, `idle_in_transaction_session_timeout` and, only when it is `off`,
    `synchronous_commit = on`, transaction-locally. It reads no table.
-3. The compare-and-set alone: `UPDATE orvex.round_execution_heads SET processed_sequence = k WHERE
-   round_id = $1 AND processed_sequence = k - 1 AND fencing_token = $t`. Not exactly one row: roll back
-   and run the conflict check.
+3. Lock the execution head. Advance it to `k` only if its sequence is `k - 1`, the token matches,
+   and its lease is still live on the database clock. On conflict roll back and check the head.
 4. One pipelined batch, in this order: the chain record (`prev_hash` = the cached head, fencing token
    `t`); `domain_events` in one `unnest` insert; `ledger_hold_releases` for every hold of the admission,
    ascending `account_id`, before any posting; the ledger transaction and its postings when there are
@@ -454,7 +453,7 @@ that row lock and then sees the converted or released credits (ADR-005 cross-rou
 **Conflict check** (on a fresh connection): `SELECT h.processed_sequence, h.fencing_token, r.hash FROM
 round_execution_heads h LEFT JOIN chain_records r ON (round_id, sequence = k)`. No head: `ErrCorrupt`;
 another token: `ErrFenced` (stop driving the round); record `k` committed with the computed hash: adopt
-it (`Outcome.Adopted`); `processed = k - 1`: retry; otherwise reload the cache.
+it (`Outcome.Adopted`); expired lease: `ErrFenced`; `processed = k - 1`: retry; otherwise reload the cache.
 
 **State.** The authoritative state is the chain. The executor caches, per round, the state replayed from
 genesis through every record (`replay.StateOnly`), checking every snapshot's `state_hash` on the way
@@ -800,11 +799,11 @@ is the milestone; the advisory lock below is defence in depth, not multi-replica
 
   It drives each to settlement and creates a round only when the list is empty (and `ORVEX_CREATE_ROUNDS`
   is not `false`). A round whose creation committed while its creator died is adopted here.
-- **Lease claim** (`Executor.ClaimLease`): `UPDATE orvex.round_execution_heads SET fencing_token =
-  fencing_token + 1, owner_id = $owner, lease_expires_at = clock_timestamp() + $ttl WHERE round_id = $1
-  RETURNING fencing_token`. `check_execution_head` accepts the owner change because the token rises.
-  Transaction B checks only the token, so the claim fences any earlier engine. Nothing reads or renews
-  `lease_expires_at` yet; the last claim owns the round.
+- Each scheduler process has a unique owner ID. Claim, renewal, and execution lock the round's
+  execution head before checking expiry against the database clock. Claiming an unowned or expired
+  round increments its fencing token. A repeated claim by its live owner recovers the same token.
+  Renewal requires the current owner and token. Transaction B requires a live token when it advances
+  the head. A transaction that has already advanced the head holds its lock through commit.
 - **Creation:** the plan (a random UUIDv4, a crypto/rand seed, `created_at` from
   `orvex.unix_micro(clock_timestamp())`) is drawn once and resent unchanged until `CreateRound` answers
   definitely, so an unknown commit outcome resolves to `Duplicate`.

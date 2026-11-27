@@ -22,9 +22,8 @@ import (
 // MaxBettingWindow bounds Config.BettingWindow.
 const MaxBettingWindow = time.Hour
 
-// leaseTTL is the lease_expires_at a claim writes. Nothing reads it yet,
-// and the scheduler does not renew it.
-const leaseTTL = time.Minute
+// leaseTTL bounds how long a standby waits after an unclean exit.
+const leaseTTL = 6 * time.Second
 
 var (
 	// ErrInvalidConfig: New was given a nil dependency or a Config outside

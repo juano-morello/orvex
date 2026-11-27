@@ -18,7 +18,7 @@ var describedSentinels = []error{
 	ErrInvalidConfig, errHalted, errLeadershipLost,
 	execution.ErrFenced, execution.ErrFailClosed, execution.ErrCorrupt, execution.ErrUnknownRules,
 	execution.ErrRoundNotFound, execution.ErrRoundExists, execution.ErrInvalidRound, execution.ErrInvalidRequest,
-	execution.ErrBusy, execution.ErrUnavailable, execution.ErrInternal,
+	execution.ErrLeaseHeld, execution.ErrBusy, execution.ErrUnavailable, execution.ErrInternal,
 	admission.ErrOutcomeUnknown, admission.ErrUnavailable, admission.ErrBusy, admission.ErrInternal,
 	admission.ErrInvalidRequest, admission.ErrInvalidCommand, admission.ErrUnknownRules, admission.ErrRoundNotFound,
 	admission.ErrCommandIDReused, admission.ErrClosureNotDue, admission.ErrNotFound,

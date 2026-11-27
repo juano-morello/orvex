@@ -490,7 +490,7 @@ func TestColdLoadChecksSnapshots(t *testing.T) {
 	_, pool := newDB(t)
 	l := loadHistory(t, pool, history(false))
 	x := roundtest.NewExecutor(t, pool, nil, nil)
-	if out, err := x.ExecuteNext(ctx, lease(l)); err != nil || out.Executed {
+	if out, err := x.ExecuteNext(ctx, roundtest.Claim(t, x, l)); err != nil || out.Executed {
 		t.Fatalf("ExecuteNext = %+v, %v; want not executed after a matching cold load", out, err)
 	}
 
@@ -499,11 +499,11 @@ func TestColdLoadChecksSnapshots(t *testing.T) {
 	fdb := &faultDB{pool: pool2}
 	x2 := roundtest.NewExecutor(t, fdb, nil, nil)
 	before := effects(t, pool2, l2)
-	if _, err := x2.ExecuteNext(ctx, lease(l2)); !errors.Is(err, execution.ErrCorrupt) {
+	if _, err := x2.ExecuteNext(ctx, roundtest.Claim(t, x2, l2)); !errors.Is(err, execution.ErrCorrupt) {
 		t.Fatalf("ExecuteNext = %v, want ErrCorrupt", err)
 	}
 	begins := fdb.begins.Load()
-	if _, err := x2.ExecuteNext(ctx, lease(l2)); !errors.Is(err, execution.ErrCorrupt) {
+	if _, err := x2.ExecuteNext(ctx, roundtest.Claim(t, x2, l2)); !errors.Is(err, execution.ErrCorrupt) {
 		t.Fatalf("second ExecuteNext = %v, want ErrCorrupt", err)
 	}
 	if fdb.begins.Load() != begins {

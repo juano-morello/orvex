@@ -76,17 +76,51 @@ func (s *Scheduler) drive(ctx context.Context, r round) error {
 	}
 	s.log.Info("round claimed", "round", roundText(r.id), "fencing_token", lease.FencingToken)
 	d := &driver{s: s, round: r, lease: lease}
+	driveCtx, cancel := context.WithCancelCause(ctx)
+	renewed := make(chan struct{})
+	go func() {
+		defer close(renewed)
+		d.renew(driveCtx, cancel)
+	}()
+	defer func() { cancel(nil); <-renewed }()
 	failures = 0
 	for {
-		settled, err := d.tick(ctx)
+		settled, err := d.tick(driveCtx)
 		switch {
+		case driveCtx.Err() != nil:
+			return context.Cause(driveCtx)
 		case settled:
 			return nil
 		case err == nil:
 			failures = 0
 		default:
-			if err := s.failed(ctx, "drive round", err, &failures, "round", roundText(r.id)); err != nil {
+			if err := s.failed(driveCtx, "drive round", err, &failures, "round", roundText(r.id)); err != nil {
+				if driveCtx.Err() != nil {
+					return context.Cause(driveCtx)
+				}
 				return err
+			}
+		}
+	}
+}
+
+// Renew independently of replay and command batches, which may take longer than a lease.
+func (d *driver) renew(ctx context.Context, cancel context.CancelCauseFunc) {
+	ticker := time.NewTicker(leaseTTL / 3)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := d.s.x.RenewLease(ctx, d.lease, d.s.owner, leaseTTL); err != nil {
+				if errors.Is(err, execution.ErrFenced) || errors.Is(err, execution.ErrRoundNotFound) {
+					cancel(err)
+					return
+				}
+				if ctx.Err() == nil {
+					d.s.log.Warn("round renewal failed", "error", Describe(err))
+				}
 			}
 		}
 	}
