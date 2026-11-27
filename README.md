@@ -38,6 +38,7 @@ Buf needs a newer Go than the module. `make proto` and `make proto-check` run Bu
 - `make build`: build all binaries into `bin/` (or `make build-gateway`, `make build-engine`, `make build-crashctl`)
 - `make test`: run tests with the race detector
 - `make test-acceptance`: start PostgreSQL and the real services, play a two-player round, recover a lost cash-out receipt, and verify the settled v2 history. Requires Docker.
+- `make load-baseline` measures single-round player bursts through one gateway and one engine against disposable PostgreSQL. Run on a quiet host with Docker. The target prints a fresh report directory under `bin/`. Set `ORVEX_BURST_OUT` to choose the output directory. Interpret the result as burst size and drain time under the recorded configuration. Sustained commands per second requires a separate workload.
 - `make test-integration`: run the unit tests plus the PostgreSQL integration tests (Testcontainers, pinned PostgreSQL 18 image); fails without a Docker daemon. On hosts without cgo: `make test-integration GOTESTFLAGS=`
 - `make lint`: run golangci-lint
 - `make proto-check` checks the protobuf schema and verifies that regeneration reproduces the committed Go files.
@@ -57,6 +58,20 @@ Local PostgreSQL on the host (a worktree preview has its own database; see [Play
 - `docker compose -f deployments/docker/compose.yaml down -v`
 
 See [AGENTS.md](AGENTS.md) for contributor and agent guidance and [docs/adr/](docs/adr/) for the architectural decisions.
+
+### Single-engine burst baseline
+
+See the [first measured baseline](docs/changes/single-engine-burst-baseline.md) for the hardware, six trials per workload and the observed burst limits.
+
+`make load-baseline` runs a discarded warm-up, then three repeats at 10, 40 and 80 funded players. Each trial starts fresh services and a fresh database. All players place one bet over a 1.8-second window. Normal cash-outs span 800 ms. The deadline trial schedules cash-outs from 50 ms before to 50 ms after a controlled crash. The retry trial repeats each cash-out 20 ms later with the same identity and payload. The generator schedules each request independently of previous responses. There are no spectators. The engine pool has four connections.
+
+Set `ORVEX_BURST_LEVELS=20,60` or `ORVEX_BURST_REPEATS=2` to vary the sweep. Counts range from 1 to the fixture's 100-bet limit. Each run needs an empty output directory. Keep the per-trial JSON alongside `burst-report.md` to inspect receipts, deadline outcomes and database samples.
+
+Read the bracket per workload. Each repeat must meet the 10 ms generator-lag p99, 100 ms acknowledgment p99 and one-second drain budgets. These are experiment thresholds. The Go test fails on correctness violations, including missing admissions, mismatched receipts or failed settled-history verification. A latency miss is a measured result and appears in the report. Execution latency ends at the first database sample that observes the committed sequence. At 50 ms sampling intervals this gives an upper bound. Database lock waits are point samples, and WAL covers the PostgreSQL cluster.
+
+To run the generator on Windows x64, build it on the controller with `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o bin/orvex-loadgen.exe ./tests/loadgen`. The controller needs a launcher executable that starts one generator process per trial on the other machine and forwards its stdin and stdout unchanged. Use an authenticated private connection for this stream because it carries temporary player credentials. Send launcher diagnostics to stderr.
+
+Set `ORVEX_BURST_REMOTE_LAUNCHER` to the launcher's path and `ORVEX_BURST_GATEWAY_HOST` to the controller's private address reachable from the generator. Leave the database and engine on the controller. Start with `ORVEX_BURST_ARMS=retry ORVEX_BURST_LEVELS=1 ORVEX_BURST_REPEATS=1 make load-baseline`. Once the smoke round verifies, repeat with 80 players. Keep both machines awake throughout the run.
 
 ## Play a local round
 
