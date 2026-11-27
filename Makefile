@@ -57,6 +57,16 @@ test-integration:
 test-acceptance:
 	$(GO) test $(GOTESTFLAGS) -tags 'integration acceptance' -count=1 ./tests/integration/firstround
 
+.PHONY: load-baseline
+# Give each measured run its own artifact directory. Race instrumentation
+# changes the latency distribution, so this target builds without -race.
+load-baseline:
+	@mkdir -p "$(BIN_DIR)"
+	@out="$${ORVEX_BURST_OUT:-$$(mktemp -d "$(abspath $(BIN_DIR))/burst-XXXXXXXX")}"; \
+		case "$$out" in /*) ;; *) out="$(CURDIR)/$$out";; esac; \
+		echo "Baseline artifacts: $$out"; \
+		ORVEX_BURST_OUT="$$out" $(GO) test -tags 'integration acceptance spectatorload' -run '^TestHotRoundBaseline$$' -count=1 -timeout 60m -v ./tests/integration/firstround
+
 test-repeat: test-repeat-admission test-repeat-execution test-repeat-export
 
 test-repeat-admission:

@@ -269,10 +269,14 @@ func (p *platform) startEngine(cfg engineConfig) *service {
 // startGateway starts the gateway with no database URL and no keyring: it
 // reaches state only through the engine.
 func (p *platform) startGateway(engineAddr string) *service {
+	return p.startGatewayAt(engineAddr, "127.0.0.1:0")
+}
+
+func (p *platform) startGatewayAt(engineAddr, address string) *service {
 	p.t.Helper()
 	s := startService(p.t, "gateway", p.bin.gateway, []string{
 		"ORVEX_ENGINE_ADDR=" + engineAddr,
-		"ORVEX_GATEWAY_ADDR=127.0.0.1:0",
+		"ORVEX_GATEWAY_ADDR=" + address,
 		"ORVEX_GATEWAY_TOKEN_FILE=" + p.tokenFile,
 		"ORVEX_PLAYERS_FILE=" + p.playersFile,
 	})
