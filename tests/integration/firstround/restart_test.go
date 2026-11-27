@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/juano-morello/orvex/internal/canonjson"
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
+	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
 // An engine-created round has a random crash point: it may crash at once
@@ -229,4 +231,66 @@ func TestEngineCreatedRoundSurvivesRestart(t *testing.T) {
 	reconnects, repeats := stream.stats()
 	t.Logf("missed round %s (%+v); round %s paid %d; the stream reconnected %d times across the restart with %d repeated frames; next round %s",
 		missed, attempts[0], round, payout, reconnects, repeats, next)
+}
+
+// TestPausedOwnerTakeover keeps the original process and its database sessions
+// alive across expiry. Player traffic deliberately enters through the standby.
+func TestPausedOwnerTakeover(t *testing.T) {
+	p := newPlatform(t, "alice")
+	p.grant("takeover-alice", "alice", 1000)
+	cfg := engineConfig{bettingWindow: 12 * time.Second}
+	primary := p.startEngine(cfg)
+	r := createControlledRound(t, p, time.Second, 2*time.Second)
+	token := func() int64 {
+		return p.obs.int("SELECT fencing_token FROM orvex.round_execution_heads WHERE round_id=$1", r.id)
+	}
+	await := func(what string, f func() bool) {
+		t.Helper()
+		until := time.Now().Add(time.Minute)
+		for !f() {
+			if time.Now().After(until) {
+				t.Fatal("timed out waiting for " + what)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	await("first owner", func() bool { return token() == 1 && strings.Contains(primary.log.String(), "round phase") })
+	standby := p.startEngine(cfg)
+	alice := p.player("alice", p.startGateway(standby.addr))
+	if err := primary.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = primary.cmd.Process.Signal(syscall.SIGCONT) }()
+	betID := newUUID(t)
+	bet := alice.admit(t, r.text, placeBetBody(t, betID, 100))
+	if token() != 1 || p.obs.int("SELECT processed_sequence FROM orvex.round_execution_heads WHERE round_id=$1", r.id) != 0 {
+		t.Fatal("bet must be pending on the original owner's lease before takeover")
+	}
+	await("standby claim", func() bool { return token() == 2 })
+	if err := primary.cmd.Process.Signal(syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	await("fenced owner exit", func() bool {
+		select {
+		case <-primary.exited:
+			return true
+		default:
+			return false
+		}
+	})
+	if primary.cmd.ProcessState.ExitCode() != 1 || !strings.Contains(primary.log.String(), execution.ErrFenced.Error()) {
+		t.Fatalf("primary did not report fencing: %s", primary.log)
+	}
+	if result := alice.awaitOutcome(t, betID, time.Minute); result.Status != "accepted" || result.Sequence != bet.Sequence {
+		t.Fatalf("takeover bet result %+v, receipt %+v", result, bet)
+	}
+	await("settlement", func() bool { return p.obs.settled(r.id) })
+	if n := p.obs.int("SELECT count(*) FROM orvex.domain_events WHERE round_id=$1 AND event_type='RoundSettled'", r.id); n != 1 {
+		t.Fatalf("settlements = %d, want one", n)
+	}
+	if n := p.obs.int("SELECT count(*) FROM orvex.chain_records WHERE round_id=$1 AND sequence>0 AND fencing_token<>2", r.id); n != 0 {
+		t.Fatalf("%d command records committed outside the standby lease", n)
+	}
+	p.obs.requirePlayer("alice", 900, 0)
+	p.auditV2(r.id, p.obs.records(r.id))
 }

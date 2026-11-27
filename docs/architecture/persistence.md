@@ -779,15 +779,11 @@ the compromised key as exposed; what happens to those rounds is an operations de
 - **R-7:** the plaintext secret and the keys live in engine memory, and Go cannot reliably zero them.
 - **R-8:** a file written with `-unsettled` holds the seed.
 
-## 17. Engine lifecycle (first playable)
+## 17. Engine lifecycle
 
-`internal/runtime/lifecycle` and `cmd/engine` drive crash/v1 rounds without a human. One engine replica
-is the milestone; the advisory lock below is defence in depth, not multi-replica support.
+Each engine discovers unsettled crash/v1 rounds independently and drives a round after claiming its lease.
 
-- **Leadership:** the scheduler holds `pg_try_advisory_lock(8451814261399681253)` (the first 8 bytes of
-  SHA-256(`orvex/engine/v1/scheduler:crash`)) on a dedicated session and pings it every second. A
-  second engine waits. The lock ends with the session; a leader that loses it stops scheduling.
-- **Discovery:** before it creates a round, the leader lists the unsettled crash rounds, those without
+- **Discovery:** the scheduler lists the unsettled crash rounds, those without
   a reveal:
 
   ```sql
@@ -806,19 +802,19 @@ is the milestone; the advisory lock below is defence in depth, not multi-replica
   the head. A transaction that has already advanced the head holds its lock through commit.
 - **Creation:** the plan (a random UUIDv4, a crypto/rand seed, `created_at` from
   `orvex.unix_micro(clock_timestamp())`) is drawn once and resent unchanged until `CreateRound` answers
-  definitely, so an unknown commit outcome resolves to `Duplicate`.
+  definitely. Scheduler genesis transactions take `pg_advisory_xact_lock(8451814261399681253)`,
+  then recheck for an unsettled round under READ COMMITTED before writing genesis.
 - **Lifecycle commands:** `StartRound`, `CloseRound` and `SettleRound` carry `AuthoritySystem` and the
   command ID `uuid8("orvex/engine/v1/command:<round uuid>/start|close|settle")`, so an engine that
   restarts re-admits a step as `Duplicate`. Start is due at `created_at + ORVEX_BETTING_WINDOW` (default
   10 s), close at `T0 + D` from the engine's in-memory state, settle at once, all on the database clock.
+  Admission of a scheduler step locks the execution head and checks its token and expiry through commit.
   The engine never reads `close_offset_micros` or `close_not_before_unix_micro`.
 - **Halts:** a round whose execution is corrupt or fails closed, or whose lifecycle command is rejected,
   stays unsettled, blocks new rounds and is logged; nothing voids it.
 
 Grants: nothing beyond §13. Discovery reads `rounds` and `round_secret_reveals`, the claim updates
-`round_execution_heads`, and the clock read calls `orvex.unix_micro` (default `PUBLIC` `EXECUTE`). The
-known gap of this milestone: a leader whose session drops while its `CreateRound` commits can race the
-next leader's discovery and leave two unsettled rounds; both are then driven to settlement. Residual
+`round_execution_heads`, and the clock read calls `orvex.unix_micro` (default `PUBLIC` `EXECUTE`). Residual
 risk R-1 (§6, §16) is unchanged: `D` and `T0 + D` stay plaintext at rest until LBT-26.
 
 ## 18. Operator credit grants (`crashctl ledger grant`)

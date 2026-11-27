@@ -70,11 +70,15 @@ func (s *Scheduler) drive(ctx context.Context, r round) error {
 		if lease, err = s.x.ClaimLease(ctx, r.id, s.owner, leaseTTL); err == nil {
 			break
 		}
+		if errors.Is(err, execution.ErrLeaseHeld) {
+			return err
+		}
 		if err := s.failed(ctx, "claim round", err, &failures, "round", roundText(r.id)); err != nil {
 			return err
 		}
 	}
 	s.log.Info("round claimed", "round", roundText(r.id), "fencing_token", lease.FencingToken)
+	defer s.x.Forget(r.id)
 	d := &driver{s: s, round: r, lease: lease}
 	driveCtx, cancel := context.WithCancelCause(ctx)
 	renewed := make(chan struct{})
@@ -262,10 +266,13 @@ func (d *driver) logPhase(p v1.Phase) {
 // it executes at. Admitting it again, after a restart or an unknown
 // outcome, is Duplicate and returns the same sequence.
 func (d *driver) admit(ctx context.Context, next step, from v1.Phase) error {
-	a, err := d.s.seq.Admit(ctx, admission.Request{
+	a, err := d.s.seq.AdmitOwned(ctx, d.lease.FencingToken, admission.Request{
 		RoundID: d.round.id, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber,
 		CommandID: commandID(d.round.id, next.name), Command: next.command,
 	})
+	if errors.Is(err, admission.ErrFenced) {
+		return execution.ErrFenced
+	}
 	refused, isRefused := errors.AsType[*admission.RejectedError](err)
 	switch {
 	case isRefused:

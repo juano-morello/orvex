@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
+
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -31,8 +31,6 @@ var (
 	ErrInvalidConfig = errors.New("lifecycle: invalid config")
 	// errHalted marks a round that stays unsettled until an operator acts.
 	errHalted = errors.New("lifecycle: round halted")
-	// errLeadershipLost: the leadership session ended.
-	errLeadershipLost = errors.New("lifecycle: scheduler leadership lost")
 	// errNotExecuted: every admission through a lifecycle command's own
 	// executed, and the command is still pending.
 	errNotExecuted = errors.New("lifecycle: admitted lifecycle command not executed yet")
@@ -59,9 +57,6 @@ type timing struct {
 	// idle is the discovery interval when there is nothing to drive or
 	// create.
 	idle time.Duration
-	// acquire is the leadership attempt interval of a standby; watch is the
-	// leader's session check interval.
-	acquire, watch time.Duration
 	// maxBackoff caps the wait after consecutive failures.
 	maxBackoff time.Duration
 }
@@ -70,8 +65,6 @@ var defaultTiming = timing{
 	running:    20 * time.Millisecond,
 	waiting:    100 * time.Millisecond,
 	idle:       time.Second,
-	acquire:    time.Second,
-	watch:      time.Second,
 	maxBackoff: 2 * time.Second,
 }
 
@@ -79,7 +72,7 @@ var defaultTiming = timing{
 // its round's phase and the database clock.
 const drainBatch = 64
 
-// Scheduler creates and drives crash/v1 rounds while it leads.
+// Scheduler discovers crash/v1 rounds and drives the ones it claims.
 type Scheduler struct {
 	pool   *pgxpool.Pool
 	x      *execution.Executor
@@ -116,65 +109,13 @@ func New(pool *pgxpool.Pool, x *execution.Executor, seq *admission.Sequencer, cf
 	}, nil
 }
 
-// Run leads and schedules until ctx ends, then returns nil. While another
-// session leads it waits; when its own leadership is lost it tries again.
-// It returns an error wrapping execution.ErrFenced when another engine took
-// over a round it was driving, and any error that is a bug.
+// Run discovers and drives rounds until cancellation or a terminal error.
 func (s *Scheduler) Run(ctx context.Context) error {
-	connConfig := s.pool.Config().ConnConfig
-	for {
-		l, err := s.acquire(ctx, connConfig)
-		if err != nil {
-			return nil
-		}
-		s.log.Info("scheduler leads", "owner", s.owner)
-		err = s.lead(ctx, l)
-		l.release()
-		switch {
-		case ctx.Err() != nil:
-			return nil
-		case errors.Is(err, errLeadershipLost):
-			s.log.Warn("scheduler leadership lost; trying again", "owner", s.owner)
-		default:
-			return err
-		}
+	s.log.Info("scheduler started", "owner", s.owner)
+	err := s.schedule(ctx)
+	if ctx.Err() != nil {
+		return nil
 	}
-}
-
-// acquire waits for the leadership; its only error is ctx's.
-func (s *Scheduler) acquire(ctx context.Context, cfg *pgx.ConnConfig) (*leadership, error) {
-	waiting := false
-	for {
-		l, err := tryLead(ctx, cfg)
-		switch {
-		case l != nil:
-			return l, nil
-		case ctx.Err() != nil:
-			return nil, ctx.Err()
-		case err != nil:
-			s.log.Warn("scheduler leadership attempt failed", "error", Describe(err))
-		case !waiting:
-			s.log.Info("another scheduler leads; waiting")
-			waiting = true
-		}
-		if err := sleepCtx(ctx, s.timing.acquire); err != nil {
-			return nil, err
-		}
-	}
-}
-
-// lead schedules while l holds; it returns errLeadershipLost once the
-// session check fails.
-func (s *Scheduler) lead(ctx context.Context, l *leadership) error {
-	lctx, cancel := context.WithCancelCause(ctx)
-	var wg sync.WaitGroup
-	wg.Go(func() { l.watch(lctx, s.timing.watch, func() { cancel(errLeadershipLost) }) })
-	err := s.schedule(lctx, l)
-	if lctx.Err() != nil && ctx.Err() == nil {
-		err = context.Cause(lctx)
-	}
-	cancel(nil)
-	wg.Wait()
 	return err
 }
 
@@ -195,7 +136,7 @@ const discoverSQL = `SELECT r.round_id, r.created_at_unix_micro FROM orvex.round
 // schedule drives every unsettled round to settlement, oldest first, and
 // creates a round when none is left, CreateRounds is on and no round is
 // halted.
-func (s *Scheduler) schedule(ctx context.Context, l *leadership) error {
+func (s *Scheduler) schedule(ctx context.Context) error {
 	halted := map[[16]byte]bool{}
 	failures := 0
 	for {
@@ -220,8 +161,11 @@ func (s *Scheduler) schedule(ctx context.Context, l *leadership) error {
 			if halted[r.id] {
 				continue
 			}
-			drove = true
 			err := s.drive(ctx, r)
+			if errors.Is(err, execution.ErrLeaseHeld) {
+				continue
+			}
+			drove = true
 			if errors.Is(err, errHalted) {
 				halted[r.id] = true
 				s.log.Error("round halted; it blocks new rounds until an operator resolves it",
@@ -239,7 +183,7 @@ func (s *Scheduler) schedule(ctx context.Context, l *leadership) error {
 				return err
 			}
 		default:
-			if err := s.create(ctx, l); err != nil {
+			if err := s.create(ctx); err != nil {
 				return err
 			}
 		}
@@ -255,10 +199,10 @@ const (
 
 // create draws one round plan and sends it unchanged until CreateRound
 // answers definitely; a commit whose outcome was unknown answers Duplicate
-// on the retry. It checks the leadership before each attempt. If the plan
+// on the retry. Each creation transaction rechecks for an active round. If the plan
 // is lost with the process, discovery adopts the round it may have
 // committed.
-func (s *Scheduler) create(ctx context.Context, l *leadership) error {
+func (s *Scheduler) create(ctx context.Context) error {
 	var createdAt int64
 	for failures := 0; ; {
 		var err error
@@ -279,14 +223,10 @@ func (s *Scheduler) create(ctx context.Context, l *leadership) error {
 		CreatedAtUnixMicro: createdAt,
 	}
 	for failures := 0; ; {
-		if err := l.check(ctx); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return errLeadershipLost
-		}
-		_, err := s.x.CreateRound(ctx, plan)
+		_, err := s.x.CreateRoundIfIdle(ctx, plan)
 		switch {
+		case errors.Is(err, execution.ErrRoundActive):
+			return nil
 		case err == nil:
 			s.log.Info("round created", "round", roundText(id))
 			return nil

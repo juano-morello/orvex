@@ -215,7 +215,7 @@ func TestStandbyTakesOverMidRound(t *testing.T) {
 
 	b := e.scheduler(Config{BettingWindow: 200 * time.Millisecond, CreateRounds: true}, nil, nil)
 	startRun(t, b)
-	waitFor(t, "the standby to wait", func() bool { return strings.Contains(e.logs.String(), "another scheduler leads; waiting") })
+	waitFor(t, "the standby to wait", func() bool { return strings.Count(e.logs.String(), "scheduler started") == 2 })
 	if n := e.rounds(); n != 1 {
 		t.Fatalf("%d rounds with two engines, want 1", n)
 	}
@@ -232,6 +232,7 @@ func TestStandbyTakesOverMidRound(t *testing.T) {
 	if token, owner := e.head(round); token != 2 || owner != b.owner {
 		t.Errorf("head token %d owner %q, want 2 and the standby's %q", token, owner, b.owner)
 	}
+	e.requireAudit(round)
 	if n := e.count(`SELECT count(*) FROM orvex.domain_events WHERE round_id = $1 AND event_type = 'RoundSettled'`, round); n != 1 {
 		t.Errorf("%d RoundSettled events, want 1", n)
 	}
@@ -327,4 +328,34 @@ func TestCreateRoundsOff(t *testing.T) {
 		t.Errorf("%d rounds after the settlement, want 1", n)
 	}
 	e.requireLifecycle(round, 0)
+}
+
+func TestStaleOwnerCannotAdmitLifecycleStep(t *testing.T) {
+	e := newEnv(t)
+	x := roundtest.NewExecutor(t, e.pool, nil, nil)
+	id := e.createRound(x, e.dbNow())
+	first, err := x.ClaimLease(ctx, id, "first", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, "UPDATE orvex.round_execution_heads SET lease_expires_at=clock_timestamp() WHERE round_id=$1", id); err != nil {
+		t.Fatal(err)
+	}
+	winner, err := x.ClaimLease(ctx, id, "second", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := e.scheduler(Config{}, nil, nil)
+	d := driver{s: s, round: round{id: id}, lease: first}
+	step := steps[v1.PhaseBetting]
+	if err := d.admit(ctx, step, v1.PhaseBetting); !errors.Is(err, execution.ErrFenced) {
+		t.Fatalf("old owner's admission = %v", err)
+	}
+	d.lease = winner
+	if err := d.admit(ctx, step, v1.PhaseBetting); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.count("SELECT count(*) FROM orvex.admissions WHERE round_id=$1", id); n != 1 {
+		t.Fatalf("admissions = %d", n)
+	}
 }
