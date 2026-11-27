@@ -14,15 +14,12 @@ import (
 	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
-// TestClaimLeaseTakeover: each claim raises the fencing token by one and
-// names its owner; the previous lease is fenced at its next Transaction B,
-// and the newest lease executes.
 func TestClaimLeaseTakeover(t *testing.T) {
 	_, pool := newDB(t)
 	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := betRound(t, pool, x)
 
-	a, err := x.ClaimLease(ctx, round, "engine-a", time.Minute)
+	a, err := x.ClaimLease(ctx, round, "fixture", time.Minute)
 	if err != nil || a != (execution.Lease{RoundID: round, FencingToken: 1}) {
 		t.Fatalf("ClaimLease a = %+v, %v; want token 1", a, err)
 	}
@@ -34,10 +31,10 @@ func TestClaimLeaseTakeover(t *testing.T) {
 		FROM orvex.round_execution_heads WHERE round_id = $1`, round).Scan(&owner, &expires); err != nil {
 		t.Fatal(err)
 	}
-	if owner != "engine-a" || !expires {
-		t.Errorf("head owner %q, lease in the future %v; want engine-a, true", owner, expires)
+	if owner != "fixture" || !expires {
+		t.Errorf("head owner %q, lease in the future %v; want fixture, true", owner, expires)
 	}
-	if _, err := x.ExecuteNext(ctx, lease(round)); !errors.Is(err, execution.ErrFenced) {
+	if _, err := x.ExecuteNext(ctx, execution.Lease{RoundID: round}); !errors.Is(err, execution.ErrFenced) {
 		t.Fatalf("token 0 after the claim: err = %v, want ErrFenced", err)
 	}
 	if out, err := x.ExecuteNext(ctx, a); err != nil || out.Sequence != 1 {
@@ -45,6 +42,24 @@ func TestClaimLeaseTakeover(t *testing.T) {
 	}
 
 	y := roundtest.NewExecutor(t, pool, nil, nil)
+	if _, err := y.ClaimLease(ctx, round, "engine-b", time.Minute); !errors.Is(err, execution.ErrLeaseHeld) {
+		t.Fatalf("live takeover: %v", err)
+	}
+	if err := y.RenewLease(ctx, a, "engine-b", time.Minute); !errors.Is(err, execution.ErrFenced) {
+		t.Fatalf("renewing another owner's lease: %v", err)
+	}
+	if err := x.RenewLease(ctx, a, "fixture", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	expireLease(t, pool, round)
+	if err := x.RenewLease(ctx, a, "fixture", time.Minute); !errors.Is(err, execution.ErrFenced) {
+		t.Fatalf("expired renewal: %v", err)
+	}
+	before := effects(t, pool, round)
+	if _, err := x.ExecuteNext(ctx, a); !errors.Is(err, execution.ErrFenced) {
+		t.Fatalf("expired write: %v", err)
+	}
+	requireEffects(t, effects(t, pool, round), before)
 	b, err := y.ClaimLease(ctx, round, "engine-b", time.Minute)
 	if err != nil || b.FencingToken != 2 {
 		t.Fatalf("ClaimLease b = %+v, %v; want token 2", b, err)
@@ -56,8 +71,39 @@ func TestClaimLeaseTakeover(t *testing.T) {
 		t.Fatalf("token 2 = %+v, %v; want sequence 2", out, err)
 	}
 
-	if _, err := x.ClaimLease(ctx, newRoundID(), "engine-a", time.Minute); !errors.Is(err, execution.ErrRoundNotFound) {
+	if _, err := x.ClaimLease(ctx, newRoundID(), "fixture", time.Minute); !errors.Is(err, execution.ErrRoundNotFound) {
 		t.Errorf("unknown round: err = %v, want ErrRoundNotFound", err)
+	}
+}
+
+func TestTakeoverHasOneWinner(t *testing.T) {
+	_, pool := newDB(t)
+	x := roundtest.NewExecutor(t, pool, nil, nil)
+	round := betRound(t, pool, x)
+	expireLease(t, pool, round)
+	start := make(chan struct{})
+	type claim struct {
+		lease execution.Lease
+		err   error
+	}
+	results := make(chan claim, 2)
+	for _, owner := range []string{"engine-b", "engine-c"} {
+		go func() { <-start; l, err := x.ClaimLease(ctx, round, owner, time.Minute); results <- claim{l, err} }()
+	}
+	close(start)
+	wins := 0
+	for range 2 {
+		r := <-results
+		switch {
+		case r.err == nil && r.lease.FencingToken == 2:
+			wins++
+		case errors.Is(r.err, execution.ErrLeaseHeld):
+		default:
+			t.Fatalf("unexpected claim %+v: %v", r.lease, r.err)
+		}
+	}
+	if wins != 1 {
+		t.Fatalf("%d winners, want one", wins)
 	}
 }
 
@@ -92,11 +138,11 @@ func TestStateFollowsExecution(t *testing.T) {
 		t.Error("cold-loaded state differs from the cached state")
 	}
 
-	if _, err := x.ClaimLease(ctx, round, "engine-a", time.Minute); err != nil {
+	if _, err := x.ClaimLease(ctx, round, "fixture", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	z := roundtest.NewExecutor(t, pool, nil, nil)
-	if _, err := z.State(ctx, lease(round)); !errors.Is(err, execution.ErrFenced) {
+	if _, err := z.State(ctx, execution.Lease{RoundID: round}); !errors.Is(err, execution.ErrFenced) {
 		t.Errorf("cold load under a superseded token: err = %v, want ErrFenced", err)
 	}
 }

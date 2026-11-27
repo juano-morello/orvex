@@ -49,7 +49,9 @@ func newDB(t *testing.T) (string, *pgxpool.Pool) {
 	return dsn, pgtest.Pool(t, dsn)
 }
 
-func lease(roundID [16]byte) execution.Lease { return execution.Lease{RoundID: roundID} }
+func lease(roundID [16]byte) execution.Lease {
+	return execution.Lease{RoundID: roundID, FencingToken: 1}
+}
 
 var idCounter atomic.Uint64
 
@@ -93,6 +95,7 @@ func createRound(t *testing.T, x *execution.Executor, roundID [16]byte, seed [32
 	}); err != nil {
 		t.Fatalf("CreateRound: %v", err)
 	}
+	roundtest.Claim(t, x, roundID)
 	return cfg
 }
 
@@ -426,18 +429,20 @@ func (r errRow) Scan(...any) error { return r.err }
 // backendPID returns the PID of tx's backend.
 func backendPID(tx pgx.Tx) uint32 { return tx.Conn().PgConn().PID() }
 
-// takeover performs LBT-14's ownership takeover and returns the new token.
-func takeover(t *testing.T, db interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, roundID [16]byte, owner string) int64 {
+// expireLease moves the deadline to the database clock for a deterministic takeover.
+func expireLease(t *testing.T, pool *pgxpool.Pool, round [16]byte) {
 	t.Helper()
-	var token int64
-	if err := db.QueryRow(ctx, `UPDATE orvex.round_execution_heads
-		SET fencing_token = fencing_token + 1, owner_id = $2, lease_expires_at = now() + interval '30 seconds'
-		WHERE round_id = $1 RETURNING fencing_token`, roundID, owner).Scan(&token); err != nil {
-		t.Fatalf("takeover: %v", err)
+	mustExec(t, pool, `UPDATE orvex.round_execution_heads SET lease_expires_at=clock_timestamp() WHERE round_id=$1`, round)
+}
+
+func takeover(t *testing.T, pool *pgxpool.Pool, round [16]byte, owner string) execution.Lease {
+	t.Helper()
+	expireLease(t, pool, round)
+	l, err := roundtest.NewExecutor(t, pool, nil, nil).ClaimLease(ctx, round, owner, execution.MaxLeaseTTL)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return token
+	return l
 }
 
 // --- failingAdapter ---

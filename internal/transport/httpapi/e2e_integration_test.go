@@ -165,7 +165,7 @@ func (s *stack) system(t *testing.T, round [16]byte, cmd v1.Command) (admission.
 
 func (s *stack) drain(t *testing.T, round [16]byte, want int) {
 	t.Helper()
-	if got, err := s.x.Drain(ctx, execution.Lease{RoundID: round}, 100); err != nil || got != want {
+	if got, err := s.x.Drain(ctx, roundtest.Claim(t, s.x, round), 100); err != nil || got != want {
 		t.Fatalf("Drain = %d, %v; want %d", got, err, want)
 	}
 }

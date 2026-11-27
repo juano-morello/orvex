@@ -531,7 +531,7 @@ func (e *Executor) resolveConflict(ctx context.Context, lease Lease, en *entry, 
 	var h headView
 	var processed, token *int64
 	var hash []byte
-	err := e.db.QueryRow(ctx, conflictSQL, lease.RoundID, int64(k)).Scan(&processed, &token, &hash) //nolint:gosec // G115: k = processed_sequence + 1, a bigint round sequence
+	err := e.db.QueryRow(ctx, conflictSQL, lease.RoundID, int64(k)).Scan(&processed, &token, &hash, &h.expired) //nolint:gosec // G115: k = processed_sequence + 1, a bigint round sequence
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
@@ -547,7 +547,7 @@ func (e *Executor) resolveConflict(ctx context.Context, lease Lease, en *entry, 
 			return Outcome{}, stepDone, fmt.Errorf("%w: conflict check: %w", ErrInternal, err)
 		}
 	default:
-		h = headView{found: processed != nil && token != nil, recordHash: hash}
+		h.found, h.recordHash = processed != nil && token != nil, hash
 		if h.found {
 			h.processed, h.token = *processed, *token
 		}
@@ -577,7 +577,7 @@ var (
 )
 
 // conflictSQL is E-7's single-statement conflict check.
-const conflictSQL = `SELECT h.processed_sequence, h.fencing_token, r.hash
+const conflictSQL = `SELECT h.processed_sequence, h.fencing_token, r.hash, COALESCE(h.lease_expires_at <= clock_timestamp(), true)
 	FROM orvex.round_execution_heads h
 	LEFT JOIN orvex.chain_records r ON r.round_id = h.round_id AND r.sequence = $2
 	WHERE h.round_id = $1`

@@ -423,7 +423,7 @@ func TestGrantFundsRound(t *testing.T) {
 		t.Errorf("alice with open holds %+v, want held %d and 1000 available", a, holds["alice"])
 	}
 
-	if _, err := x.Drain(ctx, g.Lease(), 100); err != nil {
+	if _, err := x.Drain(ctx, roundtest.Claim(t, x, g.RoundID), 100); err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
 

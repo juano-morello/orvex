@@ -146,12 +146,12 @@ func TestStaleFencingTokenBeforeStep(t *testing.T) {
 	x := roundtest.NewExecutor(t, pool, nil, nil)
 	round := betRound(t, pool, x)
 	before := effects(t, pool, round)
-	token := takeover(t, pool, round, "engine-b")
+	b := takeover(t, pool, round, "engine-b")
 	if _, err := x.ExecuteNext(ctx, lease(round)); !errors.Is(err, execution.ErrFenced) {
 		t.Fatalf("ExecuteNext with the old token = %v, want ErrFenced", err)
 	}
 	requireEffects(t, effects(t, pool, round), before)
-	out, err := x.ExecuteNext(ctx, execution.Lease{RoundID: round, FencingToken: token})
+	out, err := x.ExecuteNext(ctx, b)
 	if err != nil || out.Sequence != 1 {
 		t.Fatalf("ExecuteNext with the new token = %+v, %v", out, err)
 	}
@@ -159,8 +159,8 @@ func TestStaleFencingTokenBeforeStep(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT fencing_token FROM orvex.chain_records WHERE round_id = $1 AND sequence = 1`, round).Scan(&recordToken); err != nil {
 		t.Fatal(err)
 	}
-	if recordToken != token {
-		t.Errorf("record fencing token %d, want %d", recordToken, token)
+	if recordToken != b.FencingToken {
+		t.Errorf("record fencing token %d, want %d", recordToken, b.FencingToken)
 	}
 }
 
@@ -173,7 +173,12 @@ func TestTakeoverWaitsForCommit(t *testing.T) {
 	paused, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	fdb.set(func(f *faultDB) {
-		f.beforeCommit = func(pgx.Tx) error {
+		f.beforeCommit = func(tx pgx.Tx) error {
+			// The CAS ran while live. Expire the lease under its existing row
+			// lock so the waiting claimant observes expiry when A commits.
+			if _, err := tx.Exec(ctx, `UPDATE orvex.round_execution_heads SET lease_expires_at=clock_timestamp() WHERE round_id=$1`, round); err != nil {
+				return err
+			}
 			once.Do(func() { close(paused) })
 			<-release
 			return nil
@@ -197,15 +202,23 @@ func TestTakeoverWaitsForCommit(t *testing.T) {
 	defer conn.Release()
 	pid := conn.Conn().PgConn().PID()
 	newToken := make(chan int64, 1)
-	go func() { newToken <- takeoverConn(conn.Conn(), round) }()
+	standby := roundtest.NewExecutor(t, conn, nil, nil)
+	go func() {
+		l, err := standby.ClaimLease(ctx, round, "engine-b", execution.MaxLeaseTTL)
+		if err != nil {
+			newToken <- -1
+			return
+		}
+		newToken <- l.FencingToken
+	}()
 	pgtest.WaitUntilBlocked(t, pool, pid)
 	close(release)
 	r := <-done
 	if r.err != nil || r.out.Sequence != 1 {
 		t.Fatalf("ExecuteNext = %+v, %v; want sequence 1 committed before the takeover", r.out, r.err)
 	}
-	if tok := <-newToken; tok != 1 {
-		t.Fatalf("takeover token %d, want 1", tok)
+	if tok := <-newToken; tok != 2 {
+		t.Fatalf("takeover token %d, want 2", tok)
 	}
 	fdb.set(func(f *faultDB) { f.beforeCommit = nil })
 	before := effects(t, pool, round)
@@ -215,36 +228,37 @@ func TestTakeoverWaitsForCommit(t *testing.T) {
 	requireEffects(t, effects(t, pool, round), before)
 }
 
-// takeoverConn runs the takeover on conn and returns the new token, or -1.
-func takeoverConn(conn *pgx.Conn, round [16]byte) int64 {
-	var token int64
-	if err := conn.QueryRow(ctx, `UPDATE orvex.round_execution_heads
-		SET fencing_token = fencing_token + 1, owner_id = 'engine-b', lease_expires_at = now() + interval '30 seconds'
-		WHERE round_id = $1 RETURNING fencing_token`, round).Scan(&token); err != nil {
-		return -1
-	}
-	return token
-}
-
 func TestTakeoverBeforeCompareAndSet(t *testing.T) {
 	_, pool := newDB(t)
 	fdb := &faultDB{pool: pool}
-	x := roundtest.NewExecutor(t, fdb, nil, nil)
-	round := betRound(t, pool, x)
-	before := effects(t, pool, round)
-	var once sync.Once
+	a := roundtest.NewExecutor(t, fdb, nil, nil)
+	b := roundtest.NewExecutor(t, pool, nil, nil)
+	g := roundtest.SeedGolden(t, pool, a, goldenPath("instant-crash"), 0)
+	before := effects(t, pool, g.RoundID)
+	var successor execution.Lease
 	fdb.set(func(f *faultDB) {
 		f.beforeCAS = func(pgx.Tx) error {
-			once.Do(func() { takeover(t, pool, round, "engine-b") })
-			return nil
+			expireLease(t, pool, g.RoundID)
+			var err error
+			successor, err = b.ClaimLease(ctx, g.RoundID, "engine-b", execution.MaxLeaseTTL)
+			return err
 		}
 	})
-	if _, err := x.ExecuteNext(ctx, lease(round)); !errors.Is(err, execution.ErrFenced) {
+	if _, err := a.ExecuteNext(ctx, g.Lease()); !errors.Is(err, execution.ErrFenced) {
 		t.Fatalf("ExecuteNext = %v, want ErrFenced", err)
 	}
-	requireEffects(t, effects(t, pool, round), before)
-	if n := count(t, pool, `SELECT fencing_token FROM orvex.round_execution_heads WHERE round_id = $1`, round); n != 1 {
-		t.Errorf("fencing token %d, want 1", n)
+	requireEffects(t, effects(t, pool, g.RoundID), before)
+	if successor.FencingToken != g.Lease().FencingToken+1 {
+		t.Fatalf("unexpected successor token %d", successor.FencingToken)
+	}
+	if n, err := b.Drain(ctx, successor, len(g.Commands)); err != nil || n != len(g.Commands) {
+		t.Fatalf("successor executed %d of %d commands: %v", n, len(g.Commands), err)
+	}
+	requireGoldenRecords(t, pool, g)
+	requireGoldenLedger(t, pool, g, goldenExpectations["instant-crash"])
+	report, err := verifyExportV2(t, exportHistoryV2(t, pool, g.RoundID))
+	if err != nil || report.Head != g.Hash(len(g.Commands)) {
+		t.Fatalf("audit after takeover: head %v, error %v", report.Head, err)
 	}
 }
 

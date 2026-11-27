@@ -12,7 +12,6 @@ import (
 	v1 "github.com/juano-morello/orvex/internal/game/crash/v1"
 	"github.com/juano-morello/orvex/internal/persistence/postgres/pgtest/roundtest"
 	"github.com/juano-morello/orvex/internal/runtime/admission"
-	"github.com/juano-morello/orvex/internal/runtime/execution"
 )
 
 // TestHarnessObserverAndAudit plays a controlled round with the in-process
@@ -46,7 +45,7 @@ func TestHarnessObserverAndAudit(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Admit %+v: %v", cmd, err)
 			}
-			if _, err := x.Drain(ctx, execution.Lease{RoundID: r.id}, 100); err != nil {
+			if _, err := x.Drain(ctx, roundtest.Claim(t, x, r.id), 100); err != nil {
 				t.Fatalf("Drain: %v", err)
 			}
 			return receipt{RoundID: r.text, Sequence: wireInt(a.Sequence), EffectiveTimeUnixMicro: wireInt(a.EffectiveTimeUnixMicro)} //nolint:gosec // G115: admission sequences are small

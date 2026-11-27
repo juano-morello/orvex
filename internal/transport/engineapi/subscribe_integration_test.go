@@ -120,7 +120,7 @@ func (r *rig) admit(t *testing.T, round [16]byte, cmd v1.Command) error {
 func (r *rig) drain(t *testing.T, round [16]byte, n int) {
 	t.Helper()
 	for n > 0 {
-		got, err := r.x.Drain(context.Background(), execution.Lease{RoundID: round}, n)
+		got, err := r.x.Drain(context.Background(), roundtest.Claim(t, r.x, round), n)
 		if err != nil || got == 0 {
 			t.Fatalf("Drain = %d, %v with %d admissions left", got, err, n)
 		}

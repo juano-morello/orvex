@@ -28,10 +28,21 @@ type Golden struct {
 	Commands []chain.Command
 	// Executor is the executor that created the round.
 	Executor *execution.Executor
+	lease    execution.Lease
 }
 
-// Lease returns the round-creation lease (fencing token 0).
-func (g Golden) Lease() execution.Lease { return execution.Lease{RoundID: g.RoundID} }
+// Claim acquires the test process's lease, or recovers its token on a repeat call.
+func Claim(t testing.TB, x *execution.Executor, round [16]byte) execution.Lease {
+	t.Helper()
+	l, err := x.ClaimLease(context.Background(), round, "fixture", execution.MaxLeaseTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// Lease returns the first claim made by SeedGolden.
+func (g Golden) Lease() execution.Lease { return g.lease }
 
 // Hash returns the link hash of golden record seq.
 func (g Golden) Hash(seq int) chain.Hash { return chain.LinkHash(g.Lines[seq]) }
@@ -94,7 +105,8 @@ func SeedGolden(t testing.TB, db *pgxpool.Pool, x *execution.Executor, path stri
 	if !bytes.Equal(created.Genesis, lines[0]) {
 		t.Fatalf("%s genesis differs:\n got %s\nwant %s", path, created.Genesis, lines[0])
 	}
-	gr := Golden{RoundID: g.RoundID, Header: header, Lines: lines, Executor: x}
+	lease := Claim(t, x, g.RoundID)
+	gr := Golden{lease: lease, RoundID: g.RoundID, Header: header, Lines: lines, Executor: x}
 	funds := map[string]int64{}
 	for _, line := range lines[1:] {
 		rec, err := chain.Decode(line)
