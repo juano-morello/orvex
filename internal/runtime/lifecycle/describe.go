@@ -15,7 +15,7 @@ import (
 
 // describedSentinels are the error classes Describe names, in this order.
 var describedSentinels = []error{
-	ErrInvalidConfig, errHalted, errLeadershipLost,
+	ErrInvalidConfig, errHalted,
 	execution.ErrFenced, execution.ErrFailClosed, execution.ErrCorrupt, execution.ErrUnknownRules,
 	execution.ErrRoundNotFound, execution.ErrRoundExists, execution.ErrInvalidRound, execution.ErrInvalidRequest,
 	execution.ErrLeaseHeld, execution.ErrBusy, execution.ErrUnavailable, execution.ErrInternal,

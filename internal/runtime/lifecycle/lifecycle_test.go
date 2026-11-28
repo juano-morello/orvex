@@ -38,14 +38,6 @@ func TestCommandIDs(t *testing.T) {
 	}
 }
 
-// TestSchedulerLockKey pins the advisory lock key, computed independently
-// with Python's hashlib.
-func TestSchedulerLockKey(t *testing.T) {
-	if schedulerLockKey != 8451814261399681253 {
-		t.Errorf("schedulerLockKey = %d", schedulerLockKey)
-	}
-}
-
 func TestNewRoundIDIsV4(t *testing.T) {
 	a, b := newRoundID(), newRoundID()
 	if a == b {

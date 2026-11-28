@@ -207,14 +207,14 @@ func TestEngineServesAndAdoptsAfterRestart(t *testing.T) {
 }
 
 // TestEngineCreateRoundsOff: with ORVEX_CREATE_ROUNDS=false the engine
-// leads and creates nothing.
+// starts and creates nothing.
 func TestEngineCreateRoundsOff(t *testing.T) {
 	dsn := pgtest.MigratedDatabase(t)
 	pool := pgtest.Pool(t, dsn)
 	env := dbEnv(t, dsn)
 	env[createRoundsEnv] = "false"
 	e := startEngine(t, env, greeter(make(chan served, 1)))
-	waitFor(t, "the scheduler to lead", func() bool { return strings.Contains(e.stderr.String(), "scheduler leads") })
+	waitFor(t, "the scheduler to start", func() bool { return strings.Contains(e.stderr.String(), "scheduler started") })
 	time.Sleep(300 * time.Millisecond)
 	if n := count(t, pool, `SELECT count(*) FROM orvex.rounds`); n != 0 {
 		t.Errorf("%d rounds, want 0", n)

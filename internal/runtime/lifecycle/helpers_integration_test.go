@@ -39,8 +39,6 @@ var testTiming = timing{
 	running:    5 * time.Millisecond,
 	waiting:    10 * time.Millisecond,
 	idle:       20 * time.Millisecond,
-	acquire:    20 * time.Millisecond,
-	watch:      50 * time.Millisecond,
 	maxBackoff: 50 * time.Millisecond,
 }
 

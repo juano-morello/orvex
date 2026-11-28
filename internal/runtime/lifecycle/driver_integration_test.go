@@ -269,6 +269,10 @@ func TestSettledBeforeClaimIsReleased(t *testing.T) {
 		t.Fatalf("first drive: %v", err)
 	}
 
+	// The next claimant can adopt the already settled round once the first lease expires.
+	if _, err := e.pool.Exec(c, "UPDATE orvex.round_execution_heads SET lease_expires_at=clock_timestamp() WHERE round_id=$1", id); err != nil {
+		t.Fatal(err)
+	}
 	db := &loadCounter{DB: e.pool}
 	s := e.scheduler(Config{}, db, nil)
 	if err := s.drive(c, round{id: id, createdAtUnixMicro: created}); err != nil {

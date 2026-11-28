@@ -39,6 +39,14 @@ type Created struct {
 	Duplicate bool
 }
 
+// ErrRoundActive means a scheduler found an unsettled round while creating its successor.
+var ErrRoundActive = errors.New("execution: unsettled round exists")
+
+// CreateRoundIfIdle serializes scheduler genesis transactions and rechecks discovery under the lock.
+func (e *Executor) CreateRoundIfIdle(ctx context.Context, r NewRound) (Created, error) {
+	return e.createRound(ctx, r, true)
+}
+
 // CreateRound writes the round, its sealed secret config and secret close
 // offset, both heads, the genesis record, snapshot 0, the round's
 // round_pool account, the house account (if absent) and the genesis outbox
@@ -49,6 +57,10 @@ type Created struct {
 // different one ErrRoundExists. Neither Created nor any error carries the
 // close offset or the secret config.
 func (e *Executor) CreateRound(ctx context.Context, r NewRound) (Created, error) {
+	return e.createRound(ctx, r, false)
+}
+
+func (e *Executor) createRound(ctx context.Context, r NewRound, onlyIfIdle bool) (Created, error) {
 	// 1. Validate before the database.
 	if r.RoundID == [16]byte{} {
 		return Created{}, fmt.Errorf("%w: nil round id", ErrInvalidRound)
@@ -110,9 +122,13 @@ func (e *Executor) CreateRound(ctx context.Context, r NewRound) (Created, error)
 				return Created{}, contextError(ctx, err)
 			}
 		}
-		res, err := e.insertRound(ctx, r, re, sealed, offset, out)
+		res, err := e.insertRound(ctx, r, re, sealed, offset, out, onlyIfIdle)
 		switch res {
 		case createOK:
+			// A scheduler that creates the round can lose the first claim to a peer.
+			if onlyIfIdle {
+				return out, nil
+			}
 			// 5. Seed the entry, unless this process already holds one.
 			en := e.lock(r.RoundID)
 			if !en.loaded && en.halt == nil {
@@ -123,6 +139,8 @@ func (e *Executor) CreateRound(ctx context.Context, r NewRound) (Created, error)
 			}
 			en.mu.Unlock()
 			return out, nil
+		case createActive:
+			return Created{}, ErrRoundActive
 		case createExists:
 			stored, err := e.storedGenesis(ctx, r.RoundID)
 			switch {
@@ -159,6 +177,7 @@ type createResult uint8
 const (
 	createOK createResult = iota
 	createExists
+	createActive
 	createRetry
 	createBusy
 	createContext
@@ -166,7 +185,7 @@ const (
 )
 
 // insertRound runs the round-creation transaction (E-16 step 3).
-func (e *Executor) insertRound(ctx context.Context, r NewRound, re rulesEntry, sealed sealing.Sealed, offset int64, c Created) (createResult, error) {
+func (e *Executor) insertRound(ctx context.Context, r NewRound, re rulesEntry, sealed sealing.Sealed, offset int64, c Created, onlyIfIdle bool) (createResult, error) {
 	tx, err := e.db.BeginTx(ctx, postgres.ExecutionTxOptionsWithTimeouts(e.cfg.LockTimeout, e.cfg.IdleInTransactionTimeout))
 	if err != nil {
 		return createStatementResult(ctx, err), err
@@ -178,6 +197,21 @@ func (e *Executor) insertRound(ctx context.Context, r NewRound, re rulesEntry, s
 		}
 	}()
 	desc := re.adapter.Descriptor()
+	if onlyIfIdle {
+		// The key is the historical crash scheduler advisory lock.
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(8451814261399681253)"); err != nil {
+			return createStatementResult(ctx, err), err
+		}
+		var active bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT FROM orvex.rounds r WHERE r.game=$1
+            AND r.round_id <> $2 AND NOT EXISTS (SELECT FROM orvex.round_secret_reveals v WHERE v.round_id=r.round_id))`, string(r.Game), r.RoundID).Scan(&active)
+		if err != nil {
+			return createStatementResult(ctx, err), err
+		}
+		if active {
+			return createActive, nil
+		}
+	}
 	house, pool := ledger.HouseAccountID(), ledger.RoundAccountID(r.RoundID)
 	b := &pgx.Batch{}
 	b.Queue(`INSERT INTO orvex.rounds

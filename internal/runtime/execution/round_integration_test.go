@@ -249,3 +249,35 @@ func TestCreateRoundConflict(t *testing.T) {
 		t.Errorf("row counts changed: %v -> %v", counts, got)
 	}
 }
+
+func TestConcurrentSchedulerCreation(t *testing.T) {
+	_, pool := newDB(t)
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, name := range []string{"worked-example", "instant-crash"} {
+		x := roundtest.NewExecutor(t, pool, nil, nil)
+		header, lines := roundtest.ReadGolden(t, goldenPath(name))
+		g, cfg := roundtest.GoldenConfig(t, header, lines[0])
+		go func() {
+			<-start
+			_, err := x.CreateRoundIfIdle(ctx, execution.NewRound{RoundID: g.RoundID, Game: v1.GameID, RulesVersion: v1.RulesVersionNumber, Config: cfg, CreatedAtUnixMicro: g.CreatedAtUnixMicro})
+			results <- err
+		}()
+	}
+	close(start)
+	var created, active int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, execution.ErrRoundActive):
+			active++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if created != 1 || active != 1 {
+		t.Fatalf("created %d, active %d", created, active)
+	}
+}

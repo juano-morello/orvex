@@ -189,6 +189,21 @@ const admitSQL = `SELECT outcome, reason, sequence, effective_time_unix_micro
 // the same Request with the same command ID; never treat these as
 // rejections.
 func (s *Sequencer) Admit(ctx context.Context, req Request) (Admission, error) {
+	return s.admit(ctx, req, 0)
+}
+
+// ErrFenced means the lifecycle driver lost its lease before command admission.
+var ErrFenced = errors.New("admission: stale round lease")
+
+// AdmitOwned checks the driver token while holding the execution head through admission commit.
+func (s *Sequencer) AdmitOwned(ctx context.Context, token int64, req Request) (Admission, error) {
+	if token <= 0 {
+		return Admission{}, ErrFenced
+	}
+	return s.admit(ctx, req, token)
+}
+
+func (s *Sequencer) admit(ctx context.Context, req Request, token int64) (Admission, error) {
 	if req.RoundID == ([16]byte{}) {
 		return Admission{}, fmt.Errorf("%w: nil round id", ErrInvalidRequest)
 	}
@@ -220,7 +235,7 @@ func (s *Sequencer) Admit(ctx context.Context, req Request) (Admission, error) {
 	}
 	defer release()
 
-	call := admitCall{req: req, command: command, cl: cl}
+	call := admitCall{req: req, command: command, cl: cl, token: token}
 	var (
 		lastErr error
 		// ambiguous reports that the last failure was an ambiguous COMMIT
@@ -262,6 +277,7 @@ func notAdmitted(err error) error {
 }
 
 type admitCall struct {
+	token   int64
 	req     Request
 	command []byte
 	cl      Classification
@@ -281,7 +297,11 @@ const (
 
 // attempt runs one Transaction A.
 func (s *Sequencer) attempt(ctx context.Context, c admitCall) (Admission, attemptResult, error) {
-	tx, err := s.db.BeginTx(ctx, postgres.AdmissionTxOptions())
+	opts := postgres.AdmissionTxOptions()
+	if c.token != 0 {
+		opts = postgres.ExecutionTxOptionsWithTimeouts(s.cfg.LockTimeout, s.cfg.IdleInTransactionTimeout)
+	}
+	tx, err := s.db.BeginTx(ctx, opts)
 	if err != nil {
 		return s.callFailed(ctx, c, err)
 	}
@@ -291,6 +311,19 @@ func (s *Sequencer) attempt(ctx context.Context, c admitCall) (Admission, attemp
 			rollback(ctx, tx)
 		}
 	}()
+
+	if c.token != 0 {
+		var live bool
+		err := tx.QueryRow(ctx, `WITH locked AS MATERIALIZED (SELECT fencing_token, lease_expires_at
+            FROM orvex.round_execution_heads WHERE round_id=$1 FOR NO KEY UPDATE)
+            SELECT fencing_token=$2 AND lease_expires_at > clock_timestamp() FROM locked`, c.req.RoundID, c.token).Scan(&live)
+		if err != nil {
+			return s.callFailed(ctx, c, err)
+		}
+		if !live {
+			return Admission{}, attemptDone, ErrFenced
+		}
+	}
 
 	class, _ := c.cl.Class.sqlText()
 	var holdPlayer *string
